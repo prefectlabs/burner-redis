@@ -50,7 +50,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
-- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
+- [x] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 3: Sorted Set Commands
 **Goal**: Users can manage scored members in sorted sets with range queries and range-based removals, enabling Prefect's lease expiration tracking and causal event ordering
@@ -63,7 +63,7 @@ Plans:
   4. User can ZREMRANGEBYSCORE to remove all members within a score range
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [x] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
 - [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 4: Key Expiration
