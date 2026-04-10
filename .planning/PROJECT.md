@@ -12,13 +12,12 @@ A self-hosted Prefect server can start, run flows, and manage state using this l
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] Embedded in-process Redis engine in Rust with Python bindings (PyO3/maturin) — Validated in Phase 1
+- [x] String commands: SET (with EX, PX, NX, XX flags), GET, DELETE, EXISTS — Validated in Phase 1
 
 ### Active
 
-- [ ] Embedded in-process Redis engine in Rust with Python bindings (PyO3/maturin)
 - [ ] Drop-in compatible with `redis.asyncio.Redis` API surface used by Prefect
-- [ ] String commands: SET (with EX, PX, NX, XX flags), GET, DELETE, EXISTS
 - [ ] Hash commands: HSET, HGET, HDEL, HVALS
 - [ ] Set commands: SADD, SMEMBERS, SISMEMBER, SREM
 - [ ] Sorted set commands: ZADD, ZREM, ZRANGE, ZRANGEBYSCORE, ZRANGESTORE, ZREMRANGEBYSCORE
