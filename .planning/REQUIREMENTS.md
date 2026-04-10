@@ -24,17 +24,17 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Hash Commands
 
-- [ ] **HASH-01**: User can HSET one or more field-value pairs on a hash
-- [ ] **HASH-02**: User can HGET a single field from a hash
-- [ ] **HASH-03**: User can HDEL one or more fields from a hash
-- [ ] **HASH-04**: User can HVALS to get all values from a hash
+- [x] **HASH-01**: User can HSET one or more field-value pairs on a hash
+- [x] **HASH-02**: User can HGET a single field from a hash
+- [x] **HASH-03**: User can HDEL one or more fields from a hash
+- [x] **HASH-04**: User can HVALS to get all values from a hash
 
 ### Set Commands
 
-- [ ] **SET-01**: User can SADD members to a set
-- [ ] **SET-02**: User can SMEMBERS to get all members of a set
-- [ ] **SET-03**: User can SISMEMBER to check if a value is in a set
-- [ ] **SET-04**: User can SREM to remove members from a set
+- [x] **SET-01**: User can SADD members to a set
+- [x] **SET-02**: User can SMEMBERS to get all members of a set
+- [x] **SET-03**: User can SISMEMBER to check if a value is in a set
+- [x] **SET-04**: User can SREM to remove members from a set
 
 ### Sorted Set Commands
 
@@ -145,14 +145,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STR-04 | Phase 1 | Complete |
 | STR-05 | Phase 1 | Complete |
 | STR-06 | Phase 1 | Complete |
-| HASH-01 | Phase 2 | Pending |
-| HASH-02 | Phase 2 | Pending |
-| HASH-03 | Phase 2 | Pending |
-| HASH-04 | Phase 2 | Pending |
-| SET-01 | Phase 2 | Pending |
-| SET-02 | Phase 2 | Pending |
-| SET-03 | Phase 2 | Pending |
-| SET-04 | Phase 2 | Pending |
+| HASH-01 | Phase 2 | Complete |
+| HASH-02 | Phase 2 | Complete |
+| HASH-03 | Phase 2 | Complete |
+| HASH-04 | Phase 2 | Complete |
+| SET-01 | Phase 2 | Complete |
+| SET-02 | Phase 2 | Complete |
+| SET-03 | Phase 2 | Complete |
+| SET-04 | Phase 2 | Complete |
 | ZSET-01 | Phase 3 | Pending |
 | ZSET-02 | Phase 3 | Pending |
 | ZSET-03 | Phase 3 | Pending |

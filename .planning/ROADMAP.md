@@ -49,7 +49,7 @@ Plans:
   4. User can SMEMBERS to list all members and SREM to remove specific members
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [x] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
 - [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 3: Sorted Set Commands
