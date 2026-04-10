@@ -36,7 +36,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 2 plans
 Plans:
 - [x] 01-01-PLAN.md — Project scaffold, Store engine, and PyO3 module entry point
-- [ ] 01-02-PLAN.md — String command implementations (SET/GET/DELETE/EXISTS) with Python tests
+- [x] 01-02-PLAN.md — String command implementations (SET/GET/DELETE/EXISTS) with Python tests
 
 ### Phase 2: Hash and Set Commands
 **Goal**: Users can store and retrieve hash field-value pairs and set members, enabling Prefect's lease metadata and dead-letter-queue membership patterns
