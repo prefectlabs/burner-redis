@@ -1,0 +1,19 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "burner-redis"
+version = "0.1.0"
+requires-python = ">=3.9"
+description = "An embedded, in-process Redis-compatible database"
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "maturin"]
+
+[tool.maturin]
+features = ["pyo3/extension-module", "pyo3/abi3-py39"]
+module-name = "burner_redis._burner_redis"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

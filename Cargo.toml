@@ -1,0 +1,16 @@
+[package]
+name = "burner-redis"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "_burner_redis"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py39"] }
+pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
+tokio = { version = "1.51", features = ["rt", "time", "sync"] }
+parking_lot = "0.12.5"
+bytes = "1.11"
+thiserror = "2.0"
