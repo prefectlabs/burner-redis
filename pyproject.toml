@@ -14,6 +14,7 @@ dev = ["pytest", "pytest-asyncio", "maturin"]
 [tool.maturin]
 features = ["pyo3/extension-module", "pyo3/abi3-py39"]
 module-name = "burner_redis._burner_redis"
+python-source = "python"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
