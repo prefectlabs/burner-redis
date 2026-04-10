@@ -9,7 +9,7 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Foundation
 
-- [ ] **FOUND-01**: Rust core library with PyO3 bindings compiles and is importable from Python
+- [x] **FOUND-01**: Rust core library with PyO3 bindings compiles and is importable from Python
 - [ ] **FOUND-02**: Python class implements `redis.asyncio.Redis`-compatible method signatures
 - [ ] **FOUND-03**: All command methods are async-compatible (awaitable from Python)
 
@@ -136,7 +136,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FOUND-01 | Phase 1 | Pending |
+| FOUND-01 | Phase 1 | Complete |
 | FOUND-02 | Phase 1 | Pending |
 | FOUND-03 | Phase 1 | Pending |
 | STR-01 | Phase 1 | Pending |

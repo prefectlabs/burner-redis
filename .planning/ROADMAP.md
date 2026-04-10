@@ -35,7 +35,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. All command methods are async-compatible (awaitable) and match redis.asyncio.Redis method signatures
 **Plans:** 2 plans
 Plans:
-- [ ] 01-01-PLAN.md — Project scaffold, Store engine, and PyO3 module entry point
+- [x] 01-01-PLAN.md — Project scaffold, Store engine, and PyO3 module entry point
 - [ ] 01-02-PLAN.md — String command implementations (SET/GET/DELETE/EXISTS) with Python tests
 
 ### Phase 2: Hash and Set Commands
