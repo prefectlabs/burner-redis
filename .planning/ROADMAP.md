@@ -33,7 +33,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. User can SET a key with NX, XX, EX, and PX flags and observe correct conditional and expiration behavior
   3. User can DELETE one or more keys and verify they no longer exist via EXISTS
   4. All command methods are async-compatible (awaitable) and match redis.asyncio.Redis method signatures
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 01-01-PLAN.md — Project scaffold, Store engine, and PyO3 module entry point
+- [ ] 01-02-PLAN.md — String command implementations (SET/GET/DELETE/EXISTS) with Python tests
 
 ### Phase 2: Hash and Set Commands
 **Goal**: Users can store and retrieve hash field-value pairs and set members, enabling Prefect's lease metadata and dead-letter-queue membership patterns
@@ -128,7 +131,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation and String Commands | 0/0 | Not started | - |
+| 1. Foundation and String Commands | 0/2 | Planning complete | - |
 | 2. Hash and Set Commands | 0/0 | Not started | - |
 | 3. Sorted Set Commands | 0/0 | Not started | - |
 | 4. Key Expiration | 0/0 | Not started | - |
