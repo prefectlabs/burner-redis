@@ -47,7 +47,10 @@ Plans:
   2. User can HDEL fields from a hash and get all remaining values with HVALS
   3. User can SADD members to a set and verify membership with SISMEMBER
   4. User can SMEMBERS to list all members and SREM to remove specific members
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 3: Sorted Set Commands
 **Goal**: Users can manage scored members in sorted sets with range queries and range-based removals, enabling Prefect's lease expiration tracking and causal event ordering
@@ -58,7 +61,10 @@ Plans:
   2. User can ZRANGE by index and ZRANGEBYSCORE by score range, receiving members in sorted order
   3. User can ZRANGESTORE to copy a range result into a new key
   4. User can ZREMRANGEBYSCORE to remove all members within a score range
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 4: Key Expiration
 **Goal**: Keys with TTL expire automatically and are cleaned up, so that locks, leases, and temporary data do not persist indefinitely
@@ -68,7 +74,10 @@ Plans:
   1. A key set with a TTL is no longer accessible after the TTL elapses
   2. Expiration works at both seconds and milliseconds precision
   3. Expired keys are cleaned up via both passive (on-access check) and active (periodic sweep) strategies, preventing memory leaks
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 5: Stream Commands and Consumer Groups
 **Goal**: Users can publish messages to streams, consume them via consumer groups with acknowledgment and recovery, enabling Prefect's entire messaging subsystem
@@ -80,7 +89,10 @@ Plans:
   3. User can XAUTOCLAIM to reclaim idle pending messages from other consumers
   4. User can inspect stream state with XINFO GROUPS and XINFO CONSUMERS
   5. User can XTRIM streams by maxlen or minid to bound memory usage
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 6: Lua Scripting
 **Goal**: Users can execute Lua scripts that atomically operate across multiple keys and data types, enabling Prefect's atomic lease and event operations
@@ -91,7 +103,10 @@ Plans:
   2. User can SCRIPT LOAD to cache a script, then execute it via EVALSHA with the returned SHA1 hash
   3. Lua scripts can call redis.call() and redis.pcall() to execute any supported Redis command, with correct type conversion between Lua and Redis types
   4. User can SCRIPT EXISTS to check whether scripts are cached
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 7: Pipeline and Locking
 **Goal**: Users can batch commands for atomic execution and acquire/release distributed locks with timeout and ownership semantics
@@ -102,7 +117,10 @@ Plans:
   2. Pipeline supports async context manager usage (`async with client.pipeline() as pipe`)
   3. User can acquire a lock with a timeout, verify ownership with a token, and release it
   4. Locks support blocking acquisition and automatic expiration
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 8: Persistence
 **Goal**: Database state survives process restarts through manual flush and automatic shutdown persistence with crash-safe writes
@@ -113,7 +131,10 @@ Plans:
   2. On graceful shutdown, data is automatically persisted without explicit user action
   3. On startup, previously persisted data is automatically restored
   4. Persistence uses crash-safe write-then-rename with fsync so partial writes never corrupt state
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 9: Distribution
 **Goal**: Users can install burner-redis from PyPI with pre-built wheels for their platform without needing a Rust toolchain
@@ -122,7 +143,10 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. Package is published on PyPI and installable via `pip install burner-redis`
   2. Pre-built wheels are available for manylinux (x86_64, aarch64) and macOS (x86_64, arm64)
-**Plans**: TBD
+**Plans:** 2 plans
+Plans:
+- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ## Progress
 
