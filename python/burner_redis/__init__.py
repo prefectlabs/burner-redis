@@ -1,3 +1,22 @@
 from burner_redis._burner_redis import BurnerRedis
 
-__all__ = ["BurnerRedis"]
+
+class ResponseError(Exception):
+    """Redis-compatible WRONGTYPE error.
+
+    Subclasses redis.exceptions.ResponseError if redis package is available.
+    """
+    pass
+
+
+# Try to make it a subclass of redis.exceptions.ResponseError if available
+try:
+    import redis.exceptions
+
+    class ResponseError(redis.exceptions.ResponseError):  # type: ignore[no-redef]
+        """Redis-compatible WRONGTYPE error (subclass of redis.exceptions.ResponseError)."""
+        pass
+except (ImportError, AttributeError):
+    pass
+
+__all__ = ["BurnerRedis", "ResponseError"]
