@@ -528,22 +528,25 @@ __all__ = ["BurnerRedis"]
 | A4 | `parking_lot::RwLock` guard holding across non-await sync code is safe in current-thread Tokio | Pitfall 6 | LOW -- current-thread runtime is cooperative; sync code does not yield |
 | A5 | maturin `module-name` config handles the `_burner_redis` -> `burner_redis` package mapping | Pitfall 5 | MEDIUM -- may need manual python/ directory structure instead |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should we depend on the `redis` Python package for exception types?**
    - What we know: redis-py defines `ResponseError`, `DataError`, etc. Prefect code may catch these by type.
    - What's unclear: Is `redis` always installed alongside `burner-redis`? Should we make it an optional dependency?
    - Recommendation: Define our own exception classes that subclass from `redis.exceptions` if available, with fallback to standalone classes. This avoids a hard dependency while maintaining isinstance compatibility.
+   - **Resolution:** Defer exception class infrastructure to Phase 2 (first phase with multi-type operations where WRONGTYPE can occur). Phase 1 only has string commands — no cross-type collision is possible. When Phase 2 implements hash/set commands, define custom Python exception classes with conditional `redis.exceptions` subclassing.
 
 2. **ExpiryT handling: int only or also timedelta?**
    - What we know: redis-py accepts `Union[int, timedelta]` for `ex` and `px`.
    - What's unclear: Does Prefect pass timedelta objects or always int?
    - Recommendation: Support both from the start. Extract via `PyAny` and handle both `int` and `timedelta` types. The cost is minimal and prevents future breakage.
+   - **Resolution:** Implemented in Plan 01-02 — `extract_expiry` helper handles both `int` and `timedelta` via `PyAny`.
 
 3. **Should operations be truly async or sync-wrapped-in-async?**
    - What we know: In-memory HashMap operations are synchronous and fast (< 1 microsecond). `future_into_py` adds overhead for true async.
    - What's unclear: Whether the overhead of `future_into_py` is acceptable for every operation.
    - Recommendation: Use `future_into_py` for all methods. The overhead is negligible compared to Python/Rust boundary crossing, and it maintains the async contract. This also prepares for Phase 4 (TTL timers) and Phase 8 (persistence) which genuinely need async.
+   - **Resolution:** Implemented in Plan 01-02 — all methods use `future_into_py` for async contract consistency.
 
 ## Environment Availability
 
