@@ -116,9 +116,11 @@ impl BurnerRedis {
 
 #[pymodule]
 fn _burner_redis(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    // CRITICAL: Initialize Tokio current-thread runtime before any future_into_py call.
-    // Default is multi_thread() which competes with Python's GIL.
-    let mut builder = tokio::runtime::Builder::new_current_thread();
+    // Initialize Tokio multi-thread runtime for future_into_py compatibility.
+    // future_into_py spawns tasks on the Tokio runtime; a current-thread runtime
+    // has no background thread to drive spawned futures, causing deadlocks.
+    // The GIL is released before spawning, so multi-thread is safe here.
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);
 
