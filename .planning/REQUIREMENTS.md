@@ -119,11 +119,11 @@ Explicitly excluded. Documented to prevent scope creep.
 
 | Feature | Reason |
 |---------|--------|
-| Network server / Redis wire protocol | Embedded in-process only — no TCP, no RESP parsing |
+| Network server / Redis wire protocol | Embedded in-process only -- no TCP, no RESP parsing |
 | Pub/Sub (SUBSCRIBE/PUBLISH) | Prefect uses Streams, not pub/sub |
-| Cluster/Sentinel support | Single-process embedded — architecturally incompatible |
+| Cluster/Sentinel support | Single-process embedded -- architecturally incompatible |
 | Replication | No multi-node support needed |
-| ACL / Authentication | Runs in-process — no auth boundary to protect |
+| ACL / Authentication | Runs in-process -- no auth boundary to protect |
 | Full Redis command coverage | Only implement what Prefect uses |
 | RDB/AOF persistence format | Custom format is simpler and purpose-built |
 | MULTI/EXEC/WATCH transactions | Prefect uses Lua scripts for atomicity |
@@ -136,65 +136,65 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| FOUND-01 | TBD | Pending |
-| FOUND-02 | TBD | Pending |
-| FOUND-03 | TBD | Pending |
-| STR-01 | TBD | Pending |
-| STR-02 | TBD | Pending |
-| STR-03 | TBD | Pending |
-| STR-04 | TBD | Pending |
-| STR-05 | TBD | Pending |
-| STR-06 | TBD | Pending |
-| HASH-01 | TBD | Pending |
-| HASH-02 | TBD | Pending |
-| HASH-03 | TBD | Pending |
-| HASH-04 | TBD | Pending |
-| SET-01 | TBD | Pending |
-| SET-02 | TBD | Pending |
-| SET-03 | TBD | Pending |
-| SET-04 | TBD | Pending |
-| ZSET-01 | TBD | Pending |
-| ZSET-02 | TBD | Pending |
-| ZSET-03 | TBD | Pending |
-| ZSET-04 | TBD | Pending |
-| ZSET-05 | TBD | Pending |
-| ZSET-06 | TBD | Pending |
-| STRM-01 | TBD | Pending |
-| STRM-02 | TBD | Pending |
-| STRM-03 | TBD | Pending |
-| STRM-04 | TBD | Pending |
-| STRM-05 | TBD | Pending |
-| STRM-06 | TBD | Pending |
-| STRM-07 | TBD | Pending |
-| STRM-08 | TBD | Pending |
-| STRM-09 | TBD | Pending |
-| STRM-10 | TBD | Pending |
-| STRM-11 | TBD | Pending |
-| LUA-01 | TBD | Pending |
-| LUA-02 | TBD | Pending |
-| LUA-03 | TBD | Pending |
-| LUA-04 | TBD | Pending |
-| LUA-05 | TBD | Pending |
-| PIPE-01 | TBD | Pending |
-| PIPE-02 | TBD | Pending |
-| PIPE-03 | TBD | Pending |
-| EXP-01 | TBD | Pending |
-| EXP-02 | TBD | Pending |
-| EXP-03 | TBD | Pending |
-| PERS-01 | TBD | Pending |
-| PERS-02 | TBD | Pending |
-| PERS-03 | TBD | Pending |
-| PERS-04 | TBD | Pending |
-| DIST-01 | TBD | Pending |
-| DIST-02 | TBD | Pending |
-| LOCK-01 | TBD | Pending |
-| LOCK-02 | TBD | Pending |
+| FOUND-01 | Phase 1 | Pending |
+| FOUND-02 | Phase 1 | Pending |
+| FOUND-03 | Phase 1 | Pending |
+| STR-01 | Phase 1 | Pending |
+| STR-02 | Phase 1 | Pending |
+| STR-03 | Phase 1 | Pending |
+| STR-04 | Phase 1 | Pending |
+| STR-05 | Phase 1 | Pending |
+| STR-06 | Phase 1 | Pending |
+| HASH-01 | Phase 2 | Pending |
+| HASH-02 | Phase 2 | Pending |
+| HASH-03 | Phase 2 | Pending |
+| HASH-04 | Phase 2 | Pending |
+| SET-01 | Phase 2 | Pending |
+| SET-02 | Phase 2 | Pending |
+| SET-03 | Phase 2 | Pending |
+| SET-04 | Phase 2 | Pending |
+| ZSET-01 | Phase 3 | Pending |
+| ZSET-02 | Phase 3 | Pending |
+| ZSET-03 | Phase 3 | Pending |
+| ZSET-04 | Phase 3 | Pending |
+| ZSET-05 | Phase 3 | Pending |
+| ZSET-06 | Phase 3 | Pending |
+| STRM-01 | Phase 5 | Pending |
+| STRM-02 | Phase 5 | Pending |
+| STRM-03 | Phase 5 | Pending |
+| STRM-04 | Phase 5 | Pending |
+| STRM-05 | Phase 5 | Pending |
+| STRM-06 | Phase 5 | Pending |
+| STRM-07 | Phase 5 | Pending |
+| STRM-08 | Phase 5 | Pending |
+| STRM-09 | Phase 5 | Pending |
+| STRM-10 | Phase 5 | Pending |
+| STRM-11 | Phase 5 | Pending |
+| LUA-01 | Phase 6 | Pending |
+| LUA-02 | Phase 6 | Pending |
+| LUA-03 | Phase 6 | Pending |
+| LUA-04 | Phase 6 | Pending |
+| LUA-05 | Phase 6 | Pending |
+| PIPE-01 | Phase 7 | Pending |
+| PIPE-02 | Phase 7 | Pending |
+| PIPE-03 | Phase 7 | Pending |
+| EXP-01 | Phase 4 | Pending |
+| EXP-02 | Phase 4 | Pending |
+| EXP-03 | Phase 4 | Pending |
+| PERS-01 | Phase 8 | Pending |
+| PERS-02 | Phase 8 | Pending |
+| PERS-03 | Phase 8 | Pending |
+| PERS-04 | Phase 8 | Pending |
+| DIST-01 | Phase 9 | Pending |
+| DIST-02 | Phase 9 | Pending |
+| LOCK-01 | Phase 7 | Pending |
+| LOCK-02 | Phase 7 | Pending |
 
 **Coverage:**
-- v1 requirements: 48 total
-- Mapped to phases: 0
-- Unmapped: 48
+- v1 requirements: 53 total
+- Mapped to phases: 53
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-10*
-*Last updated: 2026-04-10 after initial definition*
+*Last updated: 2026-04-10 after roadmap creation*
