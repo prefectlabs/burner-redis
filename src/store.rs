@@ -5,6 +5,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 use std::time::{Duration, Instant};
 
+use crate::commands::streams::StreamId;
+
 /// Dual-index sorted set matching Redis's skiplist+dict pattern.
 /// BTreeMap for score-ordered range queries, HashMap for O(1) member->score lookup.
 #[derive(Clone, Debug)]
@@ -56,6 +58,44 @@ impl SortedSet {
     }
 }
 
+/// Redis stream data structure: ordered log of field-value entries keyed by StreamId.
+#[derive(Clone, Debug)]
+pub struct Stream {
+    pub entries: BTreeMap<StreamId, HashMap<Bytes, Bytes>>,
+    pub last_id: StreamId,
+    pub groups: HashMap<Bytes, ConsumerGroup>,
+}
+
+impl Stream {
+    pub fn new() -> Self {
+        Stream {
+            entries: BTreeMap::new(),
+            last_id: (0, 0),
+            groups: HashMap::new(),
+        }
+    }
+}
+
+/// A consumer group within a stream, tracking delivered IDs and per-consumer pending entries.
+#[derive(Clone, Debug)]
+pub struct ConsumerGroup {
+    pub last_delivered_id: StreamId,
+    pub consumers: HashMap<Bytes, Consumer>,
+}
+
+/// A consumer within a consumer group, tracking pending (unacknowledged) entries.
+#[derive(Clone, Debug)]
+pub struct Consumer {
+    pub pending: HashMap<StreamId, PendingEntry>,
+}
+
+/// A pending entry in a consumer's PEL (pending entries list).
+#[derive(Clone, Debug)]
+pub struct PendingEntry {
+    pub delivery_time: Instant,
+    pub delivery_count: u64,
+}
+
 /// Represents the different data types a Redis key can hold.
 #[derive(Clone, Debug)]
 pub enum ValueData {
@@ -67,6 +107,8 @@ pub enum ValueData {
     Set(HashSet<Bytes>),
     /// Redis sorted set value (dual-index: score-ordered + member lookup).
     SortedSet(SortedSet),
+    /// Redis stream value (ordered log of field-value entries).
+    Stream(Stream),
 }
 
 /// A value entry in the store, containing typed data and optional expiration.
@@ -106,6 +148,14 @@ impl ValueEntry {
     pub fn new_sorted_set() -> Self {
         ValueEntry {
             data: ValueData::SortedSet(SortedSet::new()),
+            expires_at: None,
+        }
+    }
+
+    /// Create a new empty Stream-typed entry with no expiration.
+    pub fn new_stream() -> Self {
+        ValueEntry {
+            data: ValueData::Stream(Stream::new()),
             expires_at: None,
         }
     }
@@ -750,6 +800,190 @@ impl Store {
                         zset.remove(member);
                     }
                     Ok(count)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    // ── Stream Operations ─────────────────────────────────────────────
+
+    /// XADD: Appends an entry to a stream. Auto-generates a monotonic ID if none is provided.
+    /// Returns the generated StreamId.
+    /// Returns Err(WrongType) if the key holds a non-stream value.
+    pub fn xadd(
+        &self,
+        key: Bytes,
+        fields: HashMap<Bytes, Bytes>,
+        id: Option<StreamId>,
+    ) -> Result<StreamId, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(&key) {
+            if entry.is_expired() {
+                data.remove(&key);
+            }
+        }
+
+        let entry = data.entry(key).or_insert_with(ValueEntry::new_stream);
+
+        match entry.data {
+            ValueData::Stream(ref mut stream) => {
+                let new_id = match id {
+                    Some(explicit_id) => {
+                        // Validate that explicit ID is greater than last_id
+                        if explicit_id <= stream.last_id {
+                            return Err(StoreError::WrongType); // Redis returns ERR but we reuse WrongType for simplicity
+                        }
+                        explicit_id
+                    }
+                    None => {
+                        // Auto-generate ID using system time
+                        let ms = std::time::SystemTime::UNIX_EPOCH
+                            .elapsed()
+                            .unwrap()
+                            .as_millis() as u64;
+                        if ms > stream.last_id.0 {
+                            (ms, 0)
+                        } else {
+                            // Same or earlier millisecond: increment sequence
+                            (stream.last_id.0, stream.last_id.1 + 1)
+                        }
+                    }
+                };
+
+                stream.entries.insert(new_id, fields);
+                stream.last_id = new_id;
+                Ok(new_id)
+            }
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
+    /// XREAD: Reads entries from one or more streams after the given IDs.
+    /// Returns a vec of (stream_name, entries) pairs for streams that have data.
+    /// Skips streams that don't exist (does not include them in result).
+    /// Returns Err(WrongType) if any key exists but is not a Stream.
+    pub fn xread(
+        &self,
+        keys: &[Bytes],
+        ids: &[StreamId],
+        count: Option<usize>,
+    ) -> Result<Vec<(Bytes, Vec<(StreamId, HashMap<Bytes, Bytes>)>)>, StoreError> {
+        let mut data = self.data.write();
+        let mut result = Vec::new();
+
+        for (key, start_id) in keys.iter().zip(ids.iter()) {
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    continue;
+                }
+            }
+
+            match data.get(key) {
+                None => continue, // Skip non-existent streams
+                Some(entry) => match &entry.data {
+                    ValueData::Stream(stream) => {
+                        // Collect entries with id > start_id
+                        let entries: Vec<(StreamId, HashMap<Bytes, Bytes>)> = stream
+                            .entries
+                            .range((
+                                std::ops::Bound::Excluded(*start_id),
+                                std::ops::Bound::Unbounded,
+                            ))
+                            .take(count.unwrap_or(usize::MAX))
+                            .map(|(id, fields)| (*id, fields.clone()))
+                            .collect();
+
+                        if !entries.is_empty() {
+                            result.push((key.clone(), entries));
+                        }
+                    }
+                    _ => return Err(StoreError::WrongType),
+                },
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// XLEN: Returns the number of entries in a stream.
+    /// Returns 0 if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-stream value.
+    pub fn xlen(&self, key: &Bytes) -> Result<usize, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(0),
+            Some(entry) => match &entry.data {
+                ValueData::Stream(stream) => Ok(stream.entries.len()),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// XTRIM: Trims a stream by maxlen or minid strategy.
+    /// Returns the number of entries removed.
+    /// Returns 0 if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-stream value.
+    pub fn xtrim(
+        &self,
+        key: &Bytes,
+        maxlen: Option<usize>,
+        minid: Option<StreamId>,
+    ) -> Result<usize, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        match data.get_mut(key) {
+            None => Ok(0),
+            Some(entry) => match entry.data {
+                ValueData::Stream(ref mut stream) => {
+                    let mut removed = 0usize;
+
+                    if let Some(max) = maxlen {
+                        while stream.entries.len() > max {
+                            if let Some(first_key) = stream.entries.keys().next().copied() {
+                                stream.entries.remove(&first_key);
+                                removed += 1;
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some(min) = minid {
+                        // Remove all entries with id < minid
+                        let to_remove: Vec<StreamId> = stream
+                            .entries
+                            .range(..min)
+                            .map(|(id, _)| *id)
+                            .collect();
+                        removed += to_remove.len();
+                        for id in to_remove {
+                            stream.entries.remove(&id);
+                        }
+                    }
+
+                    Ok(removed)
                 }
                 _ => Err(StoreError::WrongType),
             },
