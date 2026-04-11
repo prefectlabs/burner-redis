@@ -19,6 +19,15 @@ fn store_err_to_py(e: StoreError) -> PyErr {
         StoreError::WrongType => {
             pyo3::exceptions::PyException::new_err(e.to_string())
         }
+        StoreError::NoGroup(_, _) => {
+            pyo3::exceptions::PyException::new_err(e.to_string())
+        }
+        StoreError::BusyGroup => {
+            pyo3::exceptions::PyException::new_err(e.to_string())
+        }
+        StoreError::KeyNotFound => {
+            pyo3::exceptions::PyException::new_err(e.to_string())
+        }
     }
 }
 

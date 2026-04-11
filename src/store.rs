@@ -172,6 +172,12 @@ impl ValueEntry {
 pub enum StoreError {
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
+    #[error("NOGROUP No such consumer group '{0}' for key name '{1}'")]
+    NoGroup(String, String),
+    #[error("BUSYGROUP Consumer Group name already exists")]
+    BusyGroup,
+    #[error("ERR The XGROUP subcommand requires the key to exist")]
+    KeyNotFound,
 }
 
 pub struct Store {
@@ -1015,6 +1021,266 @@ impl Store {
             data.remove(&key);
         }
         count
+    }
+
+    // ── Consumer Group Operations ─────────────────────────────────────
+
+    /// XGROUP CREATE: Creates a consumer group on a stream.
+    /// If mkstream is true and the key doesn't exist, creates an empty stream.
+    /// The id parameter sets the last-delivered-id for the group.
+    /// A sentinel value of (u64::MAX, u64::MAX) means "use stream's last_id" (i.e., "$").
+    pub fn xgroup_create(
+        &self,
+        key: &Bytes,
+        group: Bytes,
+        id: StreamId,
+        mkstream: bool,
+    ) -> Result<(), StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+            }
+        }
+
+        // If key doesn't exist, check mkstream
+        if !data.contains_key(key) {
+            if mkstream {
+                data.insert(key.clone(), ValueEntry::new_stream());
+            } else {
+                return Err(StoreError::KeyNotFound);
+            }
+        }
+
+        let entry = data.get_mut(key).unwrap();
+        match entry.data {
+            ValueData::Stream(ref mut stream) => {
+                // Check for duplicate group name
+                if stream.groups.contains_key(&group) {
+                    return Err(StoreError::BusyGroup);
+                }
+
+                // Resolve "$" sentinel to stream's last_id
+                let resolved_id = if id == (u64::MAX, u64::MAX) {
+                    stream.last_id
+                } else {
+                    id
+                };
+
+                stream.groups.insert(
+                    group,
+                    ConsumerGroup {
+                        last_delivered_id: resolved_id,
+                        consumers: HashMap::new(),
+                    },
+                );
+                Ok(())
+            }
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
+    /// XGROUP DESTROY: Removes a consumer group from a stream.
+    /// Returns true if the group existed, false otherwise.
+    pub fn xgroup_destroy(&self, key: &Bytes, group: &Bytes) -> Result<bool, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(false);
+            }
+        }
+
+        match data.get_mut(key) {
+            None => Ok(false),
+            Some(entry) => match entry.data {
+                ValueData::Stream(ref mut stream) => Ok(stream.groups.remove(group).is_some()),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// XREADGROUP: Reads entries from streams as a consumer in a group.
+    /// If id is ">" (represented as the string), delivers new messages after group's last_delivered_id.
+    /// Otherwise, returns pending entries for this consumer with id >= the specified id.
+    /// Requires write lock because it mutates PEL and last_delivered_id.
+    pub fn xreadgroup(
+        &self,
+        group: &Bytes,
+        consumer: &Bytes,
+        keys: &[Bytes],
+        ids: &[String],
+        count: Option<usize>,
+    ) -> Result<Vec<(Bytes, Vec<(StreamId, HashMap<Bytes, Bytes>)>)>, StoreError> {
+        let mut data = self.data.write();
+        let mut result = Vec::new();
+
+        for (key, id_str) in keys.iter().zip(ids.iter()) {
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                }
+            }
+
+            // Key must exist
+            let entry = match data.get_mut(key) {
+                None => {
+                    return Err(StoreError::NoGroup(
+                        String::from_utf8_lossy(group.as_ref()).into_owned(),
+                        String::from_utf8_lossy(key.as_ref()).into_owned(),
+                    ));
+                }
+                Some(e) => e,
+            };
+
+            let stream = match entry.data {
+                ValueData::Stream(ref mut s) => s,
+                _ => return Err(StoreError::WrongType),
+            };
+
+            // Get the consumer group
+            let cg = match stream.groups.get_mut(group) {
+                None => {
+                    return Err(StoreError::NoGroup(
+                        String::from_utf8_lossy(group.as_ref()).into_owned(),
+                        String::from_utf8_lossy(key.as_ref()).into_owned(),
+                    ));
+                }
+                Some(g) => g,
+            };
+
+            if id_str == ">" {
+                // Deliver NEW messages (entries after group.last_delivered_id)
+                let entries: Vec<(StreamId, HashMap<Bytes, Bytes>)> = stream
+                    .entries
+                    .range((
+                        std::ops::Bound::Excluded(cg.last_delivered_id),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .take(count.unwrap_or(usize::MAX))
+                    .map(|(id, fields)| (*id, fields.clone()))
+                    .collect();
+
+                // Update last_delivered_id and add to consumer's PEL
+                if !entries.is_empty() {
+                    // Auto-create consumer if not present
+                    let consumer_entry = cg
+                        .consumers
+                        .entry(consumer.clone())
+                        .or_insert_with(|| Consumer {
+                            pending: HashMap::new(),
+                        });
+
+                    for (entry_id, _) in &entries {
+                        cg.last_delivered_id = *entry_id;
+                        consumer_entry.pending.insert(
+                            *entry_id,
+                            PendingEntry {
+                                delivery_time: Instant::now(),
+                                delivery_count: 1,
+                            },
+                        );
+                    }
+
+                    result.push((key.clone(), entries));
+                }
+            } else {
+                // Return pending entries for this consumer with id >= parsed id
+                let start_id: StreamId = if id_str == "0" || id_str == "0-0" {
+                    (0, 0)
+                } else {
+                    crate::commands::streams::parse_stream_id(id_str).unwrap_or((0, 0))
+                };
+
+                // Get consumer's pending entries
+                let consumer_entry = match cg.consumers.get(consumer) {
+                    Some(c) => c,
+                    None => {
+                        // Consumer doesn't exist yet, no pending entries
+                        continue;
+                    }
+                };
+
+                // Collect pending entry IDs >= start_id that still exist in the stream
+                let mut pending_ids: Vec<StreamId> = consumer_entry
+                    .pending
+                    .keys()
+                    .filter(|id| **id >= start_id)
+                    .copied()
+                    .collect();
+                pending_ids.sort();
+
+                if let Some(max) = count {
+                    pending_ids.truncate(max);
+                }
+
+                let entries: Vec<(StreamId, HashMap<Bytes, Bytes>)> = pending_ids
+                    .into_iter()
+                    .filter_map(|id| {
+                        stream.entries.get(&id).map(|fields| (id, fields.clone()))
+                    })
+                    .collect();
+
+                if !entries.is_empty() {
+                    result.push((key.clone(), entries));
+                }
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// XACK: Acknowledges messages in a consumer group, removing them from the PEL.
+    /// Returns the count of messages that were actually acknowledged (removed from PEL).
+    pub fn xack(
+        &self,
+        key: &Bytes,
+        group: &Bytes,
+        ids: &[StreamId],
+    ) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Ok(0),
+            Some(e) => e,
+        };
+
+        let stream = match entry.data {
+            ValueData::Stream(ref mut s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        // Get consumer group or return 0 if doesn't exist (Redis behavior)
+        let cg = match stream.groups.get_mut(group) {
+            None => return Ok(0),
+            Some(g) => g,
+        };
+
+        let mut count = 0i64;
+        for id in ids {
+            // Iterate all consumers to find and remove the pending entry
+            for consumer in cg.consumers.values_mut() {
+                if consumer.pending.remove(id).is_some() {
+                    count += 1;
+                    break; // Each id can only be in one consumer's PEL
+                }
+            }
+        }
+
+        Ok(count)
     }
 }
 
