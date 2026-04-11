@@ -1,4 +1,5 @@
 from burner_redis._burner_redis import BurnerRedis
+from burner_redis.pipeline import Pipeline
 
 
 class ResponseError(Exception):
@@ -19,4 +20,12 @@ try:
 except (ImportError, AttributeError):
     pass
 
-__all__ = ["BurnerRedis", "ResponseError"]
+
+def _pipeline(self):
+    """Create a Pipeline for batched command execution."""
+    return Pipeline(self)
+
+
+BurnerRedis.pipeline = _pipeline
+
+__all__ = ["BurnerRedis", "Pipeline", "ResponseError"]
