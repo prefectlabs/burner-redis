@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
+use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 use std::time::{Duration, Instant};
@@ -1565,6 +1566,283 @@ impl Store {
         // Acquire write lock on data -- held for entire script execution
         let mut data = self.data.write();
         LuaEngine::execute(&script, keys, args, &mut *data)
+    }
+}
+
+// ── Persistable Snapshot Types ──────────────────────────────────────────
+// These mirror the runtime Store types but use serde-friendly primitives:
+// - Vec<u8> instead of Bytes (which has no native Serialize/Deserialize)
+// - Option<u64> (ms remaining) instead of Option<Instant> (non-serializable)
+// - u64 delivery_count only instead of PendingEntry with Instant
+
+/// Persistable version of the entire store snapshot.
+#[derive(Serialize, Deserialize)]
+pub struct PersistableStore {
+    pub entries: Vec<(Vec<u8>, PersistableEntry)>,
+    pub scripts: Vec<(String, String)>,
+}
+
+/// Persistable version of a ValueEntry.
+#[derive(Serialize, Deserialize)]
+pub struct PersistableEntry {
+    pub data: PersistableValueData,
+    /// TTL remaining in milliseconds. None = no expiry.
+    pub ttl_remaining_ms: Option<u64>,
+}
+
+/// Persistable version of ValueData.
+#[derive(Serialize, Deserialize)]
+pub enum PersistableValueData {
+    String(Vec<u8>),
+    Hash(Vec<(Vec<u8>, Vec<u8>)>),
+    Set(Vec<Vec<u8>>),
+    SortedSet(PersistableSortedSet),
+    Stream(PersistableStream),
+}
+
+/// Persistable version of SortedSet.
+#[derive(Serialize, Deserialize)]
+pub struct PersistableSortedSet {
+    /// (score, member) pairs
+    pub members: Vec<(f64, Vec<u8>)>,
+}
+
+/// Persistable version of Stream.
+#[derive(Serialize, Deserialize)]
+pub struct PersistableStream {
+    /// Stream entries: (id, fields) where id is (ms, seq) and fields are (key, value) pairs
+    pub entries: Vec<((u64, u64), Vec<(Vec<u8>, Vec<u8>)>)>,
+    pub last_id: (u64, u64),
+    pub groups: Vec<(Vec<u8>, PersistableConsumerGroup)>,
+}
+
+/// Persistable version of ConsumerGroup.
+#[derive(Serialize, Deserialize)]
+pub struct PersistableConsumerGroup {
+    pub last_delivered_id: (u64, u64),
+    pub consumers: Vec<(Vec<u8>, PersistableConsumer)>,
+}
+
+/// Persistable version of Consumer.
+#[derive(Serialize, Deserialize)]
+pub struct PersistableConsumer {
+    /// Pending entries: (stream_id, delivery_count). delivery_time is reset to now() on load.
+    pub pending: Vec<((u64, u64), u64)>,
+}
+
+// ── Snapshot Conversion: Runtime -> Persistable ─────────────────────────
+
+impl PersistableStore {
+    /// Create a persistable snapshot from the runtime Store.
+    /// Filters out expired entries. Acquires read locks.
+    pub fn from_store(store: &Store) -> Self {
+        let data = store.data.read();
+        let scripts = store.scripts.read();
+
+        let now = Instant::now();
+        let entries: Vec<(Vec<u8>, PersistableEntry)> = data
+            .iter()
+            .filter(|(_, entry)| !entry.is_expired())
+            .map(|(key, entry)| {
+                let ttl_remaining_ms = entry.expires_at.and_then(|exp| {
+                    if exp > now {
+                        Some(exp.duration_since(now).as_millis() as u64)
+                    } else {
+                        None // already expired edge case
+                    }
+                });
+
+                let pdata = match &entry.data {
+                    ValueData::String(b) => PersistableValueData::String(b.to_vec()),
+                    ValueData::Hash(map) => PersistableValueData::Hash(
+                        map.iter()
+                            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                            .collect(),
+                    ),
+                    ValueData::Set(set) => {
+                        PersistableValueData::Set(set.iter().map(|m| m.to_vec()).collect())
+                    }
+                    ValueData::SortedSet(ss) => {
+                        PersistableValueData::SortedSet(PersistableSortedSet {
+                            members: ss
+                                .by_member
+                                .iter()
+                                .map(|(m, &s)| (s, m.to_vec()))
+                                .collect(),
+                        })
+                    }
+                    ValueData::Stream(stream) => {
+                        PersistableValueData::Stream(PersistableStream {
+                            entries: stream
+                                .entries
+                                .iter()
+                                .map(|(&id, fields)| {
+                                    let f: Vec<(Vec<u8>, Vec<u8>)> = fields
+                                        .iter()
+                                        .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                                        .collect();
+                                    (id, f)
+                                })
+                                .collect(),
+                            last_id: stream.last_id,
+                            groups: stream
+                                .groups
+                                .iter()
+                                .map(|(name, group)| {
+                                    (
+                                        name.to_vec(),
+                                        PersistableConsumerGroup {
+                                            last_delivered_id: group.last_delivered_id,
+                                            consumers: group
+                                                .consumers
+                                                .iter()
+                                                .map(|(cname, consumer)| {
+                                                    (
+                                                        cname.to_vec(),
+                                                        PersistableConsumer {
+                                                            pending: consumer
+                                                                .pending
+                                                                .iter()
+                                                                .map(|(&sid, pe)| {
+                                                                    (sid, pe.delivery_count)
+                                                                })
+                                                                .collect(),
+                                                        },
+                                                    )
+                                                })
+                                                .collect(),
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        })
+                    }
+                };
+
+                (key.to_vec(), PersistableEntry {
+                    data: pdata,
+                    ttl_remaining_ms,
+                })
+            })
+            .collect();
+
+        let scripts_vec: Vec<(String, String)> = scripts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        PersistableStore {
+            entries,
+            scripts: scripts_vec,
+        }
+    }
+
+    /// Restore runtime data from a persistable snapshot.
+    /// Returns (data_map, scripts_map) ready to be loaded into a Store.
+    pub fn into_runtime(self) -> (HashMap<Bytes, ValueEntry>, HashMap<String, String>) {
+        let now = Instant::now();
+
+        let mut data = HashMap::new();
+        for (key_bytes, pentry) in self.entries {
+            let expires_at = pentry.ttl_remaining_ms.and_then(|ms| {
+                if ms == 0 {
+                    None // already expired at save time edge case
+                } else {
+                    Some(now + Duration::from_millis(ms))
+                }
+            });
+
+            let vdata = match pentry.data {
+                PersistableValueData::String(b) => ValueData::String(Bytes::from(b)),
+                PersistableValueData::Hash(pairs) => {
+                    let map: HashMap<Bytes, Bytes> = pairs
+                        .into_iter()
+                        .map(|(k, v)| (Bytes::from(k), Bytes::from(v)))
+                        .collect();
+                    ValueData::Hash(map)
+                }
+                PersistableValueData::Set(members) => {
+                    let set: HashSet<Bytes> =
+                        members.into_iter().map(Bytes::from).collect();
+                    ValueData::Set(set)
+                }
+                PersistableValueData::SortedSet(pss) => {
+                    let mut ss = SortedSet::new();
+                    for (score, member_bytes) in pss.members {
+                        let member = Bytes::from(member_bytes);
+                        ss.by_score
+                            .insert((OrderedFloat(score), member.clone()), ());
+                        ss.by_member.insert(member, score);
+                    }
+                    ValueData::SortedSet(ss)
+                }
+                PersistableValueData::Stream(pstream) => {
+                    let entries: BTreeMap<StreamId, HashMap<Bytes, Bytes>> = pstream
+                        .entries
+                        .into_iter()
+                        .map(|(id, fields)| {
+                            let fmap: HashMap<Bytes, Bytes> = fields
+                                .into_iter()
+                                .map(|(k, v)| (Bytes::from(k), Bytes::from(v)))
+                                .collect();
+                            (id, fmap)
+                        })
+                        .collect();
+
+                    let groups: HashMap<Bytes, ConsumerGroup> = pstream
+                        .groups
+                        .into_iter()
+                        .map(|(name, pgroup)| {
+                            let consumers: HashMap<Bytes, Consumer> = pgroup
+                                .consumers
+                                .into_iter()
+                                .map(|(cname, pconsumer)| {
+                                    let pending: HashMap<StreamId, PendingEntry> = pconsumer
+                                        .pending
+                                        .into_iter()
+                                        .map(|(sid, count)| {
+                                            (
+                                                sid,
+                                                PendingEntry {
+                                                    delivery_time: now, // reset to now on load
+                                                    delivery_count: count,
+                                                },
+                                            )
+                                        })
+                                        .collect();
+                                    (Bytes::from(cname), Consumer { pending })
+                                })
+                                .collect();
+                            (
+                                Bytes::from(name),
+                                ConsumerGroup {
+                                    last_delivered_id: pgroup.last_delivered_id,
+                                    consumers,
+                                },
+                            )
+                        })
+                        .collect();
+
+                    ValueData::Stream(Stream {
+                        entries,
+                        last_id: pstream.last_id,
+                        groups,
+                    })
+                }
+            };
+
+            data.insert(
+                Bytes::from(key_bytes),
+                ValueEntry {
+                    data: vdata,
+                    expires_at,
+                },
+            );
+        }
+
+        let scripts: HashMap<String, String> = self.scripts.into_iter().collect();
+
+        (data, scripts)
     }
 }
 
