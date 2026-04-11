@@ -107,8 +107,8 @@ Plans:
   4. User can SCRIPT EXISTS to check whether scripts are cached
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
-- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
+- [ ] 06-01-PLAN.md — Lua VM setup, redis.call()/redis.pcall() dispatch, script cache, and Store eval/evalsha methods
+- [ ] 06-02-PLAN.md — Python async bindings (EVAL, EVALSHA, SCRIPT LOAD, SCRIPT EXISTS) with comprehensive pytest suite
 
 ### Phase 7: Pipeline and Locking
 **Goal**: Users can batch commands for atomic execution and acquire/release distributed locks with timeout and ownership semantics
@@ -162,7 +162,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 3. Sorted Set Commands | 0/0 | Not started | - |
 | 4. Key Expiration | 0/0 | Not started | - |
 | 5. Stream Commands and Consumer Groups | 0/0 | Not started | - |
-| 6. Lua Scripting | 0/0 | Not started | - |
+| 6. Lua Scripting | 0/2 | Planning complete | - |
 | 7. Pipeline and Locking | 0/0 | Not started | - |
 | 8. Persistence | 0/0 | Not started | - |
 | 9. Distribution | 0/0 | Not started | - |
