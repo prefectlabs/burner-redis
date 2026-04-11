@@ -47,10 +47,10 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Stream Commands
 
-- [ ] **STRM-01**: User can XADD entries to a stream with auto-generated IDs
-- [ ] **STRM-02**: User can XREAD entries from one or more streams
-- [ ] **STRM-03**: User can XLEN to get the number of entries in a stream
-- [ ] **STRM-04**: User can XTRIM a stream by maxlen or minid
+- [x] **STRM-01**: User can XADD entries to a stream with auto-generated IDs
+- [x] **STRM-02**: User can XREAD entries from one or more streams
+- [x] **STRM-03**: User can XLEN to get the number of entries in a stream
+- [x] **STRM-04**: User can XTRIM a stream by maxlen or minid
 - [ ] **STRM-05**: User can XGROUP CREATE to create a consumer group
 - [ ] **STRM-06**: User can XGROUP DESTROY to remove a consumer group
 - [ ] **STRM-07**: User can XREADGROUP to read as a consumer in a group
@@ -159,10 +159,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | ZSET-04 | Phase 3 | Complete |
 | ZSET-05 | Phase 3 | Complete |
 | ZSET-06 | Phase 3 | Complete |
-| STRM-01 | Phase 5 | Pending |
-| STRM-02 | Phase 5 | Pending |
-| STRM-03 | Phase 5 | Pending |
-| STRM-04 | Phase 5 | Pending |
+| STRM-01 | Phase 5 | Complete |
+| STRM-02 | Phase 5 | Complete |
+| STRM-03 | Phase 5 | Complete |
+| STRM-04 | Phase 5 | Complete |
 | STRM-05 | Phase 5 | Pending |
 | STRM-06 | Phase 5 | Pending |
 | STRM-07 | Phase 5 | Pending |

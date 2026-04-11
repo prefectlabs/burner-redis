@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 04-02-PLAN.md
-last_updated: "2026-04-11T01:24:25.653Z"
+status: executing
+stopped_at: Completed 05-01-PLAN.md
+last_updated: "2026-04-11T01:49:29.058Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
   completed_phases: 4
-  total_plans: 8
-  completed_plans: 8
-  percent: 100
+  total_plans: 11
+  completed_plans: 9
+  percent: 82
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 04 — Key Expiration
+**Current focus:** Phase 05 — Stream Commands and Consumer Groups
 
 ## Current Position
 
-Phase: 04 (Key Expiration) — EXECUTING
-Plan: 2 of 2
-Status: Phase complete — ready for verification
+Phase: 05 (Stream Commands and Consumer Groups) — EXECUTING
+Plan: 2 of 3
+Status: Ready to execute
 Last activity: 2026-04-11
 
 Progress: [░░░░░░░░░░] 0%
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 6
+- Total plans completed: 8
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -47,6 +47,7 @@ Progress: [░░░░░░░░░░] 0%
 | 01 | 2 | - | - |
 | 02 | 2 | - | - |
 | 03 | 2 | - | - |
+| 04 | 2 | - | - |
 
 **Recent Trend:**
 
@@ -62,6 +63,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P02 | 5min | 2 tasks | 3 files |
 | Phase 04 P01 | 3min | 2 tasks | 2 files |
 | Phase 04 P02 | 3min | 2 tasks | 1 files |
+| Phase 05 P01 | 5min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -87,6 +89,9 @@ Recent decisions affecting current work:
 - [Phase 04]: Single write lock for sweep_expired() instead of read-then-write to avoid race conditions and improve efficiency
 - [Phase 04]: Background Tokio task with Weak<Store> reference for self-terminating active expiration sweep at 100ms interval
 - [Phase 04]: Focused expiration tests on string keys only since SET is the only command supporting EX/PX; hash/set/sorted-set TTL requires future EXPIRE command
+- [Phase 05]: Used BTreeMap<(u64,u64), HashMap<Bytes,Bytes>> for stream entries -- ordered insertion and efficient range queries for XREAD
+- [Phase 05]: Scaffolded ConsumerGroup/Consumer/PendingEntry structs in Plan 01 to avoid ValueData enum changes in Plan 02
+- [Phase 05]: XREAD returns None for empty results and skips non-existent streams, matching redis-py behavior
 
 ### Pending Todos
 
@@ -98,6 +103,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T01:24:25.648Z
-Stopped at: Completed 04-02-PLAN.md
+Last session: 2026-04-11T01:49:29.055Z
+Stopped at: Completed 05-01-PLAN.md
 Resume file: None
