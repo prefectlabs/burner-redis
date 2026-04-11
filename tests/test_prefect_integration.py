@@ -13,6 +13,8 @@ import time
 import pytest
 from burner_redis import BurnerRedis
 
+pytestmark = pytest.mark.integration
+
 
 # =============================================================================
 # 1. Sorted Set Queue (Docket's delayed task scheduling)

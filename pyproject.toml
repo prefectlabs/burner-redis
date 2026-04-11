@@ -35,3 +35,5 @@ python-source = "python"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = ["integration: integration tests that simulate Prefect usage"]
+addopts = "-m 'not integration'"
