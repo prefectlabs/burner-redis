@@ -122,7 +122,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 07-01-PLAN.md — Pipeline class with command buffering, batch execution, and async context manager
-- [ ] 07-02-PLAN.md — Lock class with token-based ownership, blocking acquire, and timeout expiration
+- [x] 07-02-PLAN.md — Lock class with token-based ownership, blocking acquire, and timeout expiration
 
 ### Phase 8: Persistence
 **Goal**: Database state survives process restarts through manual flush and automatic shutdown persistence with crash-safe writes

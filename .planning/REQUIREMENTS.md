@@ -93,8 +93,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Locking
 
-- [ ] **LOCK-01**: User can acquire and release locks with Lock/AsyncLock semantics
-- [ ] **LOCK-02**: Locks support timeout, blocking, and token-based ownership
+- [x] **LOCK-01**: User can acquire and release locks with Lock/AsyncLock semantics
+- [x] **LOCK-02**: Locks support timeout, blocking, and token-based ownership
 
 ## v2 Requirements
 
@@ -187,8 +187,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERS-04 | Phase 8 | Pending |
 | DIST-01 | Phase 9 | Pending |
 | DIST-02 | Phase 9 | Pending |
-| LOCK-01 | Phase 7 | Pending |
-| LOCK-02 | Phase 7 | Pending |
+| LOCK-01 | Phase 7 | Complete |
+| LOCK-02 | Phase 7 | Complete |
 
 **Coverage:**
 - v1 requirements: 53 total
