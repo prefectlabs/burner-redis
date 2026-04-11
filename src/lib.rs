@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict};
 use std::collections::HashSet as StdHashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 mod store;
 mod commands;
@@ -29,9 +30,25 @@ pub struct BurnerRedis {
 impl BurnerRedis {
     #[new]
     fn new() -> Self {
-        BurnerRedis {
-            store: Arc::new(Store::new()),
-        }
+        let store = Arc::new(Store::new());
+
+        // Spawn background sweep task for active expiration (EXP-03).
+        // Uses Weak<Store> so the task stops when all BurnerRedis instances are dropped.
+        let weak_store = Arc::downgrade(&store);
+        pyo3_async_runtimes::tokio::get_runtime().spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                match weak_store.upgrade() {
+                    Some(store) => {
+                        store.sweep_expired();
+                    }
+                    None => break, // Store dropped, stop sweeping
+                }
+            }
+        });
+
+        BurnerRedis { store }
     }
 
     /// SET command matching redis.asyncio.Redis.set() signature.
