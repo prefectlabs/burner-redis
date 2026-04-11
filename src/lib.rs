@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyCFunction, PyDict, PyTuple};
 use std::collections::HashSet as StdHashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,13 +56,46 @@ fn store_err_to_py(e: StoreError) -> PyErr {
 #[pyclass]
 pub struct BurnerRedis {
     store: Arc<Store>,
+    persistence_path: Option<String>,
 }
 
 #[pymethods]
 impl BurnerRedis {
     #[new]
-    fn new() -> Self {
+    #[pyo3(signature = (persistence_path=None))]
+    fn new(py: Python<'_>, persistence_path: Option<String>) -> PyResult<Self> {
         let store = Arc::new(Store::new());
+
+        // If persistence_path is set and file exists, restore data
+        if let Some(ref path) = persistence_path {
+            match store.load_into(path) {
+                Ok(true) => {
+                    // Data restored successfully
+                }
+                Ok(false) => {
+                    // File doesn't exist -- start empty (normal for first run)
+                }
+                Err(e) => {
+                    // Corrupt file -- warn and start empty
+                    eprintln!("burner-redis: failed to load persistence file '{}': {}. Starting with empty store.", path, e);
+                }
+            }
+
+            // Register atexit handler to save on graceful shutdown (T-08-06: catch exceptions silently)
+            let store_for_atexit = store.clone();
+            let path_for_atexit = path.clone();
+            let save_fn = PyCFunction::new_closure(
+                py,
+                None,
+                None,
+                move |_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>| -> PyResult<()> {
+                    let _ = store_for_atexit.save(&path_for_atexit);
+                    Ok(())
+                },
+            )?;
+            let atexit = py.import("atexit")?;
+            atexit.call_method1("register", (save_fn,))?;
+        }
 
         // Spawn background sweep task for active expiration (EXP-03).
         // Uses Weak<Store> so the task stops when all BurnerRedis instances are dropped.
@@ -80,7 +113,39 @@ impl BurnerRedis {
             }
         });
 
-        BurnerRedis { store }
+        Ok(BurnerRedis { store, persistence_path })
+    }
+
+    /// Save the store to disk. Uses persistence_path if set, otherwise defaults to "burner-redis.dat".
+    /// An explicit path argument overrides both.
+    #[pyo3(signature = (path=None))]
+    fn save<'py>(&self, py: Python<'py>, path: Option<String>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let save_path = path
+            .or_else(|| self.persistence_path.clone())
+            .unwrap_or_else(|| "burner-redis.dat".to_string());
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.save(&save_path).map_err(|e| {
+                pyo3::exceptions::PyIOError::new_err(e.to_string())
+            })?;
+            Ok(true)
+        })
+    }
+
+    /// Synchronous save for atexit handler. Saves to persistence_path or "burner-redis.dat".
+    fn _save_sync(&self) -> PyResult<bool> {
+        let path = self.persistence_path.as_deref()
+            .unwrap_or("burner-redis.dat");
+        self.store.save(path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(e.to_string())
+        })?;
+        Ok(true)
+    }
+
+    /// Read-only property: the persistence path configured at construction, or None.
+    #[getter]
+    fn persistence_path(&self) -> Option<String> {
+        self.persistence_path.clone()
     }
 
     /// SET command matching redis.asyncio.Redis.set() signature.
