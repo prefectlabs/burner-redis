@@ -76,8 +76,8 @@ Plans:
   3. Expired keys are cleaned up via both passive (on-access check) and active (periodic sweep) strategies, preventing memory leaks
 **Plans:** 2 plans
 Plans:
-- [x] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
-- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
+- [ ] 04-01-PLAN.md — Add sweep_expired() to Store engine and spawn background Tokio sweep task
+- [ ] 04-02-PLAN.md — Python integration tests for passive and active expiration across all data types
 
 ### Phase 5: Stream Commands and Consumer Groups
 **Goal**: Users can publish messages to streams, consume them via consumer groups with acknowledgment and recovery, enabling Prefect's entire messaging subsystem
