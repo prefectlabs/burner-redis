@@ -107,7 +107,7 @@ Plans:
   4. User can SCRIPT EXISTS to check whether scripts are cached
 **Plans:** 2 plans
 Plans:
-- [ ] 06-01-PLAN.md — Lua VM setup, redis.call()/redis.pcall() dispatch, script cache, and Store eval/evalsha methods
+- [x] 06-01-PLAN.md — Lua VM setup, redis.call()/redis.pcall() dispatch, script cache, and Store eval/evalsha methods
 - [ ] 06-02-PLAN.md — Python async bindings (EVAL, EVALSHA, SCRIPT LOAD, SCRIPT EXISTS) with comprehensive pytest suite
 
 ### Phase 7: Pipeline and Locking

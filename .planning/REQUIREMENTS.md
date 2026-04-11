@@ -63,9 +63,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 - [ ] **LUA-01**: User can EVAL a Lua script with KEYS and ARGV arrays
 - [ ] **LUA-02**: User can EVALSHA to execute a cached script by SHA1 hash
-- [ ] **LUA-03**: Lua scripts can call redis.call() and redis.pcall() to execute Redis commands
-- [ ] **LUA-04**: User can SCRIPT LOAD to cache a script and get its SHA1
-- [ ] **LUA-05**: User can SCRIPT EXISTS to check if scripts are cached
+- [x] **LUA-03**: Lua scripts can call redis.call() and redis.pcall() to execute Redis commands
+- [x] **LUA-04**: User can SCRIPT LOAD to cache a script and get its SHA1
+- [x] **LUA-05**: User can SCRIPT EXISTS to check if scripts are cached
 
 ### Pipeline
 
@@ -172,9 +172,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRM-11 | Phase 5 | Complete |
 | LUA-01 | Phase 6 | Pending |
 | LUA-02 | Phase 6 | Pending |
-| LUA-03 | Phase 6 | Pending |
-| LUA-04 | Phase 6 | Pending |
-| LUA-05 | Phase 6 | Pending |
+| LUA-03 | Phase 6 | Complete |
+| LUA-04 | Phase 6 | Complete |
+| LUA-05 | Phase 6 | Complete |
 | PIPE-01 | Phase 7 | Pending |
 | PIPE-02 | Phase 7 | Pending |
 | PIPE-03 | Phase 7 | Pending |

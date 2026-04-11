@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 05-03-PLAN.md
-last_updated: "2026-04-11T02:05:55.422Z"
+status: executing
+stopped_at: Completed 06-01-PLAN.md
+last_updated: "2026-04-11T02:35:26.282Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
   completed_phases: 5
-  total_plans: 11
-  completed_plans: 11
-  percent: 100
+  total_plans: 13
+  completed_plans: 12
+  percent: 92
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 05 — Stream Commands and Consumer Groups
+**Current focus:** Phase 06 — Lua Scripting
 
 ## Current Position
 
-Phase: 05 (Stream Commands and Consumer Groups) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
+Phase: 06 (Lua Scripting) — EXECUTING
+Plan: 2 of 2
+Status: Ready to execute
 Last activity: 2026-04-11
 
 Progress: [░░░░░░░░░░] 0%
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 8
+- Total plans completed: 11
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -48,6 +48,7 @@ Progress: [░░░░░░░░░░] 0%
 | 02 | 2 | - | - |
 | 03 | 2 | - | - |
 | 04 | 2 | - | - |
+| 05 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -66,6 +67,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 05 P01 | 5min | 2 tasks | 5 files |
 | Phase 05 P02 | 5min | 2 tasks | 3 files |
 | Phase 05 P03 | 4min | 2 tasks | 3 files |
+| Phase 06 P01 | 8min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -98,6 +100,9 @@ Recent decisions affecting current work:
 - [Phase 05]: XACK iterates all consumers to find PEL entry -- O(consumers) but simple and correct for embedded use
 - [Phase 05]: XAUTOCLAIM scans all consumers PELs linearly -- acceptable for embedded single-process use
 - [Phase 05]: XINFO idle time uses min PEL entry duration -- represents most recent consumer activity
+- [Phase 06]: Used mlua 0.10 with vendored Lua 5.4 to avoid system library dependency
+- [Phase 06]: dispatch_command operates directly on raw HashMap (not Store methods) because caller already holds write lock
+- [Phase 06]: Lock ordering enforced: scripts lock released before data lock acquired (deadlock prevention)
 
 ### Pending Todos
 
@@ -109,6 +114,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T02:05:55.419Z
-Stopped at: Completed 05-03-PLAN.md
+Last session: 2026-04-11T02:35:26.279Z
+Stopped at: Completed 06-01-PLAN.md
 Resume file: None
