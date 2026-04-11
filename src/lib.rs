@@ -7,6 +7,7 @@ use std::time::Duration;
 
 mod store;
 mod commands;
+mod scripting;
 
 use commands::strings::{extract_bytes, extract_expiry};
 use commands::sorted_sets::parse_score_bound;
