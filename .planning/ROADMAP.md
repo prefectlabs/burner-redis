@@ -63,7 +63,7 @@ Plans:
   4. User can ZREMRANGEBYSCORE to remove all members within a score range
 **Plans:** 2 plans
 Plans:
-- [ ] 03-01-PLAN.md — Extend Store engine with SortedSet type (dual-index BTreeMap+HashMap) and 6 Rust methods
+- [x] 03-01-PLAN.md — Extend Store engine with SortedSet type (dual-index BTreeMap+HashMap) and 6 Rust methods
 - [ ] 03-02-PLAN.md — Python async methods for sorted set commands with pytest suite
 
 ### Phase 4: Key Expiration

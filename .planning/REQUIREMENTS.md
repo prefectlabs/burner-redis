@@ -38,12 +38,12 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Sorted Set Commands
 
-- [ ] **ZSET-01**: User can ZADD members with scores to a sorted set
-- [ ] **ZSET-02**: User can ZREM members from a sorted set
-- [ ] **ZSET-03**: User can ZRANGE to get members by index range
-- [ ] **ZSET-04**: User can ZRANGEBYSCORE to get members by score range
-- [ ] **ZSET-05**: User can ZRANGESTORE to store a range result into a new key
-- [ ] **ZSET-06**: User can ZREMRANGEBYSCORE to remove members by score range
+- [x] **ZSET-01**: User can ZADD members with scores to a sorted set
+- [x] **ZSET-02**: User can ZREM members from a sorted set
+- [x] **ZSET-03**: User can ZRANGE to get members by index range
+- [x] **ZSET-04**: User can ZRANGEBYSCORE to get members by score range
+- [x] **ZSET-05**: User can ZRANGESTORE to store a range result into a new key
+- [x] **ZSET-06**: User can ZREMRANGEBYSCORE to remove members by score range
 
 ### Stream Commands
 
@@ -153,12 +153,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | SET-02 | Phase 2 | Complete |
 | SET-03 | Phase 2 | Complete |
 | SET-04 | Phase 2 | Complete |
-| ZSET-01 | Phase 3 | Pending |
-| ZSET-02 | Phase 3 | Pending |
-| ZSET-03 | Phase 3 | Pending |
-| ZSET-04 | Phase 3 | Pending |
-| ZSET-05 | Phase 3 | Pending |
-| ZSET-06 | Phase 3 | Pending |
+| ZSET-01 | Phase 3 | Complete |
+| ZSET-02 | Phase 3 | Complete |
+| ZSET-03 | Phase 3 | Complete |
+| ZSET-04 | Phase 3 | Complete |
+| ZSET-05 | Phase 3 | Complete |
+| ZSET-06 | Phase 3 | Complete |
 | STRM-01 | Phase 5 | Pending |
 | STRM-02 | Phase 5 | Pending |
 | STRM-03 | Phase 5 | Pending |
