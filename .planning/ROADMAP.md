@@ -147,7 +147,7 @@ Plans:
   2. Pre-built wheels are available for manylinux (x86_64, aarch64) and macOS (x86_64, arm64)
 **Plans:** 2 plans
 Plans:
-- [ ] 09-01-PLAN.md — CI workflow with maturin-action for cross-platform wheel building
+- [x] 09-01-PLAN.md — CI workflow with maturin-action for cross-platform wheel building
 - [ ] 09-02-PLAN.md — PyPI publishing and release automation
 
 ## Progress

@@ -88,8 +88,8 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Distribution
 
-- [ ] **DIST-01**: Published as a PyPI package with pre-built wheels
-- [ ] **DIST-02**: Wheels available for manylinux (x86_64, aarch64), macOS (x86_64, arm64)
+- [x] **DIST-01**: Published as a PyPI package with pre-built wheels
+- [x] **DIST-02**: Wheels available for manylinux (x86_64, aarch64), macOS (x86_64, arm64)
 
 ### Locking
 
@@ -185,8 +185,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PERS-02 | Phase 8 | Complete |
 | PERS-03 | Phase 8 | Complete |
 | PERS-04 | Phase 8 | Complete |
-| DIST-01 | Phase 9 | Pending |
-| DIST-02 | Phase 9 | Pending |
+| DIST-01 | Phase 9 | Complete |
+| DIST-02 | Phase 9 | Complete |
 | LOCK-01 | Phase 7 | Complete |
 | LOCK-02 | Phase 7 | Complete |
 

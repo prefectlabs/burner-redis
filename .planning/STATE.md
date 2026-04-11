@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 08-02-PLAN.md
-last_updated: "2026-04-11T04:05:55.233Z"
+status: executing
+stopped_at: Completed 09-01-PLAN.md
+last_updated: "2026-04-11T04:18:38.136Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
   completed_phases: 8
-  total_plans: 17
-  completed_plans: 17
-  percent: 100
+  total_plans: 19
+  completed_plans: 18
+  percent: 95
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 08 — Persistence
+**Current focus:** Phase 09 — Distribution
 
 ## Current Position
 
-Phase: 08 (Persistence) — EXECUTING
+Phase: 09 (Distribution) — EXECUTING
 Plan: 2 of 2
-Status: Phase complete — ready for verification
+Status: Ready to execute
 Last activity: 2026-04-11
 
 Progress: [░░░░░░░░░░] 0%
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 15
+- Total plans completed: 17
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -51,6 +51,7 @@ Progress: [░░░░░░░░░░] 0%
 | 05 | 3 | - | - |
 | 06 | 2 | - | - |
 | 07 | 2 | - | - |
+| 08 | 2 | - | - |
 
 **Recent Trend:**
 
@@ -75,6 +76,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 07 P02 | 3min | 2 tasks | 3 files |
 | Phase 08 P01 | 4min | 2 tasks | 4 files |
 | Phase 08 P02 | 4min | 2 tasks | 2 files |
+| Phase 09 P01 | 1min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -123,6 +125,8 @@ Recent decisions affecting current work:
 - [Phase 08]: Atexit registration in Rust via PyCFunction::new_closure -- captures Arc<Store> and path, avoids Python subclassing
 - [Phase 08]: atexit handler silently ignores save errors (let _ = ...) to not block process exit (T-08-06)
 - [Phase 08]: save() path resolution: explicit arg > persistence_path > burner-redis.dat default
+- [Phase 09]: 4-target build matrix: linux x86_64/aarch64 + macOS x86_64/arm64 (no Windows)
+- [Phase 09]: No caching or sccache -- keep CI workflow simple for initial version
 
 ### Pending Todos
 
@@ -134,6 +138,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T04:05:55.230Z
-Stopped at: Completed 08-02-PLAN.md
+Last session: 2026-04-11T04:18:38.133Z
+Stopped at: Completed 09-01-PLAN.md
 Resume file: None
