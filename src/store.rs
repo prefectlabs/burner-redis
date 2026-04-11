@@ -195,6 +195,41 @@ impl Store {
         }
     }
 
+    // ── Persistence Methods ─────────────────────────────────────────
+
+    /// Save the store to a file using crash-safe write (write-tmp, fsync, rename).
+    pub fn save(&self, path: &str) -> Result<(), crate::persistence::PersistenceError> {
+        crate::persistence::save_to_path(self, path)
+    }
+
+    /// Load data from a persistence file into this store, replacing current contents.
+    /// Returns Ok(true) if data was loaded, Ok(false) if the file was missing.
+    pub fn load_into(&self, path: &str) -> Result<bool, crate::persistence::PersistenceError> {
+        match crate::persistence::load_from_path(path)? {
+            Some(snapshot) => {
+                let (data_map, scripts_map) = snapshot.into_runtime();
+                *self.data.write() = data_map;
+                *self.scripts.write() = scripts_map;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Get a write lock on the data map. Used by persistence for loading.
+    pub fn data_write(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, HashMap<Bytes, ValueEntry>> {
+        self.data.write()
+    }
+
+    /// Get a write lock on the scripts map. Used by persistence for loading.
+    pub fn scripts_write(
+        &self,
+    ) -> parking_lot::RwLockWriteGuard<'_, HashMap<String, String>> {
+        self.scripts.write()
+    }
+
     /// GET: Returns the value for a String-typed key, or None if missing/expired/wrong type.
     /// Passive expiration: removes expired keys on access.
     /// Returns None for Hash/Set keys (matches Redis behavior where GET on non-string returns error,

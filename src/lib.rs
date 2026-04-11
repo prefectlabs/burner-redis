@@ -7,6 +7,7 @@ use std::time::Duration;
 
 mod store;
 mod commands;
+mod persistence;
 mod scripting;
 
 use commands::strings::{extract_bytes, extract_expiry};
