@@ -10,6 +10,7 @@ mod commands;
 
 use commands::strings::{extract_bytes, extract_expiry};
 use commands::sorted_sets::parse_score_bound;
+use commands::streams::{format_stream_id, parse_stream_id, extract_stream_fields, StreamId};
 use store::{Store, StoreError};
 
 /// Convert a StoreError into a Python exception with the Redis-compatible error message.
@@ -490,6 +491,173 @@ impl BurnerRedis {
             store
                 .zremrangebyscore(&name_bytes, min_f64, max_f64)
                 .map_err(store_err_to_py)
+        })
+    }
+
+    // ── Stream Commands ──────────────────────────────────────────────
+
+    /// XADD command matching redis.asyncio.Redis.xadd() signature.
+    /// Adds an entry to a stream. Returns the entry ID as bytes (e.g., b"1234567890123-0").
+    #[pyo3(signature = (name, fields, id="*"))]
+    fn xadd<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        fields: &Bound<'py, PyDict>,
+        id: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let field_map = extract_stream_fields(fields)?;
+
+        // Parse id: "*" means auto-generate, otherwise parse explicit ID
+        let id_opt: Option<StreamId> = if id == "*" {
+            None
+        } else {
+            Some(parse_stream_id(id).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", id))
+            })?)
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let stream_id = store.xadd(key, field_map, id_opt).map_err(store_err_to_py)?;
+            let id_str = format_stream_id(stream_id);
+            Ok(id_str.into_bytes())
+        })
+    }
+
+    /// XREAD command matching redis.asyncio.Redis.xread() signature.
+    /// Reads entries from one or more streams after given IDs.
+    /// Returns list of [stream_name, [(id, {field: value}), ...]] or None if empty.
+    #[pyo3(signature = (streams, count=None))]
+    fn xread<'py>(
+        &self,
+        py: Python<'py>,
+        streams: &Bound<'py, PyDict>,
+        count: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+
+        // Extract stream names and IDs from the dict
+        let mut keys: Vec<Bytes> = Vec::new();
+        let mut ids: Vec<StreamId> = Vec::new();
+
+        for (k, v) in streams.iter() {
+            let key = extract_bytes(&k)?;
+            let id_str: String = v.extract::<String>().or_else(|_| {
+                v.extract::<Vec<u8>>()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })?;
+
+            let stream_id = if id_str == "0" || id_str == "0-0" {
+                (0u64, 0u64)
+            } else {
+                parse_stream_id(&id_str).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Invalid stream ID: {}",
+                        id_str
+                    ))
+                })?
+            };
+
+            keys.push(key);
+            ids.push(stream_id);
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
+
+            if results.is_empty() {
+                return Ok(None::<pyo3::Py<pyo3::PyAny>>);
+            }
+
+            // Build the nested Python structure:
+            // [[stream_name_bytes, [(id_bytes, {field_bytes: value_bytes}), ...]], ...]
+            Python::try_attach(|py| -> PyResult<Option<pyo3::Py<pyo3::PyAny>>> {
+                let outer = pyo3::types::PyList::empty(py);
+                for (stream_name, entries) in &results {
+                    let entry_list = pyo3::types::PyList::empty(py);
+                    for (id, fields) in entries {
+                        let id_bytes = format_stream_id(*id).into_bytes();
+                        let field_dict = pyo3::types::PyDict::new(py);
+                        for (fk, fv) in fields {
+                            field_dict.set_item(
+                                pyo3::types::PyBytes::new(py, fk.as_ref()),
+                                pyo3::types::PyBytes::new(py, fv.as_ref()),
+                            )?;
+                        }
+                        let tuple = pyo3::types::PyTuple::new(
+                            py,
+                            &[
+                                pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
+                                field_dict.into_any(),
+                            ],
+                        )?;
+                        entry_list.append(tuple)?;
+                    }
+                    let stream_pair = pyo3::types::PyList::new(
+                        py,
+                        &[
+                            pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
+                            entry_list.into_any(),
+                        ],
+                    )?;
+                    outer.append(stream_pair)?;
+                }
+                Ok(Some(outer.into_any().unbind()))
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// XLEN command matching redis.asyncio.Redis.xlen() signature.
+    /// Returns the number of entries in a stream.
+    fn xlen<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let len = store.xlen(&key).map_err(store_err_to_py)?;
+            Ok(len as i64)
+        })
+    }
+
+    /// XTRIM command matching redis.asyncio.Redis.xtrim() signature.
+    /// Trims a stream by maxlen or minid. Returns count of entries removed.
+    #[pyo3(signature = (name, maxlen=None, minid=None))]
+    fn xtrim<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        maxlen: Option<usize>,
+        minid: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+
+        let minid_parsed: Option<StreamId> = match minid {
+            Some(s) => Some(parse_stream_id(s).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID for minid: {}",
+                    s
+                ))
+            })?),
+            None => None,
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let trimmed = store
+                .xtrim(&key, maxlen, minid_parsed)
+                .map_err(store_err_to_py)?;
+            Ok(trimmed as i64)
         })
     }
 }
