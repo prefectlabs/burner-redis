@@ -136,7 +136,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 08-01-PLAN.md — Serde derives, rmp-serde serialization, and crash-safe persistence module
-- [ ] 08-02-PLAN.md — Python API (persistence_path constructor, save() method, atexit handler) with integration tests
+- [x] 08-02-PLAN.md — Python API (persistence_path constructor, save() method, atexit handler) with integration tests
 
 ### Phase 9: Distribution
 **Goal**: Users can install burner-redis from PyPI with pre-built wheels for their platform without needing a Rust toolchain

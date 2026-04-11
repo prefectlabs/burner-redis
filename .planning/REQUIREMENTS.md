@@ -82,8 +82,8 @@ Requirements for initial release. Each maps to roadmap phases.
 ### Persistence
 
 - [x] **PERS-01**: User can manually flush all data to disk via API call
-- [ ] **PERS-02**: Data automatically persists on graceful shutdown
-- [ ] **PERS-03**: On startup, data is restored from a previous flush if available
+- [x] **PERS-02**: Data automatically persists on graceful shutdown
+- [x] **PERS-03**: On startup, data is restored from a previous flush if available
 - [x] **PERS-04**: Persistence uses crash-safe write (write-then-rename with fsync)
 
 ### Distribution
@@ -182,8 +182,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | EXP-02 | Phase 4 | Complete |
 | EXP-03 | Phase 4 | Complete |
 | PERS-01 | Phase 8 | Complete |
-| PERS-02 | Phase 8 | Pending |
-| PERS-03 | Phase 8 | Pending |
+| PERS-02 | Phase 8 | Complete |
+| PERS-03 | Phase 8 | Complete |
 | PERS-04 | Phase 8 | Complete |
 | DIST-01 | Phase 9 | Pending |
 | DIST-02 | Phase 9 | Pending |

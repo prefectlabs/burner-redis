@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 08-01-PLAN.md
-last_updated: "2026-04-11T03:59:25.384Z"
+status: verifying
+stopped_at: Completed 08-02-PLAN.md
+last_updated: "2026-04-11T04:05:55.233Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
-  completed_phases: 7
+  completed_phases: 8
   total_plans: 17
-  completed_plans: 16
-  percent: 94
+  completed_plans: 17
+  percent: 100
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 
 Phase: 08 (Persistence) — EXECUTING
 Plan: 2 of 2
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-04-11
 
 Progress: [░░░░░░░░░░] 0%
@@ -74,6 +74,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 07 P01 | 3min | 2 tasks | 3 files |
 | Phase 07 P02 | 3min | 2 tasks | 3 files |
 | Phase 08 P01 | 4min | 2 tasks | 4 files |
+| Phase 08 P02 | 4min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -119,6 +120,9 @@ Recent decisions affecting current work:
 - [Phase 08]: PersistableStore snapshot pattern: parallel types using Vec<u8>/u64 instead of Bytes/Instant to keep serde concerns separate from runtime
 - [Phase 08]: TTL persisted as milliseconds-remaining (relative duration) rather than absolute timestamp for portability
 - [Phase 08]: PendingEntry delivery_time reset to Instant::now() on load -- conservative for XAUTOCLAIM idle time calculations
+- [Phase 08]: Atexit registration in Rust via PyCFunction::new_closure -- captures Arc<Store> and path, avoids Python subclassing
+- [Phase 08]: atexit handler silently ignores save errors (let _ = ...) to not block process exit (T-08-06)
+- [Phase 08]: save() path resolution: explicit arg > persistence_path > burner-redis.dat default
 
 ### Pending Todos
 
@@ -130,6 +134,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T03:59:25.381Z
-Stopped at: Completed 08-01-PLAN.md
+Last session: 2026-04-11T04:05:55.230Z
+Stopped at: Completed 08-02-PLAN.md
 Resume file: None
