@@ -6,6 +6,7 @@ use std::ops::Bound;
 use std::time::{Duration, Instant};
 
 use crate::commands::streams::StreamId;
+use crate::scripting::{LuaEngine, RedisValue};
 
 /// Dual-index sorted set matching Redis's skiplist+dict pattern.
 /// BTreeMap for score-ordered range queries, HashMap for O(1) member->score lookup.
@@ -182,12 +183,14 @@ pub enum StoreError {
 
 pub struct Store {
     data: RwLock<HashMap<Bytes, ValueEntry>>,
+    scripts: RwLock<HashMap<String, String>>,
 }
 
 impl Store {
     pub fn new() -> Self {
         Store {
             data: RwLock::new(HashMap::new()),
+            scripts: RwLock::new(HashMap::new()),
         }
     }
 
@@ -1516,6 +1519,52 @@ impl Store {
         }
 
         Ok(result)
+    }
+
+    // ── Lua Scripting Operations ───────────────────────��─────────────
+
+    /// SCRIPT LOAD: Cache a Lua script by its SHA1 hash. Returns the SHA1 hex digest.
+    pub fn script_load(&self, script: &str) -> String {
+        let sha1 = LuaEngine::sha1_hex(script);
+        self.scripts.write().insert(sha1.clone(), script.to_string());
+        sha1
+    }
+
+    /// SCRIPT EXISTS: Check if scripts are cached by SHA1 hash.
+    /// Returns a Vec<bool> indicating presence for each input SHA.
+    pub fn script_exists(&self, shas: &[String]) -> Vec<bool> {
+        let scripts = self.scripts.read();
+        shas.iter().map(|sha| scripts.contains_key(sha)).collect()
+    }
+
+    /// EVAL: Execute a Lua script atomically. Auto-caches the script.
+    /// Holds write lock on data for entire script duration (atomicity guarantee).
+    pub fn eval(&self, script: &str, keys: Vec<Bytes>, args: Vec<Bytes>) -> Result<RedisValue, String> {
+        // Auto-cache the script
+        let sha1 = LuaEngine::sha1_hex(script);
+        self.scripts.write().insert(sha1, script.to_string());
+
+        // Acquire write lock on data -- held for entire script execution
+        let mut data = self.data.write();
+        LuaEngine::execute(script, keys, args, &mut *data)
+    }
+
+    /// EVALSHA: Execute a cached Lua script by SHA1 hash.
+    /// Returns NOSCRIPT error if the SHA is not in the cache.
+    /// Holds write lock on data for entire script duration (atomicity guarantee).
+    pub fn evalsha(&self, sha: &str, keys: Vec<Bytes>, args: Vec<Bytes>) -> Result<RedisValue, String> {
+        // Look up script in cache (acquire and release scripts lock before data lock)
+        let script = {
+            let scripts = self.scripts.read();
+            match scripts.get(sha) {
+                Some(s) => s.clone(),
+                None => return Err("NOSCRIPT No matching script. Use EVAL.".to_string()),
+            }
+        };
+
+        // Acquire write lock on data -- held for entire script execution
+        let mut data = self.data.write();
+        LuaEngine::execute(&script, keys, args, &mut *data)
     }
 }
 
