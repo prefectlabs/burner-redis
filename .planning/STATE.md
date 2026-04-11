@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 03-02-PLAN.md
-last_updated: "2026-04-11T01:02:23.859Z"
+status: executing
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-04-11T01:19:49.975Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
   completed_phases: 3
-  total_plans: 6
-  completed_plans: 6
-  percent: 100
+  total_plans: 8
+  completed_plans: 7
+  percent: 88
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 03 — Sorted Set Commands
+**Current focus:** Phase 04 — Key Expiration
 
 ## Current Position
 
-Phase: 03 (Sorted Set Commands) — EXECUTING
+Phase: 04 (Key Expiration) — EXECUTING
 Plan: 2 of 2
-Status: Phase complete — ready for verification
+Status: Ready to execute
 Last activity: 2026-04-11
 
 Progress: [░░░░░░░░░░] 0%
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 4
+- Total plans completed: 6
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -46,6 +46,7 @@ Progress: [░░░░░░░░░░] 0%
 |-------|-------|-------|----------|
 | 01 | 2 | - | - |
 | 02 | 2 | - | - |
+| 03 | 2 | - | - |
 
 **Recent Trend:**
 
@@ -59,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P02 | 4min | 2 tasks | 4 files |
 | Phase 03 P01 | 4min | 2 tasks | 4 files |
 | Phase 03 P02 | 5min | 2 tasks | 3 files |
+| Phase 04 P01 | 3min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -81,6 +83,8 @@ Recent decisions affecting current work:
 - [Phase 03]: Used OrderedFloat<f64> for BTreeMap key ordering -- handles NaN correctly for sorted set score-based range queries
 - [Phase 03]: Dual-index SortedSet pattern (BTreeMap + HashMap) matches Redis skiplist+dict for O(1) member lookup and O(log n) range queries
 - [Phase 03]: Used Python::try_attach (PyO3 0.28.3) for conditional return types in async blocks -- withscores changes output between list[bytes] and list[tuple[bytes, float]]
+- [Phase 04]: Single write lock for sweep_expired() instead of read-then-write to avoid race conditions and improve efficiency
+- [Phase 04]: Background Tokio task with Weak<Store> reference for self-terminating active expiration sweep at 100ms interval
 
 ### Pending Todos
 
@@ -92,6 +96,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T01:02:23.856Z
-Stopped at: Completed 03-02-PLAN.md
+Last session: 2026-04-11T01:19:49.973Z
+Stopped at: Completed 04-01-PLAN.md
 Resume file: None

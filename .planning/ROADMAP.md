@@ -76,7 +76,7 @@ Plans:
   3. Expired keys are cleaned up via both passive (on-access check) and active (periodic sweep) strategies, preventing memory leaks
 **Plans:** 2 plans
 Plans:
-- [ ] 04-01-PLAN.md — Add sweep_expired() to Store engine and spawn background Tokio sweep task
+- [x] 04-01-PLAN.md — Add sweep_expired() to Store engine and spawn background Tokio sweep task
 - [ ] 04-02-PLAN.md — Python integration tests for passive and active expiration across all data types
 
 ### Phase 5: Stream Commands and Consumer Groups

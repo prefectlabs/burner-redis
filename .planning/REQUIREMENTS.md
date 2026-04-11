@@ -75,9 +75,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Key Expiration
 
-- [ ] **EXP-01**: Keys with TTL expire and are no longer accessible after expiration
-- [ ] **EXP-02**: Expiration supports both seconds and milliseconds precision
-- [ ] **EXP-03**: Expired keys are cleaned up (passive on access + active sweep)
+- [x] **EXP-01**: Keys with TTL expire and are no longer accessible after expiration
+- [x] **EXP-02**: Expiration supports both seconds and milliseconds precision
+- [x] **EXP-03**: Expired keys are cleaned up (passive on access + active sweep)
 
 ### Persistence
 
@@ -178,9 +178,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PIPE-01 | Phase 7 | Pending |
 | PIPE-02 | Phase 7 | Pending |
 | PIPE-03 | Phase 7 | Pending |
-| EXP-01 | Phase 4 | Pending |
-| EXP-02 | Phase 4 | Pending |
-| EXP-03 | Phase 4 | Pending |
+| EXP-01 | Phase 4 | Complete |
+| EXP-02 | Phase 4 | Complete |
+| EXP-03 | Phase 4 | Complete |
 | PERS-01 | Phase 8 | Pending |
 | PERS-02 | Phase 8 | Pending |
 | PERS-03 | Phase 8 | Pending |
