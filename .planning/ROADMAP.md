@@ -135,8 +135,8 @@ Plans:
   4. Persistence uses crash-safe write-then-rename with fsync so partial writes never corrupt state
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
-- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
+- [ ] 08-01-PLAN.md — Serde derives, rmp-serde serialization, and crash-safe persistence module
+- [ ] 08-02-PLAN.md — Python API (persistence_path constructor, save() method, atexit handler) with integration tests
 
 ### Phase 9: Distribution
 **Goal**: Users can install burner-redis from PyPI with pre-built wheels for their platform without needing a Rust toolchain
@@ -147,8 +147,8 @@ Plans:
   2. Pre-built wheels are available for manylinux (x86_64, aarch64) and macOS (x86_64, arm64)
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
-- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
+- [ ] 09-01-PLAN.md — CI workflow with maturin-action for cross-platform wheel building
+- [ ] 09-02-PLAN.md — PyPI publishing and release automation
 
 ## Progress
 
@@ -157,12 +157,12 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Foundation and String Commands | 0/2 | Planning complete | - |
-| 2. Hash and Set Commands | 0/0 | Not started | - |
-| 3. Sorted Set Commands | 0/0 | Not started | - |
-| 4. Key Expiration | 0/0 | Not started | - |
-| 5. Stream Commands and Consumer Groups | 0/0 | Not started | - |
-| 6. Lua Scripting | 0/2 | Planning complete | - |
-| 7. Pipeline and Locking | 0/0 | Not started | - |
-| 8. Persistence | 0/0 | Not started | - |
-| 9. Distribution | 0/0 | Not started | - |
+| 1. Foundation and String Commands | 2/2 | Complete | - |
+| 2. Hash and Set Commands | 2/2 | Complete | - |
+| 3. Sorted Set Commands | 2/2 | Complete | - |
+| 4. Key Expiration | 2/2 | Complete | - |
+| 5. Stream Commands and Consumer Groups | 3/3 | Complete | - |
+| 6. Lua Scripting | 2/2 | Complete | - |
+| 7. Pipeline and Locking | 2/2 | Complete | - |
+| 8. Persistence | 0/2 | Planning complete | - |
+| 9. Distribution | 0/2 | Not started | - |
