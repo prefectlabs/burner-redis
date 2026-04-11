@@ -845,6 +845,208 @@ impl BurnerRedis {
             Ok(count)
         })
     }
+
+    /// XAUTOCLAIM command matching redis.asyncio.Redis.xautoclaim() signature.
+    /// Reclaims idle pending messages from other consumers. Returns tuple:
+    /// (next_start_id_bytes, [(id_bytes, {field: value}), ...], [deleted_id_bytes, ...])
+    #[pyo3(signature = (name, groupname, consumername, min_idle_time, start_id="0-0", count=None))]
+    fn xautoclaim<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+        consumername: &Bound<'py, PyAny>,
+        min_idle_time: u64,
+        start_id: &str,
+        count: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+        let consumer_bytes = extract_bytes(consumername)?;
+
+        // Parse start_id; treat "0" as (0,0)
+        let start: StreamId = if start_id == "0" || start_id == "0-0" {
+            (0, 0)
+        } else {
+            parse_stream_id(start_id).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    start_id
+                ))
+            })?
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (next_id, claimed, deleted) = store
+                .xautoclaim(&key, &group, consumer_bytes, min_idle_time, start, count)
+                .map_err(store_err_to_py)?;
+
+            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+                // Build next_start_id as bytes
+                let next_id_bytes =
+                    pyo3::types::PyBytes::new(py, format_stream_id(next_id).as_bytes());
+
+                // Build claimed entries list: [(id_bytes, {field: value}), ...]
+                let claimed_list = pyo3::types::PyList::empty(py);
+                for (id, fields) in &claimed {
+                    let id_bytes =
+                        pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
+                    let field_dict = pyo3::types::PyDict::new(py);
+                    for (fk, fv) in fields {
+                        field_dict.set_item(
+                            pyo3::types::PyBytes::new(py, fk.as_ref()),
+                            pyo3::types::PyBytes::new(py, fv.as_ref()),
+                        )?;
+                    }
+                    let tuple = pyo3::types::PyTuple::new(
+                        py,
+                        &[id_bytes.into_any(), field_dict.into_any()],
+                    )?;
+                    claimed_list.append(tuple)?;
+                }
+
+                // Build deleted IDs list
+                let deleted_list = pyo3::types::PyList::empty(py);
+                for id in &deleted {
+                    let id_bytes =
+                        pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
+                    deleted_list.append(id_bytes)?;
+                }
+
+                // Return as tuple: (next_id, claimed, deleted)
+                let result = pyo3::types::PyTuple::new(
+                    py,
+                    &[
+                        next_id_bytes.into_any(),
+                        claimed_list.into_any(),
+                        deleted_list.into_any(),
+                    ],
+                )?;
+                Ok(result.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// XINFO GROUPS command matching redis.asyncio.Redis.xinfo_groups() signature.
+    /// Returns list of dicts with group metadata.
+    fn xinfo_groups<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let groups = store.xinfo_groups(&key).map_err(store_err_to_py)?;
+
+            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+                let result_list = pyo3::types::PyList::empty(py);
+                for group_info in &groups {
+                    let dict = pyo3::types::PyDict::new(py);
+                    // name -> bytes
+                    if let Some(name_val) = group_info.get("name") {
+                        dict.set_item(
+                            pyo3::types::PyBytes::new(py, b"name"),
+                            pyo3::types::PyBytes::new(py, name_val.as_bytes()),
+                        )?;
+                    }
+                    // consumers -> int
+                    if let Some(consumers_val) = group_info.get("consumers") {
+                        let count: i64 = consumers_val.parse().unwrap_or(0);
+                        dict.set_item(
+                            pyo3::types::PyBytes::new(py, b"consumers"),
+                            count,
+                        )?;
+                    }
+                    // pending -> int
+                    if let Some(pending_val) = group_info.get("pending") {
+                        let count: i64 = pending_val.parse().unwrap_or(0);
+                        dict.set_item(
+                            pyo3::types::PyBytes::new(py, b"pending"),
+                            count,
+                        )?;
+                    }
+                    // last-delivered-id -> bytes
+                    if let Some(id_val) = group_info.get("last-delivered-id") {
+                        dict.set_item(
+                            pyo3::types::PyBytes::new(py, b"last-delivered-id"),
+                            pyo3::types::PyBytes::new(py, id_val.as_bytes()),
+                        )?;
+                    }
+                    result_list.append(dict)?;
+                }
+                Ok(result_list.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// XINFO CONSUMERS command matching redis.asyncio.Redis.xinfo_consumers() signature.
+    /// Returns list of dicts with consumer metadata for a specific group.
+    fn xinfo_consumers<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let consumers = store
+                .xinfo_consumers(&key, &group)
+                .map_err(store_err_to_py)?;
+
+            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+                let result_list = pyo3::types::PyList::empty(py);
+                for consumer_info in &consumers {
+                    let dict = pyo3::types::PyDict::new(py);
+                    // name -> bytes
+                    if let Some(name_val) = consumer_info.get("name") {
+                        dict.set_item(
+                            pyo3::types::PyBytes::new(py, b"name"),
+                            pyo3::types::PyBytes::new(py, name_val.as_bytes()),
+                        )?;
+                    }
+                    // pending -> int
+                    if let Some(pending_val) = consumer_info.get("pending") {
+                        let count: i64 = pending_val.parse().unwrap_or(0);
+                        dict.set_item(
+                            pyo3::types::PyBytes::new(py, b"pending"),
+                            count,
+                        )?;
+                    }
+                    // idle -> int
+                    if let Some(idle_val) = consumer_info.get("idle") {
+                        let idle: i64 = idle_val.parse().unwrap_or(0);
+                        dict.set_item(
+                            pyo3::types::PyBytes::new(py, b"idle"),
+                            idle,
+                        )?;
+                    }
+                    result_list.append(dict)?;
+                }
+                Ok(result_list.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
 }
 
 #[pymodule]

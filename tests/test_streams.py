@@ -1,6 +1,6 @@
-"""Tests for stream commands: XADD, XREAD, XLEN, XTRIM.
+"""Tests for stream commands: XADD, XREAD, XLEN, XTRIM, XGROUP, XREADGROUP, XACK, XAUTOCLAIM, XINFO.
 
-Covers requirements: STRM-01, STRM-02, STRM-03, STRM-04.
+Covers requirements: STRM-01, STRM-02, STRM-03, STRM-04, STRM-05, STRM-06, STRM-07, STRM-08, STRM-09, STRM-10, STRM-11.
 """
 import pytest
 from burner_redis import BurnerRedis
@@ -443,3 +443,230 @@ async def test_xack_nonexistent_stream(r):
     """STRM-08: XACK on missing stream returns 0."""
     count = await r.xack("nonexistent", "mygroup", "1-1")
     assert count == 0
+
+
+# --- STRM-09: XAUTOCLAIM ---
+
+
+async def test_xautoclaim_claims_idle_messages(r):
+    """STRM-09: XAUTOCLAIM reclaims idle pending messages from other consumers."""
+    # Add entries and read with consumer1
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    id2 = await r.xadd("mystream", {"f": "v2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Consumer2 claims all idle messages (min_idle_time=0 means claim immediately)
+    result = await r.xautoclaim("mystream", "mygroup", "consumer2", 0, start_id="0-0")
+    assert isinstance(result, tuple)
+    assert len(result) == 3
+
+    next_id, claimed, deleted = result
+    assert len(claimed) == 2
+    # Claimed entries should have field data
+    assert claimed[0][1][b"f"] == b"v1"
+    assert claimed[1][1][b"f"] == b"v2"
+    # Deleted list should be empty (entries still exist)
+    assert len(deleted) == 0
+
+
+async def test_xautoclaim_increments_delivery_count(r):
+    """STRM-09: After autoclaim, delivery count increases."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # First claim by consumer2 (delivery_count goes from 1 to 2)
+    await r.xautoclaim("mystream", "mygroup", "consumer2", 0, start_id="0-0")
+
+    # Second claim by consumer3 (delivery_count goes from 2 to 3)
+    await r.xautoclaim("mystream", "mygroup", "consumer3", 0, start_id="0-0")
+
+    # Verify consumer3 has the message in its PEL
+    info = await r.xinfo_consumers("mystream", "mygroup")
+    consumer3_info = [c for c in info if c[b"name"] == b"consumer3"]
+    assert len(consumer3_info) == 1
+    assert consumer3_info[0][b"pending"] == 1
+
+
+async def test_xautoclaim_returns_deleted_ids(r):
+    """STRM-09: If a pending message was trimmed, it appears in deleted_ids."""
+    # Add entries and read them
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xadd("mystream", {"f": "v3"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Trim the stream to only keep 1 entry (removes first 2)
+    await r.xtrim("mystream", maxlen=1)
+
+    # Autoclaim: the trimmed entries should appear in deleted_ids
+    result = await r.xautoclaim("mystream", "mygroup", "consumer2", 0, start_id="0-0")
+    next_id, claimed, deleted = result
+
+    # One entry was kept (the last one), two were trimmed
+    assert len(claimed) == 1
+    assert len(deleted) == 2
+
+
+async def test_xautoclaim_respects_min_idle_time(r):
+    """STRM-09: Messages not idle long enough are NOT claimed."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Use a very large min_idle_time so nothing qualifies
+    result = await r.xautoclaim("mystream", "mygroup", "consumer2", 999999, start_id="0-0")
+    next_id, claimed, deleted = result
+
+    # Nothing should be claimed
+    assert len(claimed) == 0
+    assert len(deleted) == 0
+
+
+async def test_xautoclaim_respects_count(r):
+    """STRM-09: count parameter limits how many messages are claimed."""
+    # Add 3 entries
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xadd("mystream", {"f": "v3"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Claim only 2 of 3
+    result = await r.xautoclaim("mystream", "mygroup", "consumer2", 0, start_id="0-0", count=2)
+    next_id, claimed, deleted = result
+
+    assert len(claimed) == 2
+
+
+async def test_xautoclaim_returns_next_start_id(r):
+    """STRM-09: When not all idle messages claimed (count limit), next_start_id indicates continuation."""
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    id2 = await r.xadd("mystream", {"f": "v2"})
+    id3 = await r.xadd("mystream", {"f": "v3"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Claim only 2 of 3
+    result = await r.xautoclaim("mystream", "mygroup", "consumer2", 0, start_id="0-0", count=2)
+    next_id, claimed, deleted = result
+
+    # next_id should be the ID of the 3rd entry (unclaimed)
+    assert next_id == id3
+    # Signal that there's more to process (non-zero)
+    assert next_id != b"0-0"
+
+    # Claim again from next_id -- should get the remaining one
+    result2 = await r.xautoclaim(
+        "mystream", "mygroup", "consumer2", 0, start_id=next_id.decode(), count=10
+    )
+    next_id2, claimed2, deleted2 = result2
+    assert len(claimed2) == 1
+    assert next_id2 == b"0-0"  # All done
+
+
+# --- STRM-10: XINFO GROUPS ---
+
+
+async def test_xinfo_groups_returns_group_info(r):
+    """STRM-10: XINFO GROUPS returns correct metadata for a group."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+
+    info = await r.xinfo_groups("mystream")
+    assert len(info) == 1
+    assert info[0][b"name"] == b"mygroup"
+    assert info[0][b"consumers"] == 0
+    assert info[0][b"pending"] == 0
+
+
+async def test_xinfo_groups_multiple_groups(r):
+    """STRM-10: XINFO GROUPS returns all groups on a stream."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "group1", id="0")
+    await r.xgroup_create("mystream", "group2", id="0")
+
+    info = await r.xinfo_groups("mystream")
+    assert len(info) == 2
+    names = {entry[b"name"] for entry in info}
+    assert b"group1" in names
+    assert b"group2" in names
+
+
+async def test_xinfo_groups_empty_stream(r):
+    """STRM-10: XINFO GROUPS on stream with no groups returns empty list."""
+    await r.xadd("mystream", {"f": "v1"})
+    info = await r.xinfo_groups("mystream")
+    assert info == []
+
+
+async def test_xinfo_groups_pending_count(r):
+    """STRM-10: After XREADGROUP without XACK, pending count is accurate."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    info = await r.xinfo_groups("mystream")
+    assert info[0][b"pending"] == 2
+    assert info[0][b"consumers"] == 1
+
+
+# --- STRM-11: XINFO CONSUMERS ---
+
+
+async def test_xinfo_consumers_returns_consumer_info(r):
+    """STRM-11: XINFO CONSUMERS shows consumer with pending count."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    info = await r.xinfo_consumers("mystream", "mygroup")
+    assert len(info) == 1
+    assert info[0][b"name"] == b"consumer1"
+    assert info[0][b"pending"] == 2
+    assert b"idle" in info[0]
+    assert info[0][b"idle"] >= 0
+
+
+async def test_xinfo_consumers_multiple_consumers(r):
+    """STRM-11: Two consumers read, both appear in XINFO CONSUMERS."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+
+    # consumer1 reads first message
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, count=1)
+    # consumer2 reads second message
+    await r.xreadgroup("mygroup", "consumer2", {"mystream": ">"}, count=1)
+
+    info = await r.xinfo_consumers("mystream", "mygroup")
+    assert len(info) == 2
+    names = {entry[b"name"] for entry in info}
+    assert b"consumer1" in names
+    assert b"consumer2" in names
+
+
+async def test_xinfo_consumers_after_ack(r):
+    """STRM-11: After XACK, consumer's pending count decreases."""
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # ACK one message
+    await r.xack("mystream", "mygroup", id1.decode())
+
+    info = await r.xinfo_consumers("mystream", "mygroup")
+    assert info[0][b"pending"] == 1
+
+
+async def test_xinfo_consumers_nogroup_error(r):
+    """STRM-11: XINFO CONSUMERS on non-existent group raises error."""
+    await r.xadd("mystream", {"f": "v1"})
+
+    with pytest.raises(Exception):
+        await r.xinfo_consumers("mystream", "nogroup")
