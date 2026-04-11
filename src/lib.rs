@@ -669,6 +669,182 @@ impl BurnerRedis {
             Ok(trimmed as i64)
         })
     }
+
+    // ── Consumer Group Commands ───────────────────────────────────────
+
+    /// XGROUP CREATE command matching redis.asyncio.Redis.xgroup_create() signature.
+    /// Creates a consumer group on a stream. Returns True on success.
+    #[pyo3(signature = (name, groupname, id="$", mkstream=false))]
+    fn xgroup_create<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+        id: &str,
+        mkstream: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+
+        // Parse id: "$" means latest (sentinel u64::MAX, u64::MAX), "0" or "0-0" means beginning
+        let stream_id: StreamId = if id == "$" {
+            (u64::MAX, u64::MAX) // sentinel for "use stream's last_id"
+        } else if id == "0" || id == "0-0" {
+            (0, 0)
+        } else {
+            parse_stream_id(id).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    id
+                ))
+            })?
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store
+                .xgroup_create(&key, group, stream_id, mkstream)
+                .map_err(store_err_to_py)?;
+            Ok(true)
+        })
+    }
+
+    /// XGROUP DESTROY command matching redis.asyncio.Redis.xgroup_destroy() signature.
+    /// Removes a consumer group. Returns 1 if destroyed, 0 if not found.
+    #[pyo3(signature = (name, groupname))]
+    fn xgroup_destroy<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let destroyed = store.xgroup_destroy(&key, &group).map_err(store_err_to_py)?;
+            Ok(if destroyed { 1i64 } else { 0i64 })
+        })
+    }
+
+    /// XREADGROUP command matching redis.asyncio.Redis.xreadgroup() signature.
+    /// Reads entries from streams as a consumer in a group.
+    /// Returns list of [stream_name, [(id, {field: value}), ...]] or None if empty.
+    #[pyo3(signature = (groupname, consumername, streams, count=None))]
+    fn xreadgroup<'py>(
+        &self,
+        py: Python<'py>,
+        groupname: &Bound<'py, PyAny>,
+        consumername: &Bound<'py, PyAny>,
+        streams: &Bound<'py, PyDict>,
+        count: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let group = extract_bytes(groupname)?;
+        let consumer = extract_bytes(consumername)?;
+
+        // Extract streams dict: keys are stream names, values are ID strings
+        let mut keys: Vec<Bytes> = Vec::new();
+        let mut id_strs: Vec<String> = Vec::new();
+
+        for (k, v) in streams.iter() {
+            let key = extract_bytes(&k)?;
+            let id_str: String = v.extract::<String>().or_else(|_| {
+                v.extract::<Vec<u8>>()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })?;
+            keys.push(key);
+            id_strs.push(id_str);
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store
+                .xreadgroup(&group, &consumer, &keys, &id_strs, count)
+                .map_err(store_err_to_py)?;
+
+            if results.is_empty() {
+                return Ok(None::<pyo3::Py<pyo3::PyAny>>);
+            }
+
+            // Build the nested Python structure (same format as xread)
+            Python::try_attach(|py| -> PyResult<Option<pyo3::Py<pyo3::PyAny>>> {
+                let outer = pyo3::types::PyList::empty(py);
+                for (stream_name, entries) in &results {
+                    let entry_list = pyo3::types::PyList::empty(py);
+                    for (id, fields) in entries {
+                        let id_bytes = format_stream_id(*id).into_bytes();
+                        let field_dict = pyo3::types::PyDict::new(py);
+                        for (fk, fv) in fields {
+                            field_dict.set_item(
+                                pyo3::types::PyBytes::new(py, fk.as_ref()),
+                                pyo3::types::PyBytes::new(py, fv.as_ref()),
+                            )?;
+                        }
+                        let tuple = pyo3::types::PyTuple::new(
+                            py,
+                            &[
+                                pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
+                                field_dict.into_any(),
+                            ],
+                        )?;
+                        entry_list.append(tuple)?;
+                    }
+                    let stream_pair = pyo3::types::PyList::new(
+                        py,
+                        &[
+                            pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
+                            entry_list.into_any(),
+                        ],
+                    )?;
+                    outer.append(stream_pair)?;
+                }
+                Ok(Some(outer.into_any().unbind()))
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// XACK command matching redis.asyncio.Redis.xack() signature.
+    /// Acknowledges messages in a consumer group. Returns count acknowledged.
+    #[pyo3(signature = (name, groupname, *ids))]
+    fn xack<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+        ids: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+
+        // Parse each ID string into a StreamId
+        let mut stream_ids: Vec<StreamId> = Vec::new();
+        for id_obj in ids.iter() {
+            let id_str: String = id_obj.extract::<String>().or_else(|_| {
+                id_obj
+                    .extract::<Vec<u8>>()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })?;
+            let stream_id = parse_stream_id(&id_str).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    id_str
+                ))
+            })?;
+            stream_ids.push(stream_id);
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let count = store.xack(&key, &group, &stream_ids).map_err(store_err_to_py)?;
+            Ok(count)
+        })
+    }
 }
 
 #[pymodule]
