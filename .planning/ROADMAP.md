@@ -148,7 +148,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 09-01-PLAN.md — CI workflow with maturin-action for cross-platform wheel building
-- [ ] 09-02-PLAN.md — PyPI publishing and release automation
+- [x] 09-02-PLAN.md — PyPI publishing and release automation
 
 ## Progress
 
