@@ -77,7 +77,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 04-01-PLAN.md — Add sweep_expired() to Store engine and spawn background Tokio sweep task
-- [ ] 04-02-PLAN.md — Python integration tests for passive and active expiration across all data types
+- [x] 04-02-PLAN.md — Python integration tests for passive and active expiration across all data types
 
 ### Phase 5: Stream Commands and Consumer Groups
 **Goal**: Users can publish messages to streams, consume them via consumer groups with acknowledgment and recovery, enabling Prefect's entire messaging subsystem
