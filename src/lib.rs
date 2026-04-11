@@ -8,6 +8,7 @@ mod store;
 mod commands;
 
 use commands::strings::{extract_bytes, extract_expiry};
+use commands::sorted_sets::parse_score_bound;
 use store::{Store, StoreError};
 
 /// Convert a StoreError into a Python exception with the Redis-compatible error message.
@@ -288,6 +289,190 @@ impl BurnerRedis {
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             store.srem(&name_bytes, &members).map_err(store_err_to_py)
+        })
+    }
+
+    // ── Sorted Set Commands ──────────────────────────────────────────
+
+    /// ZADD command matching redis.asyncio.Redis.zadd() signature.
+    /// Adds members with scores to a sorted set. Returns count of new members
+    /// (or changed members if ch=True).
+    #[pyo3(signature = (name, mapping, nx=false, xx=false, gt=false, lt=false, ch=false))]
+    fn zadd<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        mapping: &Bound<'py, PyDict>,
+        nx: bool,
+        xx: bool,
+        gt: bool,
+        lt: bool,
+        ch: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+
+        // Extract mapping: {member: score} dict -> Vec<(f64, Bytes)>
+        let mut members: Vec<(f64, Bytes)> = Vec::new();
+        for (k, v) in mapping.iter() {
+            let member = extract_bytes(&k)?;
+            let score: f64 = v.extract::<f64>()?;
+            members.push((score, member));
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store
+                .zadd(name_bytes, members, nx, xx, gt, lt, ch)
+                .map_err(store_err_to_py)
+        })
+    }
+
+    /// ZREM command matching redis.asyncio.Redis.zrem() signature.
+    /// Removes members from a sorted set. Returns count removed.
+    #[pyo3(signature = (name, *values))]
+    fn zrem<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        values: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+        let members: Vec<Bytes> = values
+            .iter()
+            .map(|obj| extract_bytes(&obj))
+            .collect::<PyResult<Vec<_>>>()?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.zrem(&name_bytes, &members).map_err(store_err_to_py)
+        })
+    }
+
+    /// ZRANGE command matching redis.asyncio.Redis.zrange() signature.
+    /// Returns members by index range. Without withscores: list[bytes].
+    /// With withscores=True: list[tuple[bytes, float]].
+    #[pyo3(signature = (name, start, end, withscores=false))]
+    fn zrange<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        start: i64,
+        end: i64,
+        withscores: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store
+                .zrange(&name_bytes, start, end, withscores)
+                .map_err(store_err_to_py)?;
+            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                if withscores {
+                    let list: Vec<(Vec<u8>, f64)> = results
+                        .into_iter()
+                        .map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0)))
+                        .collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                } else {
+                    let list: Vec<Vec<u8>> =
+                        results.into_iter().map(|(m, _)| m.to_vec()).collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                }
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// ZRANGEBYSCORE command matching redis.asyncio.Redis.zrangebyscore() signature.
+    /// Returns members with scores in [min, max] range.
+    /// Accepts float or string ("-inf", "+inf") for min/max.
+    #[pyo3(signature = (name, min, max, withscores=false))]
+    fn zrangebyscore<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        min: &Bound<'py, PyAny>,
+        max: &Bound<'py, PyAny>,
+        withscores: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+        let min_f64 = parse_score_bound(min)?;
+        let max_f64 = parse_score_bound(max)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store
+                .zrangebyscore(&name_bytes, min_f64, max_f64, withscores)
+                .map_err(store_err_to_py)?;
+            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                if withscores {
+                    let list: Vec<(Vec<u8>, f64)> = results
+                        .into_iter()
+                        .map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0)))
+                        .collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                } else {
+                    let list: Vec<Vec<u8>> =
+                        results.into_iter().map(|(m, _)| m.to_vec()).collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                }
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// ZRANGESTORE command matching redis.asyncio.Redis.zrangestore() signature.
+    /// Stores score-range result from source into destination key. Returns count stored.
+    #[pyo3(signature = (dest, name, start, end))]
+    fn zrangestore<'py>(
+        &self,
+        py: Python<'py>,
+        dest: &Bound<'py, PyAny>,
+        name: &Bound<'py, PyAny>,
+        start: &Bound<'py, PyAny>,
+        end: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let dst_bytes = extract_bytes(dest)?;
+        let src_bytes = extract_bytes(name)?;
+        let min_f64 = parse_score_bound(start)?;
+        let max_f64 = parse_score_bound(end)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store
+                .zrangestore(dst_bytes, &src_bytes, min_f64, max_f64)
+                .map_err(store_err_to_py)
+        })
+    }
+
+    /// ZREMRANGEBYSCORE command matching redis.asyncio.Redis.zremrangebyscore() signature.
+    /// Removes all members with scores in [min, max] range. Returns count removed.
+    #[pyo3(signature = (name, min, max))]
+    fn zremrangebyscore<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        min: &Bound<'py, PyAny>,
+        max: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+        let min_f64 = parse_score_bound(min)?;
+        let max_f64 = parse_score_bound(max)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store
+                .zremrangebyscore(&name_bytes, min_f64, max_f64)
+                .map_err(store_err_to_py)
         })
     }
 }

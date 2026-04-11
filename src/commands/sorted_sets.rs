@@ -15,3 +15,30 @@
 //! The core sorted set logic lives in Store (src/store.rs) using the dual-index
 //! pattern: BTreeMap<(OrderedFloat<f64>, Bytes), ()> for score-ordered range queries
 //! plus HashMap<Bytes, f64> for O(1) member-to-score lookup.
+
+use pyo3::prelude::*;
+use pyo3::types::PyAny;
+
+/// Parse a score bound from a Python object.
+/// Accepts float, int, or string ("-inf", "+inf", "inf").
+/// Returns Err(PyValueError) for invalid input.
+pub fn parse_score_bound(obj: &Bound<'_, PyAny>) -> PyResult<f64> {
+    // Try float first
+    if let Ok(f) = obj.extract::<f64>() {
+        return Ok(f);
+    }
+    // Try string for -inf/+inf or numeric strings
+    if let Ok(s) = obj.extract::<String>() {
+        match s.as_str() {
+            "-inf" => return Ok(f64::NEG_INFINITY),
+            "+inf" | "inf" => return Ok(f64::INFINITY),
+            _ => {}
+        }
+        if let Ok(f) = s.parse::<f64>() {
+            return Ok(f);
+        }
+    }
+    Err(pyo3::exceptions::PyValueError::new_err(
+        "min/max must be a float or '-inf'/'+inf'",
+    ))
+}
