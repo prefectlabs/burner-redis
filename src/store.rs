@@ -1282,6 +1282,241 @@ impl Store {
 
         Ok(count)
     }
+
+    /// XAUTOCLAIM: Reclaims idle pending messages from other consumers and transfers
+    /// ownership to the claiming consumer. Returns (next_start_id, claimed_entries, deleted_ids).
+    /// - next_start_id: (0,0) if all qualifying entries processed, otherwise next unprocessed ID.
+    /// - claimed_entries: entries with field data that still exist in the stream.
+    /// - deleted_ids: entry IDs that were in PEL but trimmed from the stream.
+    pub fn xautoclaim(
+        &self,
+        key: &Bytes,
+        group: &Bytes,
+        consumer: Bytes,
+        min_idle_time_ms: u64,
+        start: StreamId,
+        count: Option<usize>,
+    ) -> Result<(StreamId, Vec<(StreamId, HashMap<Bytes, Bytes>)>, Vec<StreamId>), StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(e) => e,
+        };
+
+        let stream = match entry.data {
+            ValueData::Stream(ref mut s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let cg = match stream.groups.get_mut(group) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(g) => g,
+        };
+
+        let now = Instant::now();
+        let min_idle = Duration::from_millis(min_idle_time_ms);
+
+        // Scan ALL consumers' PELs for qualifying entries (idle >= min_idle_time AND id >= start)
+        let mut qualifying: Vec<(StreamId, u64, Bytes)> = Vec::new(); // (id, delivery_count, original_consumer)
+        for (consumer_name, consumer_data) in cg.consumers.iter() {
+            for (entry_id, pending_entry) in consumer_data.pending.iter() {
+                if *entry_id >= start && now.duration_since(pending_entry.delivery_time) >= min_idle
+                {
+                    qualifying.push((*entry_id, pending_entry.delivery_count, consumer_name.clone()));
+                }
+            }
+        }
+
+        // Sort by StreamId for deterministic ordering
+        qualifying.sort_by_key(|(id, _, _)| *id);
+
+        // Apply count limit
+        let max_count = count.unwrap_or(usize::MAX);
+        let (to_process, remaining) = if qualifying.len() > max_count {
+            (&qualifying[..max_count], Some(&qualifying[max_count..]))
+        } else {
+            (&qualifying[..], None)
+        };
+
+        // Determine next_start_id
+        let next_start_id = match remaining {
+            Some(rest) if !rest.is_empty() => rest[0].0,
+            _ => (0, 0), // All processed, signal completion
+        };
+
+        // Process the entries to claim
+        let mut claimed_entries: Vec<(StreamId, HashMap<Bytes, Bytes>)> = Vec::new();
+        let mut deleted_ids: Vec<StreamId> = Vec::new();
+
+        for (entry_id, old_delivery_count, original_consumer) in to_process {
+            // Remove from original consumer's PEL
+            if let Some(orig) = cg.consumers.get_mut(original_consumer) {
+                orig.pending.remove(entry_id);
+            }
+
+            // Check if entry still exists in stream
+            if let Some(fields) = stream.entries.get(entry_id) {
+                claimed_entries.push((*entry_id, fields.clone()));
+            } else {
+                deleted_ids.push(*entry_id);
+            }
+
+            // Add to claiming consumer's PEL with incremented delivery count
+            let claiming_consumer = cg
+                .consumers
+                .entry(consumer.clone())
+                .or_insert_with(|| Consumer {
+                    pending: HashMap::new(),
+                });
+            claiming_consumer.pending.insert(
+                *entry_id,
+                PendingEntry {
+                    delivery_time: Instant::now(),
+                    delivery_count: old_delivery_count + 1,
+                },
+            );
+        }
+
+        Ok((next_start_id, claimed_entries, deleted_ids))
+    }
+
+    /// XINFO GROUPS: Returns metadata about all consumer groups on a stream.
+    /// Each group entry contains: name, consumers count, pending count, last-delivered-id.
+    pub fn xinfo_groups(&self, key: &Bytes) -> Result<Vec<HashMap<String, String>>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(Vec::new());
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => return Ok(Vec::new()),
+            Some(e) => e,
+        };
+
+        let stream = match &entry.data {
+            ValueData::Stream(s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let mut result = Vec::new();
+        for (group_name, group) in &stream.groups {
+            let mut info = HashMap::new();
+            info.insert(
+                "name".to_string(),
+                String::from_utf8_lossy(group_name.as_ref()).into_owned(),
+            );
+            info.insert("consumers".to_string(), group.consumers.len().to_string());
+            let total_pending: usize = group.consumers.values().map(|c| c.pending.len()).sum();
+            info.insert("pending".to_string(), total_pending.to_string());
+            info.insert(
+                "last-delivered-id".to_string(),
+                crate::commands::streams::format_stream_id(group.last_delivered_id),
+            );
+            result.push(info);
+        }
+
+        Ok(result)
+    }
+
+    /// XINFO CONSUMERS: Returns metadata about all consumers in a specific consumer group.
+    /// Each consumer entry contains: name, pending count, idle time (ms since last delivery).
+    pub fn xinfo_consumers(
+        &self,
+        key: &Bytes,
+        group: &Bytes,
+    ) -> Result<Vec<HashMap<String, String>>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(e) => e,
+        };
+
+        let stream = match &entry.data {
+            ValueData::Stream(s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let cg = match stream.groups.get(group) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(g) => g,
+        };
+
+        let now = Instant::now();
+        let mut result = Vec::new();
+        for (consumer_name, consumer_data) in &cg.consumers {
+            let mut info = HashMap::new();
+            info.insert(
+                "name".to_string(),
+                String::from_utf8_lossy(consumer_name.as_ref()).into_owned(),
+            );
+            info.insert("pending".to_string(), consumer_data.pending.len().to_string());
+
+            // Idle: ms since most recent delivery_time in this consumer's PEL
+            let idle_ms = if consumer_data.pending.is_empty() {
+                0u128
+            } else {
+                consumer_data
+                    .pending
+                    .values()
+                    .map(|pe| now.duration_since(pe.delivery_time).as_millis())
+                    .min()
+                    .unwrap_or(0)
+            };
+            info.insert("idle".to_string(), idle_ms.to_string());
+            result.push(info);
+        }
+
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
