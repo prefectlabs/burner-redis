@@ -1,5 +1,6 @@
 from burner_redis._burner_redis import BurnerRedis
 from burner_redis.pipeline import Pipeline
+from burner_redis.lock import Lock, LockError
 
 
 class ResponseError(Exception):
@@ -28,4 +29,12 @@ def _pipeline(self):
 
 BurnerRedis.pipeline = _pipeline
 
-__all__ = ["BurnerRedis", "Pipeline", "ResponseError"]
+
+def _lock(self, name, timeout=None, sleep=0.1, blocking=True, blocking_timeout=None):
+    """Create a Lock for distributed locking."""
+    return Lock(self, name, timeout=timeout, sleep=sleep, blocking=blocking, blocking_timeout=blocking_timeout)
+
+
+BurnerRedis.lock = _lock
+
+__all__ = ["BurnerRedis", "Lock", "LockError", "Pipeline", "ResponseError"]
