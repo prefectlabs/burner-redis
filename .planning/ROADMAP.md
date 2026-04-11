@@ -63,8 +63,8 @@ Plans:
   4. User can ZREMRANGEBYSCORE to remove all members within a score range
 **Plans:** 2 plans
 Plans:
-- [x] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
-- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
+- [ ] 03-01-PLAN.md — Extend Store engine with SortedSet type (dual-index BTreeMap+HashMap) and 6 Rust methods
+- [ ] 03-02-PLAN.md — Python async methods for sorted set commands with pytest suite
 
 ### Phase 4: Key Expiration
 **Goal**: Keys with TTL expire automatically and are cleaned up, so that locks, leases, and temporary data do not persist indefinitely
@@ -76,7 +76,7 @@ Plans:
   3. Expired keys are cleaned up via both passive (on-access check) and active (periodic sweep) strategies, preventing memory leaks
 **Plans:** 2 plans
 Plans:
-- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
+- [x] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
 - [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
 
 ### Phase 5: Stream Commands and Consumer Groups
