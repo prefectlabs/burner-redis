@@ -55,9 +55,9 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **STRM-06**: User can XGROUP DESTROY to remove a consumer group
 - [x] **STRM-07**: User can XREADGROUP to read as a consumer in a group
 - [x] **STRM-08**: User can XACK to acknowledge processed messages
-- [ ] **STRM-09**: User can XAUTOCLAIM to reclaim idle pending messages
-- [ ] **STRM-10**: User can XINFO GROUPS to inspect consumer groups on a stream
-- [ ] **STRM-11**: User can XINFO CONSUMERS to inspect consumers in a group
+- [x] **STRM-09**: User can XAUTOCLAIM to reclaim idle pending messages
+- [x] **STRM-10**: User can XINFO GROUPS to inspect consumer groups on a stream
+- [x] **STRM-11**: User can XINFO CONSUMERS to inspect consumers in a group
 
 ### Lua Scripting
 
@@ -167,9 +167,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRM-06 | Phase 5 | Complete |
 | STRM-07 | Phase 5 | Complete |
 | STRM-08 | Phase 5 | Complete |
-| STRM-09 | Phase 5 | Pending |
-| STRM-10 | Phase 5 | Pending |
-| STRM-11 | Phase 5 | Pending |
+| STRM-09 | Phase 5 | Complete |
+| STRM-10 | Phase 5 | Complete |
+| STRM-11 | Phase 5 | Complete |
 | LUA-01 | Phase 6 | Pending |
 | LUA-02 | Phase 6 | Pending |
 | LUA-03 | Phase 6 | Pending |
