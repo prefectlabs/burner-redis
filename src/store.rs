@@ -755,6 +755,33 @@ impl Store {
             },
         }
     }
+
+    /// Sweep up to 20 expired keys from the keyspace.
+    /// Called periodically by the background expiration task.
+    /// Returns the number of keys removed.
+    pub fn sweep_expired(&self) -> usize {
+        let mut data = self.data.write();
+        let mut to_remove = Vec::new();
+        let mut checked = 0;
+
+        for (key, entry) in data.iter() {
+            if entry.expires_at.is_some() {
+                checked += 1;
+                if entry.is_expired() {
+                    to_remove.push(key.clone());
+                }
+                if checked >= 20 {
+                    break;
+                }
+            }
+        }
+
+        let count = to_remove.len();
+        for key in to_remove {
+            data.remove(&key);
+        }
+        count
+    }
 }
 
 #[cfg(test)]
@@ -1742,5 +1769,59 @@ mod tests {
         assert_eq!(count, 1);
         let result = store.zrange(&key, 0, -1, false).unwrap();
         assert_eq!(result.len(), 1);
+    }
+
+    // ── Sweep Expiration Tests ──────────────────────────────────────
+
+    #[test]
+    fn test_sweep_expired() {
+        let store = Store::new();
+        // Set 3 keys: 2 with very short TTL (already expired by the time we sweep), 1 with no TTL
+        store.set(
+            Bytes::from("exp1"), Bytes::from("v1"),
+            Some(Duration::from_millis(1)), false, false,
+        );
+        store.set(
+            Bytes::from("exp2"), Bytes::from("v2"),
+            Some(Duration::from_millis(1)), false, false,
+        );
+        store.set(
+            Bytes::from("persist"), Bytes::from("v3"),
+            None, false, false,
+        );
+
+        // Wait for expiry
+        std::thread::sleep(Duration::from_millis(10));
+
+        let removed = store.sweep_expired();
+        assert_eq!(removed, 2);
+
+        // Persistent key still exists
+        assert_eq!(store.get(&Bytes::from("persist")), Some(Bytes::from("v3")));
+        // Expired keys are gone
+        assert_eq!(store.get(&Bytes::from("exp1")), None);
+        assert_eq!(store.get(&Bytes::from("exp2")), None);
+    }
+
+    #[test]
+    fn test_sweep_max_20_keys() {
+        let store = Store::new();
+        // Create 30 keys with very short TTL
+        for i in 0..30 {
+            store.set(
+                Bytes::from(format!("key{}", i)),
+                Bytes::from("val"),
+                Some(Duration::from_millis(1)),
+                false,
+                false,
+            );
+        }
+
+        std::thread::sleep(Duration::from_millis(10));
+
+        // First sweep should remove at most 20
+        let removed = store.sweep_expired();
+        assert!(removed <= 20, "sweep should remove at most 20 keys, removed {}", removed);
+        assert!(removed > 0, "sweep should remove some expired keys");
     }
 }
