@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 05-01-PLAN.md
-last_updated: "2026-04-11T01:49:29.058Z"
+stopped_at: Completed 05-02-PLAN.md
+last_updated: "2026-04-11T01:57:40.171Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
   completed_phases: 4
   total_plans: 11
-  completed_plans: 9
-  percent: 82
+  completed_plans: 10
+  percent: 91
 ---
 
 # Project State
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 ## Current Position
 
 Phase: 05 (Stream Commands and Consumer Groups) — EXECUTING
-Plan: 2 of 3
+Plan: 3 of 3
 Status: Ready to execute
 Last activity: 2026-04-11
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 04 P01 | 3min | 2 tasks | 2 files |
 | Phase 04 P02 | 3min | 2 tasks | 1 files |
 | Phase 05 P01 | 5min | 2 tasks | 5 files |
+| Phase 05 P02 | 5min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,8 @@ Recent decisions affecting current work:
 - [Phase 05]: Used BTreeMap<(u64,u64), HashMap<Bytes,Bytes>> for stream entries -- ordered insertion and efficient range queries for XREAD
 - [Phase 05]: Scaffolded ConsumerGroup/Consumer/PendingEntry structs in Plan 01 to avoid ValueData enum changes in Plan 02
 - [Phase 05]: XREAD returns None for empty results and skips non-existent streams, matching redis-py behavior
+- [Phase 05]: Used sentinel (u64::MAX, u64::MAX) for dollar ID resolution in XGROUP CREATE -- avoids string passing through store layer
+- [Phase 05]: XACK iterates all consumers to find PEL entry -- O(consumers) but simple and correct for embedded use
 
 ### Pending Todos
 
@@ -103,6 +106,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T01:49:29.055Z
-Stopped at: Completed 05-01-PLAN.md
+Last session: 2026-04-11T01:57:40.168Z
+Stopped at: Completed 05-02-PLAN.md
 Resume file: None

@@ -51,10 +51,10 @@ Requirements for initial release. Each maps to roadmap phases.
 - [x] **STRM-02**: User can XREAD entries from one or more streams
 - [x] **STRM-03**: User can XLEN to get the number of entries in a stream
 - [x] **STRM-04**: User can XTRIM a stream by maxlen or minid
-- [ ] **STRM-05**: User can XGROUP CREATE to create a consumer group
-- [ ] **STRM-06**: User can XGROUP DESTROY to remove a consumer group
-- [ ] **STRM-07**: User can XREADGROUP to read as a consumer in a group
-- [ ] **STRM-08**: User can XACK to acknowledge processed messages
+- [x] **STRM-05**: User can XGROUP CREATE to create a consumer group
+- [x] **STRM-06**: User can XGROUP DESTROY to remove a consumer group
+- [x] **STRM-07**: User can XREADGROUP to read as a consumer in a group
+- [x] **STRM-08**: User can XACK to acknowledge processed messages
 - [ ] **STRM-09**: User can XAUTOCLAIM to reclaim idle pending messages
 - [ ] **STRM-10**: User can XINFO GROUPS to inspect consumer groups on a stream
 - [ ] **STRM-11**: User can XINFO CONSUMERS to inspect consumers in a group
@@ -163,10 +163,10 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STRM-02 | Phase 5 | Complete |
 | STRM-03 | Phase 5 | Complete |
 | STRM-04 | Phase 5 | Complete |
-| STRM-05 | Phase 5 | Pending |
-| STRM-06 | Phase 5 | Pending |
-| STRM-07 | Phase 5 | Pending |
-| STRM-08 | Phase 5 | Pending |
+| STRM-05 | Phase 5 | Complete |
+| STRM-06 | Phase 5 | Complete |
+| STRM-07 | Phase 5 | Complete |
+| STRM-08 | Phase 5 | Complete |
 | STRM-09 | Phase 5 | Pending |
 | STRM-10 | Phase 5 | Pending |
 | STRM-11 | Phase 5 | Pending |

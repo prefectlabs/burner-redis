@@ -92,7 +92,7 @@ Plans:
 **Plans:** 3 plans
 Plans:
 - [x] 05-01-PLAN.md — Stream data structure + XADD/XREAD/XLEN/XTRIM with Python bindings and tests
-- [ ] 05-02-PLAN.md — Consumer group core: XGROUP CREATE/DESTROY, XREADGROUP, XACK with Python bindings and tests
+- [x] 05-02-PLAN.md — Consumer group core: XGROUP CREATE/DESTROY, XREADGROUP, XACK with Python bindings and tests
 - [ ] 05-03-PLAN.md — Message recovery and introspection: XAUTOCLAIM, XINFO GROUPS/CONSUMERS with Python bindings and tests
 
 
