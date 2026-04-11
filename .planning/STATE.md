@@ -145,6 +145,7 @@ None yet.
 | # | Description | Date | Commit | Directory |
 |---|-------------|------|--------|-----------|
 | 260411-b8i | Add integration tests that simulate how Prefect servers use Redis to verify compatibility | 2026-04-11 | 5fd90f5 | [260411-b8i-add-integration-tests-that-simulate-how-](./quick/260411-b8i-add-integration-tests-that-simulate-how-/) |
+| 260411-ipj | Run integration tests in CI on merge to main | 2026-04-11 | 577c6e8 | [260411-ipj-run-integration-tests-in-ci-on-merge-to-](./quick/260411-ipj-run-integration-tests-in-ci-on-merge-to-/) |
 
 ## Session Continuity
 
