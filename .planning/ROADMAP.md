@@ -89,10 +89,12 @@ Plans:
   3. User can XAUTOCLAIM to reclaim idle pending messages from other consumers
   4. User can inspect stream state with XINFO GROUPS and XINFO CONSUMERS
   5. User can XTRIM streams by maxlen or minid to bound memory usage
-**Plans:** 2 plans
+**Plans:** 3 plans
 Plans:
-- [ ] 02-01-PLAN.md — Extend Store engine with Hash/Set value types and WRONGTYPE errors
-- [ ] 02-02-PLAN.md — Python async methods for hash/set commands with pytest suite
+- [ ] 05-01-PLAN.md — Stream data structure + XADD/XREAD/XLEN/XTRIM with Python bindings and tests
+- [ ] 05-02-PLAN.md — Consumer group core: XGROUP CREATE/DESTROY, XREADGROUP, XACK with Python bindings and tests
+- [ ] 05-03-PLAN.md — Message recovery and introspection: XAUTOCLAIM, XINFO GROUPS/CONSUMERS with Python bindings and tests
+
 
 ### Phase 6: Lua Scripting
 **Goal**: Users can execute Lua scripts that atomically operate across multiple keys and data types, enabling Prefect's atomic lease and event operations
