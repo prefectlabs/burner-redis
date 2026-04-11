@@ -69,9 +69,9 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### Pipeline
 
-- [ ] **PIPE-01**: User can create a pipeline, queue multiple commands, and execute them as a batch
-- [ ] **PIPE-02**: Pipeline returns results as a list in command order
-- [ ] **PIPE-03**: Pipeline supports async context manager usage
+- [x] **PIPE-01**: User can create a pipeline, queue multiple commands, and execute them as a batch
+- [x] **PIPE-02**: Pipeline returns results as a list in command order
+- [x] **PIPE-03**: Pipeline supports async context manager usage
 
 ### Key Expiration
 
@@ -175,9 +175,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LUA-03 | Phase 6 | Complete |
 | LUA-04 | Phase 6 | Complete |
 | LUA-05 | Phase 6 | Complete |
-| PIPE-01 | Phase 7 | Pending |
-| PIPE-02 | Phase 7 | Pending |
-| PIPE-03 | Phase 7 | Pending |
+| PIPE-01 | Phase 7 | Complete |
+| PIPE-02 | Phase 7 | Complete |
+| PIPE-03 | Phase 7 | Complete |
 | EXP-01 | Phase 4 | Complete |
 | EXP-02 | Phase 4 | Complete |
 | EXP-03 | Phase 4 | Complete |

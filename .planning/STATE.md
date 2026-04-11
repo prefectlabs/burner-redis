@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 06-02-PLAN.md
-last_updated: "2026-04-11T02:42:10.888Z"
+status: executing
+stopped_at: Completed 07-01-PLAN.md
+last_updated: "2026-04-11T03:12:36.285Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
   completed_phases: 6
-  total_plans: 13
-  completed_plans: 13
-  percent: 100
+  total_plans: 15
+  completed_plans: 14
+  percent: 93
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 06 — Lua Scripting
+**Current focus:** Phase 07 — Pipeline and Locking
 
 ## Current Position
 
-Phase: 06 (Lua Scripting) — EXECUTING
+Phase: 07 (Pipeline and Locking) — EXECUTING
 Plan: 2 of 2
-Status: Phase complete — ready for verification
+Status: Ready to execute
 Last activity: 2026-04-11
 
 Progress: [░░░░░░░░░░] 0%
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 11
+- Total plans completed: 13
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -49,6 +49,7 @@ Progress: [░░░░░░░░░░] 0%
 | 03 | 2 | - | - |
 | 04 | 2 | - | - |
 | 05 | 3 | - | - |
+| 06 | 2 | - | - |
 
 **Recent Trend:**
 
@@ -69,6 +70,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 05 P03 | 4min | 2 tasks | 3 files |
 | Phase 06 P01 | 8min | 2 tasks | 4 files |
 | Phase 06 P02 | 4min | 2 tasks | 2 files |
+| Phase 07 P01 | 3min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -106,6 +108,8 @@ Recent decisions affecting current work:
 - [Phase 06]: Lock ordering enforced: scripts lock released before data lock acquired (deadlock prevention)
 - [Phase 06]: Used Python::try_attach for GIL in async blocks (PyO3 0.28.3 pattern, consistent with existing codebase)
 - [Phase 06]: redis_value_to_py recursive converter handles nested Lua tables as arbitrarily deep PyList structures
+- [Phase 07]: Monkey-patch BurnerRedis.pipeline() in __init__.py instead of Rust-side method -- pure Python Pipeline class
+- [Phase 07]: Pipeline command methods are synchronous (buffer-only), only execute() is async -- matches redis-py Pipeline behavior
 
 ### Pending Todos
 
@@ -117,6 +121,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T02:42:10.885Z
-Stopped at: Completed 06-02-PLAN.md
+Last session: 2026-04-11T03:12:36.282Z
+Stopped at: Completed 07-01-PLAN.md
 Resume file: None
