@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyDict};
+use pyo3::types::{PyAny, PyBytes, PyDict};
 use std::collections::HashSet as StdHashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,7 +12,27 @@ mod scripting;
 use commands::strings::{extract_bytes, extract_expiry};
 use commands::sorted_sets::parse_score_bound;
 use commands::streams::{format_stream_id, parse_stream_id, extract_stream_fields, StreamId};
+use scripting::RedisValue;
 use store::{Store, StoreError};
+
+/// Convert a RedisValue (from Lua script execution) into a Python object.
+/// Handles recursive conversion for nested arrays.
+fn redis_value_to_py(py: Python<'_>, val: RedisValue) -> PyResult<Py<PyAny>> {
+    match val {
+        RedisValue::BulkString(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
+        RedisValue::Integer(n) => Ok(n.into_pyobject(py)?.into_any().unbind()),
+        RedisValue::Nil => Ok(py.None()),
+        RedisValue::Status(s) => Ok(PyBytes::new(py, s.as_bytes()).into_any().unbind()),
+        RedisValue::Error(msg) => Err(pyo3::exceptions::PyException::new_err(msg)),
+        RedisValue::Array(items) => {
+            let py_items: PyResult<Vec<Py<PyAny>>> = items
+                .into_iter()
+                .map(|item| redis_value_to_py(py, item))
+                .collect();
+            Ok(pyo3::types::PyList::new(py, &py_items?)?.into_any().unbind())
+        }
+    }
+}
 
 /// Convert a StoreError into a Python exception with the Redis-compatible error message.
 fn store_err_to_py(e: StoreError) -> PyErr {
@@ -1046,6 +1066,125 @@ impl BurnerRedis {
                     "failed to attach to Python interpreter",
                 )
             })?
+        })
+    }
+
+    // ── Scripting Commands ────────────────────────────────────────────
+
+    /// EVAL command matching redis.asyncio.Redis.eval() signature.
+    /// Executes a Lua script with KEYS and ARGV arrays.
+    /// The first `numkeys` args after numkeys are KEYS, the rest are ARGV.
+    #[pyo3(signature = (script, numkeys, *keys_and_args))]
+    fn eval<'py>(
+        &self,
+        py: Python<'py>,
+        script: String,
+        numkeys: usize,
+        keys_and_args: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+
+        // Split keys_and_args: first numkeys are KEYS, rest are ARGV
+        let mut keys: Vec<Bytes> = Vec::new();
+        let mut args: Vec<Bytes> = Vec::new();
+        for (i, obj) in keys_and_args.iter().enumerate() {
+            let b = extract_bytes(&obj)?;
+            if i < numkeys {
+                keys.push(b);
+            } else {
+                args.push(b);
+            }
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = store.eval(&script, keys, args);
+            match result {
+                Ok(val) => {
+                    Python::try_attach(|py| redis_value_to_py(py, val))
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?
+                }
+                Err(msg) => Err(pyo3::exceptions::PyException::new_err(msg)),
+            }
+        })
+    }
+
+    /// EVALSHA command matching redis.asyncio.Redis.evalsha() signature.
+    /// Executes a cached Lua script by its SHA1 hash.
+    /// Returns NOSCRIPT error if the SHA is not in the cache.
+    #[pyo3(signature = (sha, numkeys, *keys_and_args))]
+    fn evalsha<'py>(
+        &self,
+        py: Python<'py>,
+        sha: String,
+        numkeys: usize,
+        keys_and_args: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+
+        // Split keys_and_args: first numkeys are KEYS, rest are ARGV
+        let mut keys: Vec<Bytes> = Vec::new();
+        let mut args: Vec<Bytes> = Vec::new();
+        for (i, obj) in keys_and_args.iter().enumerate() {
+            let b = extract_bytes(&obj)?;
+            if i < numkeys {
+                keys.push(b);
+            } else {
+                args.push(b);
+            }
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let result = store.evalsha(&sha, keys, args);
+            match result {
+                Ok(val) => {
+                    Python::try_attach(|py| redis_value_to_py(py, val))
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?
+                }
+                Err(msg) => Err(pyo3::exceptions::PyException::new_err(msg)),
+            }
+        })
+    }
+
+    /// SCRIPT LOAD command - caches a Lua script and returns its SHA1 hash.
+    fn script_load<'py>(
+        &self,
+        py: Python<'py>,
+        script: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let sha = store.script_load(&script);
+            Ok(sha)
+        })
+    }
+
+    /// SCRIPT EXISTS command - checks if one or more scripts are cached by SHA1 hash.
+    /// Returns list of bools.
+    #[pyo3(signature = (*args))]
+    fn script_exists<'py>(
+        &self,
+        py: Python<'py>,
+        args: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+
+        let shas: Vec<String> = args
+            .iter()
+            .map(|obj| obj.extract::<String>())
+            .collect::<PyResult<Vec<_>>>()?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store.script_exists(&shas);
+            Ok(results)
         })
     }
 }
