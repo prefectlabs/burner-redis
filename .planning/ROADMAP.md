@@ -64,7 +64,7 @@ Plans:
 **Plans:** 2 plans
 Plans:
 - [x] 03-01-PLAN.md — Extend Store engine with SortedSet type (dual-index BTreeMap+HashMap) and 6 Rust methods
-- [ ] 03-02-PLAN.md — Python async methods for sorted set commands with pytest suite
+- [x] 03-02-PLAN.md — Python async methods for sorted set commands with pytest suite
 
 ### Phase 4: Key Expiration
 **Goal**: Keys with TTL expire automatically and are cleaned up, so that locks, leases, and temporary data do not persist indefinitely
