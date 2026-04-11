@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-04-11T03:17:00.325Z"
+status: executing
+stopped_at: Completed 08-01-PLAN.md
+last_updated: "2026-04-11T03:59:25.384Z"
 last_activity: 2026-04-11
 progress:
   total_phases: 9
   completed_phases: 7
-  total_plans: 15
-  completed_plans: 15
-  percent: 100
+  total_plans: 17
+  completed_plans: 16
+  percent: 94
 ---
 
 # Project State
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 07 — Pipeline and Locking
+**Current focus:** Phase 08 — Persistence
 
 ## Current Position
 
-Phase: 07 (Pipeline and Locking) — EXECUTING
+Phase: 08 (Persistence) — EXECUTING
 Plan: 2 of 2
-Status: Phase complete — ready for verification
+Status: Ready to execute
 Last activity: 2026-04-11
 
 Progress: [░░░░░░░░░░] 0%
@@ -36,7 +36,7 @@ Progress: [░░░░░░░░░░] 0%
 
 **Velocity:**
 
-- Total plans completed: 13
+- Total plans completed: 15
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -50,6 +50,7 @@ Progress: [░░░░░░░░░░] 0%
 | 04 | 2 | - | - |
 | 05 | 3 | - | - |
 | 06 | 2 | - | - |
+| 07 | 2 | - | - |
 
 **Recent Trend:**
 
@@ -72,6 +73,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 06 P02 | 4min | 2 tasks | 2 files |
 | Phase 07 P01 | 3min | 2 tasks | 3 files |
 | Phase 07 P02 | 3min | 2 tasks | 3 files |
+| Phase 08 P01 | 4min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -114,6 +116,9 @@ Recent decisions affecting current work:
 - [Phase 07]: Token-based lock ownership using UUID strings compared against GET result bytes for safe release verification
 - [Phase 07]: Non-atomic GET-then-DELETE for lock release acceptable for in-process embedded database with no network partitions
 - [Phase 07]: Monkey-patch BurnerRedis.lock() in __init__.py consistent with pipeline() factory pattern
+- [Phase 08]: PersistableStore snapshot pattern: parallel types using Vec<u8>/u64 instead of Bytes/Instant to keep serde concerns separate from runtime
+- [Phase 08]: TTL persisted as milliseconds-remaining (relative duration) rather than absolute timestamp for portability
+- [Phase 08]: PendingEntry delivery_time reset to Instant::now() on load -- conservative for XAUTOCLAIM idle time calculations
 
 ### Pending Todos
 
@@ -125,6 +130,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-11T03:17:00.321Z
-Stopped at: Completed 07-02-PLAN.md
+Last session: 2026-04-11T03:59:25.381Z
+Stopped at: Completed 08-01-PLAN.md
 Resume file: None

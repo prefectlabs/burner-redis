@@ -135,7 +135,7 @@ Plans:
   4. Persistence uses crash-safe write-then-rename with fsync so partial writes never corrupt state
 **Plans:** 2 plans
 Plans:
-- [ ] 08-01-PLAN.md — Serde derives, rmp-serde serialization, and crash-safe persistence module
+- [x] 08-01-PLAN.md — Serde derives, rmp-serde serialization, and crash-safe persistence module
 - [ ] 08-02-PLAN.md — Python API (persistence_path constructor, save() method, atexit handler) with integration tests
 
 ### Phase 9: Distribution
