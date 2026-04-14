@@ -22,6 +22,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 8: Persistence** - Flush-to-disk and reload-from-disk with crash-safe writes
 - [ ] **Phase 9: Distribution** - PyPI package with pre-built wheels for Linux and macOS
 - [x] **Phase 10: Pub/Sub** - Redis pub/sub with SUBSCRIBE, UNSUBSCRIBE, PUBLISH, PSUBSCRIBE, PUNSUBSCRIBE, and PUBSUB introspection (completed 2026-04-14)
+- [ ] **Phase 11: Pydocket Compatibility** - Close redis-py compatibility gaps for pydocket integration
 
 ## Phase Details
 
@@ -169,10 +170,27 @@ Plans:
 - [x] 10-01-PLAN.md — Rust pub/sub engine: PubSubRegistry in Store, broadcast fan-out, glob matching, PyO3 bindings
 - [x] 10-02-PLAN.md — Python PubSub class, Pipeline/Lua PUBLISH integration, and comprehensive test suite
 
+### Phase 11: Close redis-py compatibility gaps for pydocket integration
+
+**Goal:** Pydocket's full test suite passes against BurnerRedis with zero xfails/skips, and every gap fixed has regression test coverage in our own suite
+**Requirements**: D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10
+**Depends on:** Phase 10
+**Success Criteria** (what must be TRUE):
+  1. XREADGROUP with block parameter waits for new stream entries instead of returning immediately, fixing the ~19% delayed task delivery race
+  2. XCLAIM command is fully implemented with all redis-py parameters (idle, force, justid, retrycount, min_idle_time)
+  3. XTRIM accepts the approximate parameter without error
+  4. All pydocket integration tests pass with zero xfails and zero skips
+  5. Regression tests cover every gap fixed in this phase
+**Plans:** 2 plans
+
+Plans:
+- [ ] 11-01-PLAN.md — XREADGROUP blocking with tokio::sync::Notify, XCLAIM implementation, XTRIM approximate parameter
+- [ ] 11-02-PLAN.md — Pydocket test suite validation, gap closure, regression tests, zero xfails
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -186,3 +204,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 8. Persistence | 0/2 | Planning complete | - |
 | 9. Distribution | 0/2 | Not started | - |
 | 10. Pub/Sub | 2/2 | Complete    | 2026-04-14 |
+| 11. Pydocket Compatibility | 0/2 | Planning complete | - |
