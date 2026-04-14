@@ -5,8 +5,9 @@ use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, Notify};
 
 use crate::commands::streams::StreamId;
 use crate::scripting::{LuaEngine, RedisValue};
@@ -228,6 +229,7 @@ pub struct Store {
     data: RwLock<HashMap<Bytes, ValueEntry>>,
     scripts: RwLock<HashMap<String, String>>,
     pub(crate) pubsub: RwLock<PubSubRegistry>,
+    stream_notify: Arc<Notify>,
 }
 
 impl Store {
@@ -236,7 +238,13 @@ impl Store {
             data: RwLock::new(HashMap::new()),
             scripts: RwLock::new(HashMap::new()),
             pubsub: RwLock::new(PubSubRegistry::new()),
+            stream_notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// Get a reference to the stream notification handle for async waiting.
+    pub fn stream_notify(&self) -> Arc<Notify> {
+        self.stream_notify.clone()
     }
 
     // ── Persistence Methods ─────────────────────────────────────────
@@ -1121,6 +1129,8 @@ impl Store {
 
                 stream.entries.insert(new_id, fields);
                 stream.last_id = new_id;
+                // Wake any blocking XREADGROUP waiters
+                self.stream_notify.notify_waiters();
                 Ok(new_id)
             }
             _ => Err(StoreError::WrongType),
@@ -1969,9 +1979,16 @@ impl Store {
         // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
         let pubsub_tx = self.pubsub_sender();
 
-        // Acquire write lock on data -- held for entire script execution
-        let mut data = self.data.write();
-        LuaEngine::execute(script, keys, args, &mut *data, Some(&pubsub_tx))
+        let (result, had_xadd) = {
+            // Acquire write lock on data -- held for entire script execution
+            let mut data = self.data.write();
+            LuaEngine::execute(script, keys, args, &mut *data, Some(&pubsub_tx))?
+            // data write lock drops here
+        };
+        if had_xadd {
+            self.stream_notify.notify_waiters();
+        }
+        Ok(result)
     }
 
     /// EVALSHA: Execute a cached Lua script by SHA1 hash.
@@ -1990,9 +2007,16 @@ impl Store {
         // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
         let pubsub_tx = self.pubsub_sender();
 
-        // Acquire write lock on data -- held for entire script execution
-        let mut data = self.data.write();
-        LuaEngine::execute(&script, keys, args, &mut *data, Some(&pubsub_tx))
+        let (result, had_xadd) = {
+            // Acquire write lock on data -- held for entire script execution
+            let mut data = self.data.write();
+            LuaEngine::execute(&script, keys, args, &mut *data, Some(&pubsub_tx))?
+            // data write lock drops here
+        };
+        if had_xadd {
+            self.stream_notify.notify_waiters();
+        }
+        Ok(result)
     }
 
     // -- Pub/Sub Methods --

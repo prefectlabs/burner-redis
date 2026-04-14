@@ -107,13 +107,14 @@ impl LuaEngine {
     /// `data` is the ALREADY WRITE-LOCKED store data HashMap -- the caller (Store::eval)
     /// acquires the write lock and passes the mutable reference. This ensures atomicity.
     /// `pubsub_tx` is an optional broadcast sender for PUBLISH command support in Lua scripts.
+    /// Execute a Lua script. Returns (RedisValue, bool) where bool indicates XADD occurred.
     pub fn execute(
         script: &str,
         keys: Vec<Bytes>,
         args: Vec<Bytes>,
         data: &mut HashMap<Bytes, ValueEntry>,
         pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
-    ) -> Result<RedisValue, String> {
+    ) -> Result<(RedisValue, bool), String> {
         // Create a fresh Lua VM per execution (isolation, no state leakage)
         let lua = Lua::new();
 
@@ -121,6 +122,8 @@ impl LuaEngine {
         let data_cell = RefCell::new(data);
         // Clone the broadcast sender for use inside Lua closures
         let pubsub_tx_clone = pubsub_tx.cloned();
+        // Track if any XADD occurred during script execution
+        let had_xadd = std::cell::Cell::new(false);
 
         let scope_result: LuaResult<RedisValue> = lua.scope(|scope| {
             // Set up KEYS global
@@ -176,8 +179,11 @@ impl LuaEngine {
                     let result = dispatch_command(&cmd_name, &cmd_args, *data_ref, pubsub_tx_ref);
 
                     match result {
-                        Ok(RedisValue::Error(msg)) => Err(LuaError::RuntimeError(msg)),
-                        Ok(val) => val.into_lua(lua_ctx),
+                        Ok((RedisValue::Error(msg), _)) => Err(LuaError::RuntimeError(msg)),
+                        Ok((val, xadd_flag)) => {
+                            if xadd_flag { had_xadd.set(true); }
+                            val.into_lua(lua_ctx)
+                        },
                         Err(msg) => Err(LuaError::RuntimeError(msg)),
                     }
                 })?;
@@ -220,12 +226,15 @@ impl LuaEngine {
                     let result = dispatch_command(&cmd_name, &cmd_args, *data_ref, pubsub_tx_ref);
 
                     match result {
-                        Ok(RedisValue::Error(msg)) => {
+                        Ok((RedisValue::Error(msg), _)) => {
                             let table = lua_ctx.create_table()?;
                             table.set("err", msg)?;
                             Ok(LuaValue::Table(table))
                         }
-                        Ok(val) => val.into_lua(lua_ctx),
+                        Ok((val, xadd_flag)) => {
+                            if xadd_flag { had_xadd.set(true); }
+                            val.into_lua(lua_ctx)
+                        },
                         Err(msg) => {
                             let table = lua_ctx.create_table()?;
                             table.set("err", msg)?;
@@ -248,14 +257,29 @@ impl LuaEngine {
             Ok(lua_to_redis_value(result))
         });
 
-        scope_result.map_err(|e| e.to_string())
+        scope_result.map(|v| (v, had_xadd.get())).map_err(|e| e.to_string())
     }
 }
 
 /// Dispatch a Redis command to the appropriate operation on the raw data HashMap.
 /// This operates directly on the write-locked data for atomicity during Lua execution.
 /// `pubsub_tx` is an optional broadcast sender for PUBLISH support in Lua scripts.
+/// Returns (RedisValue, bool) where the bool indicates if an XADD occurred (for stream notification).
 fn dispatch_command(
+    cmd: &str,
+    args: &[Bytes],
+    data: &mut HashMap<Bytes, ValueEntry>,
+    pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
+) -> Result<(RedisValue, bool), String> {
+    let is_xadd = cmd == "XADD";
+    let result = dispatch_command_inner(cmd, args, data, pubsub_tx)?;
+    // Signal that an XADD occurred only if the command succeeded (not an error)
+    let had_xadd = is_xadd && !matches!(result, RedisValue::Error(_));
+    Ok((result, had_xadd))
+}
+
+/// Inner dispatch that returns just the RedisValue.
+fn dispatch_command_inner(
     cmd: &str,
     args: &[Bytes],
     data: &mut HashMap<Bytes, ValueEntry>,

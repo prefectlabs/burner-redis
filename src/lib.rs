@@ -60,6 +60,62 @@ fn store_err_to_py(e: StoreError) -> PyErr {
     make_response_error(e.to_string())
 }
 
+/// Format XREADGROUP results into a Python list structure.
+/// Used by both blocking and non-blocking XREADGROUP paths.
+fn format_xreadgroup_result(
+    results: Vec<(Bytes, Vec<(commands::streams::StreamId, std::collections::HashMap<Bytes, Bytes>)>)>,
+) -> PyResult<pyo3::Py<pyo3::PyAny>> {
+    if results.is_empty() {
+        return Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+            Ok(pyo3::types::PyList::empty(py).into_any().unbind())
+        })
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "failed to attach to Python interpreter",
+            )
+        })?;
+    }
+
+    Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+        let outer = pyo3::types::PyList::empty(py);
+        for (stream_name, entries) in &results {
+            let entry_list = pyo3::types::PyList::empty(py);
+            for (id, fields) in entries {
+                let id_bytes = format_stream_id(*id).into_bytes();
+                let field_dict = pyo3::types::PyDict::new(py);
+                for (fk, fv) in fields {
+                    field_dict.set_item(
+                        pyo3::types::PyBytes::new(py, fk.as_ref()),
+                        pyo3::types::PyBytes::new(py, fv.as_ref()),
+                    )?;
+                }
+                let tuple = pyo3::types::PyTuple::new(
+                    py,
+                    &[
+                        pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
+                        field_dict.into_any(),
+                    ],
+                )?;
+                entry_list.append(tuple)?;
+            }
+            let stream_pair = pyo3::types::PyList::new(
+                py,
+                &[
+                    pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
+                    entry_list.into_any(),
+                ],
+            )?;
+            outer.append(stream_pair)?;
+        }
+        Ok(outer.into_any().unbind())
+    })
+    .ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "failed to attach to Python interpreter",
+        )
+    })?
+}
+
 #[pyclass]
 pub struct BurnerRedis {
     store: Arc<Store>,
@@ -1081,8 +1137,8 @@ impl BurnerRedis {
 
     /// XREADGROUP command matching redis.asyncio.Redis.xreadgroup() signature.
     /// Reads entries from streams as a consumer in a group.
-    /// Returns list of [stream_name, [(id, {field: value}), ...]] or None if empty.
-    /// The block and noack parameters are accepted for API compatibility but ignored.
+    /// Returns list of [stream_name, [(id, {field: value}), ...]] or empty list.
+    /// When block is specified, waits for new entries up to the given timeout in milliseconds.
     #[pyo3(signature = (groupname, consumername, streams, count=None, block=None, noack=false))]
     fn xreadgroup<'py>(
         &self,
@@ -1091,7 +1147,6 @@ impl BurnerRedis {
         consumername: &Bound<'py, PyAny>,
         streams: &Bound<'py, PyDict>,
         count: Option<usize>,
-        #[allow(unused_variables)]
         block: Option<u64>,
         #[allow(unused_variables)]
         noack: bool,
@@ -1115,61 +1170,33 @@ impl BurnerRedis {
         }
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // First non-blocking attempt
             let results = store
                 .xreadgroup(&group, &consumer, &keys, &id_strs, count)
                 .map_err(store_err_to_py)?;
 
-            if results.is_empty() {
-                // Return empty list (not None) so callers can iterate safely
-                return Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
-                    Ok(pyo3::types::PyList::empty(py).into_any().unbind())
-                })
-                .ok_or_else(|| {
-                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                        "failed to attach to Python interpreter",
-                    )
-                })?;
+            if !results.is_empty() || block.is_none() {
+                return format_xreadgroup_result(results);
             }
 
-            // Build the nested Python structure (same format as xread)
-            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
-                let outer = pyo3::types::PyList::empty(py);
-                for (stream_name, entries) in &results {
-                    let entry_list = pyo3::types::PyList::empty(py);
-                    for (id, fields) in entries {
-                        let id_bytes = format_stream_id(*id).into_bytes();
-                        let field_dict = pyo3::types::PyDict::new(py);
-                        for (fk, fv) in fields {
-                            field_dict.set_item(
-                                pyo3::types::PyBytes::new(py, fk.as_ref()),
-                                pyo3::types::PyBytes::new(py, fv.as_ref()),
-                            )?;
-                        }
-                        let tuple = pyo3::types::PyTuple::new(
-                            py,
-                            &[
-                                pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
-                                field_dict.into_any(),
-                            ],
-                        )?;
-                        entry_list.append(tuple)?;
-                    }
-                    let stream_pair = pyo3::types::PyList::new(
-                        py,
-                        &[
-                            pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
-                            entry_list.into_any(),
-                        ],
-                    )?;
-                    outer.append(stream_pair)?;
+            // Blocking: wait for stream notification or timeout
+            let block_ms = block.unwrap();
+            let notify = store.stream_notify();
+            let timeout_duration = Duration::from_millis(block_ms);
+
+            tokio::select! {
+                _ = notify.notified() => {
+                    // New data arrived, retry
+                    let results = store
+                        .xreadgroup(&group, &consumer, &keys, &id_strs, count)
+                        .map_err(store_err_to_py)?;
+                    format_xreadgroup_result(results)
                 }
-                Ok(outer.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
+                _ = tokio::time::sleep(timeout_duration) => {
+                    // Timeout, return empty
+                    format_xreadgroup_result(Vec::new())
+                }
+            }
         })
     }
 

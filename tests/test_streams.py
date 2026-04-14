@@ -1,7 +1,10 @@
-"""Tests for stream commands: XADD, XREAD, XLEN, XTRIM, XGROUP, XREADGROUP, XACK, XAUTOCLAIM, XINFO.
+"""Tests for stream commands: XADD, XREAD, XLEN, XTRIM, XGROUP, XREADGROUP, XACK, XAUTOCLAIM, XINFO, XCLAIM.
 
-Covers requirements: STRM-01, STRM-02, STRM-03, STRM-04, STRM-05, STRM-06, STRM-07, STRM-08, STRM-09, STRM-10, STRM-11.
+Covers requirements: STRM-01, STRM-02, STRM-03, STRM-04, STRM-05, STRM-06, STRM-07, STRM-08, STRM-09, STRM-10, STRM-11, D-03, D-06, D-07, D-08.
 """
+import asyncio
+import time
+
 import pytest
 from burner_redis import BurnerRedis
 
@@ -763,3 +766,67 @@ async def test_xpending_range_idle_filter(r):
     # With idle=0, everything qualifies
     result2 = await r.xpending_range("mystream", "mygroup", "-", "+", 10, idle=0)
     assert len(result2) == 1
+
+
+# --- XREADGROUP Blocking ---
+
+
+async def test_xreadgroup_block_returns_new_entries(r):
+    """XREADGROUP with block waits for new entries added after the call."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    # Read existing entry
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Schedule an XADD after a short delay
+    async def add_later():
+        await asyncio.sleep(0.05)
+        await r.xadd("mystream", {"f": "v2"})
+
+    task = asyncio.create_task(add_later())
+    # Block for up to 2000ms -- should return quickly after add_later fires
+    result = await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, block=2000)
+    await task
+    assert len(result) > 0
+    # Verify we got the new entry
+    stream_name, entries = result[0]
+    assert entries[0][1][b"f"] == b"v2"
+
+
+async def test_xreadgroup_block_timeout_returns_empty(r):
+    """XREADGROUP with block returns empty after timeout if no new data."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Block for 50ms with no new data
+    start = time.monotonic()
+    result = await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, block=50)
+    elapsed = time.monotonic() - start
+    # Should return empty (either [] or None-ish)
+    assert len(result) == 0
+    # Should have waited approximately 50ms (at least 30ms to allow for timing variance)
+    assert elapsed >= 0.03
+
+
+async def test_xreadgroup_block_lua_xadd_wakes_reader(r):
+    """XREADGROUP with block wakes up when XADD is done from a Lua script."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    lua_script = r.register_script("""
+    redis.call('XADD', KEYS[1], '*', 'f', ARGV[1])
+    return 1
+    """)
+
+    async def lua_add_later():
+        await asyncio.sleep(0.05)
+        await lua_script(keys=["mystream"], args=["from_lua"])
+
+    task = asyncio.create_task(lua_add_later())
+    result = await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, block=2000)
+    await task
+    assert len(result) > 0
+    stream_name, entries = result[0]
+    assert entries[0][1][b"f"] == b"from_lua"
