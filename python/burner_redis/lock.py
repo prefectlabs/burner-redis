@@ -12,6 +12,16 @@ class LockError(Exception):
     pass
 
 
+try:
+    import redis.exceptions
+
+    class LockError(redis.exceptions.LockError):  # type: ignore[no-redef]
+        """Raised when a lock operation fails (subclass of redis.exceptions.LockError)."""
+        pass
+except (ImportError, AttributeError):
+    pass
+
+
 class Lock:
     """Distributed lock with token-based ownership.
 

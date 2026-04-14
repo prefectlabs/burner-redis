@@ -23,6 +23,75 @@ except (ImportError, AttributeError):
     pass
 
 
+class NoScriptError(Exception):
+    """Raised when EVALSHA references an unknown script SHA."""
+    pass
+
+
+try:
+    import redis.exceptions
+
+    class NoScriptError(redis.exceptions.NoScriptError):  # type: ignore[no-redef]
+        """Raised when EVALSHA references an unknown script SHA (subclass of redis.exceptions.NoScriptError)."""
+        pass
+except (ImportError, AttributeError):
+    pass
+
+
+def _coerce_value(value):
+    """Coerce a value to str or bytes, matching redis-py's Encoder.encode() behavior.
+
+    Accepts: bytes, memoryview, int, float, str.
+    Rejects: bool (redis-py rejects bools with DataError since bool is subclass of int).
+    """
+    if isinstance(value, (bytes, memoryview)):
+        return value
+    if isinstance(value, bool):
+        raise TypeError(
+            "Invalid input of type: 'bool'. "
+            "Convert to a bytes, string, int or float first."
+        )
+    if isinstance(value, (int, float)):
+        return repr(value).encode()
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
+_original_set = BurnerRedis.set
+
+
+async def _coerced_set(self, name, value, ex=None, px=None, nx=False, xx=False):
+    """SET with value coercion matching redis-py behavior."""
+    return await _original_set(self, name, _coerce_value(value), ex=ex, px=px, nx=nx, xx=xx)
+
+
+BurnerRedis.set = _coerced_set
+
+
+async def _setex(self, name, time, value):
+    """SETEX: Set key with expiration in seconds. Shorthand for SET with EX."""
+    return await self.set(name, _coerce_value(value), ex=time)
+
+
+BurnerRedis.setex = _setex
+
+
+async def _scan_iter(self, match=None, count=None, _type=None):
+    """Async iterator over keys matching a glob pattern.
+
+    Wraps keys() as an async generator for redis-py scan_iter() compatibility.
+    count and _type parameters are accepted but ignored (in-process, no cursor needed).
+    """
+    pattern = match if match is not None else "*"
+    keys = await self.keys(pattern)
+    for key in keys:
+        yield key
+
+
+BurnerRedis.scan_iter = _scan_iter
+
+
 def _pipeline(self):
     """Create a Pipeline for batched command execution."""
     return Pipeline(self)
@@ -94,4 +163,4 @@ def _register_script(self, script):
 
 BurnerRedis.register_script = _register_script
 
-__all__ = ["BurnerRedis", "Lock", "LockError", "Pipeline", "PubSub", "ResponseError", "Script"]
+__all__ = ["BurnerRedis", "Lock", "LockError", "NoScriptError", "Pipeline", "PubSub", "ResponseError", "Script", "_coerce_value"]
