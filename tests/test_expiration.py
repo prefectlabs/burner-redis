@@ -151,3 +151,26 @@ async def test_multiple_instances_have_independent_sweep(r):
     # Both instances should have swept their own expired keys
     assert await r.exists("r1-key") == 0
     assert await r2.exists("r2-key") == 0
+
+
+# ---- TTL Command Tests (D-10) ----
+
+
+async def test_ttl_missing_key(r):
+    """ttl() returns -2 for nonexistent key."""
+    result = await r.ttl("nonexistent")
+    assert result == -2
+
+
+async def test_ttl_no_expiry(r):
+    """ttl() returns -1 for key with no TTL."""
+    await r.set("permanent", "value")
+    result = await r.ttl("permanent")
+    assert result == -1
+
+
+async def test_ttl_with_expiry(r):
+    """ttl() returns positive seconds for key with TTL."""
+    await r.set("temp", "value", ex=60)
+    result = await r.ttl("temp")
+    assert 0 < result <= 60

@@ -230,3 +230,170 @@ async def test_methods_are_awaitable(r):
     assert get_result == b"value"
     assert exists_result == 1
     assert delete_result == 1
+
+
+# ---- Value Coercion Tests (D-01, D-02) ----
+
+
+async def test_set_coercion_int(r):
+    """set() accepts integer values and coerces to string bytes."""
+    await r.set("counter", 42)
+    result = await r.get("counter")
+    assert result == b"42"
+
+
+async def test_set_coercion_int_with_flags(r):
+    """set() coercion works with NX/PX flags (docket's exact pattern)."""
+    result = await r.set("cooldown", 1, nx=True, px=5000)
+    assert result is True
+    val = await r.get("cooldown")
+    assert val == b"1"
+
+
+async def test_set_coercion_float(r):
+    """set() accepts float values and coerces to string bytes."""
+    await r.set("ratio", 3.14)
+    result = await r.get("ratio")
+    assert result == b"3.14"
+
+
+async def test_set_coercion_bool_rejected(r):
+    """set() rejects boolean values matching redis-py behavior."""
+    with pytest.raises(TypeError, match="bool"):
+        await r.set("flag", True)
+
+
+async def test_set_coercion_bool_false_rejected(r):
+    """set() rejects False as well as True."""
+    with pytest.raises(TypeError, match="bool"):
+        await r.set("flag", False)
+
+
+async def test_set_coercion_bytes_passthrough(r):
+    """set() passes bytes through without coercion."""
+    await r.set("key", b"raw bytes")
+    result = await r.get("key")
+    assert result == b"raw bytes"
+
+
+async def test_set_coercion_str_passthrough(r):
+    """set() passes str through without coercion."""
+    await r.set("key", "hello")
+    result = await r.get("key")
+    assert result == b"hello"
+
+
+# ---- keys() Tests (D-03, D-04) ----
+
+
+async def test_keys_all(r):
+    """keys('*') returns all keys."""
+    await r.set("a", "1")
+    await r.set("b", "2")
+    await r.set("c", "3")
+    result = await r.keys("*")
+    assert set(result) == {b"a", b"b", b"c"}
+
+
+async def test_keys_pattern(r):
+    """keys(pattern) filters by glob pattern."""
+    await r.set("user:1", "alice")
+    await r.set("user:2", "bob")
+    await r.set("item:1", "widget")
+    result = await r.keys("user:*")
+    assert set(result) == {b"user:1", b"user:2"}
+
+
+async def test_keys_no_match(r):
+    """keys() returns empty list when no keys match."""
+    await r.set("foo", "bar")
+    result = await r.keys("nonexistent:*")
+    assert result == []
+
+
+async def test_keys_default_pattern(r):
+    """keys() with no args defaults to '*'."""
+    await r.set("x", "1")
+    result = await r.keys()
+    assert b"x" in result
+
+
+async def test_keys_char_range(r):
+    """keys() supports [a-z] character range patterns."""
+    await r.set("key_a", "1")
+    await r.set("key_b", "2")
+    await r.set("key_1", "3")
+    result = await r.keys("key_[a-z]")
+    assert set(result) == {b"key_a", b"key_b"}
+
+
+# ---- scan_iter() Tests (D-05) ----
+
+
+async def test_scan_iter_all(r):
+    """scan_iter() yields all keys."""
+    await r.set("s1", "v1")
+    await r.set("s2", "v2")
+    keys = []
+    async for key in r.scan_iter():
+        keys.append(key)
+    assert set(keys) == {b"s1", b"s2"}
+
+
+async def test_scan_iter_pattern(r):
+    """scan_iter(match=pattern) yields only matching keys."""
+    await r.set("app:1", "v1")
+    await r.set("app:2", "v2")
+    await r.set("other", "v3")
+    keys = []
+    async for key in r.scan_iter(match="app:*"):
+        keys.append(key)
+    assert set(keys) == {b"app:1", b"app:2"}
+
+
+# ---- setex() Tests (D-12) ----
+
+
+async def test_setex_basic(r):
+    """setex() stores a value retrievable via get()."""
+    await r.setex("mykey", 60, "myvalue")
+    result = await r.get("mykey")
+    assert result == b"myvalue"
+
+
+async def test_setex_with_ttl(r):
+    """setex() sets a TTL on the key."""
+    await r.setex("expiring", 30, "data")
+    ttl_val = await r.ttl("expiring")
+    assert 0 < ttl_val <= 30
+
+
+async def test_setex_coercion(r):
+    """setex() applies value coercion like set()."""
+    await r.setex("num", 60, 123)
+    result = await r.get("num")
+    assert result == b"123"
+
+
+# ---- mget() Tests (D-13) ----
+
+
+async def test_mget_basic(r):
+    """mget() returns values for multiple keys."""
+    await r.set("k1", "v1")
+    await r.set("k2", "v2")
+    result = await r.mget("k1", "k2")
+    assert result == [b"v1", b"v2"]
+
+
+async def test_mget_missing_keys(r):
+    """mget() returns None for missing keys."""
+    await r.set("k1", "v1")
+    result = await r.mget("k1", "missing", "k1")
+    assert result == [b"v1", None, b"v1"]
+
+
+async def test_mget_all_missing(r):
+    """mget() returns all None for nonexistent keys."""
+    result = await r.mget("a", "b", "c")
+    assert result == [None, None, None]

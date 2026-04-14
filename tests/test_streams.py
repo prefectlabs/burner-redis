@@ -908,3 +908,38 @@ async def test_xtrim_accepts_approximate_parameter(r):
     # Should work with approximate=False (pydocket's docket.clear() pattern)
     trimmed = await r.xtrim("mystream", maxlen=0, approximate=False)
     assert trimmed == 3
+
+
+# ---- XPENDING Summary Tests (D-11) ----
+
+
+async def test_xpending_summary_with_pending(r):
+    """xpending() summary returns dict with pending messages."""
+    await r.xadd("mystream", {"data": "value1"})
+    await r.xadd("mystream", {"data": "value2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, count=2)
+
+    result = await r.xpending("mystream", "mygroup")
+    assert result["pending"] == 2
+    assert result["min"] is not None
+    assert result["max"] is not None
+    assert len(result["consumers"]) == 1
+    assert result["consumers"][0]["name"] == b"consumer1"
+    assert result["consumers"][0]["pending"] == 2
+
+
+async def test_xpending_summary_empty(r):
+    """xpending() summary returns zeros when no messages are pending."""
+    await r.xadd("mystream", {"data": "value"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    # Read and ACK
+    msgs = await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, count=1)
+    msg_id = msgs[0][1][0][0]
+    await r.xack("mystream", "mygroup", msg_id)
+
+    result = await r.xpending("mystream", "mygroup")
+    assert result["pending"] == 0
+    assert result["min"] is None
+    assert result["max"] is None
+    assert result["consumers"] == []

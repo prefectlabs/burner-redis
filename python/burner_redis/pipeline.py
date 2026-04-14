@@ -241,3 +241,31 @@ class Pipeline:
     def publish(self, channel, message):
         self._commands.append(("publish", (channel, message), {}))
         return self
+
+    # ---- Key Enumeration Commands ----
+
+    def keys(self, pattern="*"):
+        self._commands.append(("keys", (pattern,), {}))
+        return self
+
+    def ttl(self, name):
+        self._commands.append(("ttl", (name,), {}))
+        return self
+
+    def setex(self, name, time, value):
+        self._commands.append(("setex", (name, time, value), {}))
+        return self
+
+    def mget(self, *keys):
+        self._commands.append(("mget", keys, {}))
+        return self
+
+    def xpending(self, name, groupname):
+        self._commands.append(("xpending", (name, groupname), {}))
+        return self
+
+    def scan_iter(self, match=None, count=None, _type=None):
+        raise NotImplementedError(
+            "scan_iter is an async generator and cannot be used in a pipeline. "
+            "Use scan_iter() directly on the client instead."
+        )

@@ -245,3 +245,12 @@ async def test_lock_different_names_independent(r):
 
     await lock1.release()
     await lock2.release()
+
+
+# ---- LockError Hierarchy Tests (D-06) ----
+
+
+def test_lock_error_hierarchy():
+    """LockError is subclass of redis.exceptions.LockError when redis is installed."""
+    import redis.exceptions
+    assert issubclass(LockError, redis.exceptions.LockError)

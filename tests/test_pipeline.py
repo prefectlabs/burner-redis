@@ -204,3 +204,57 @@ async def test_pipeline_wrongtype_error(r):
     pipe.hset("str_key", key="field", value="val")
     with pytest.raises(Exception, match="WRONGTYPE"):
         await pipe.execute()
+
+
+# ---- Pipeline Stubs for Phase 12 Commands (D-09) ----
+
+
+async def test_pipeline_keys(r):
+    """Pipeline keys() command works."""
+    await r.set("pk1", "v1")
+    await r.set("pk2", "v2")
+    pipe = r.pipeline()
+    pipe.keys("pk*")
+    results = await pipe.execute()
+    assert set(results[0]) == {b"pk1", b"pk2"}
+
+
+async def test_pipeline_ttl(r):
+    """Pipeline ttl() command works."""
+    await r.set("pt", "v", ex=60)
+    pipe = r.pipeline()
+    pipe.ttl("pt")
+    pipe.ttl("nonexistent")
+    results = await pipe.execute()
+    assert 0 < results[0] <= 60
+    assert results[1] == -2
+
+
+async def test_pipeline_mget(r):
+    """Pipeline mget() command works."""
+    await r.set("pm1", "a")
+    await r.set("pm2", "b")
+    pipe = r.pipeline()
+    pipe.mget("pm1", "pm2", "pm3")
+    results = await pipe.execute()
+    assert results[0] == [b"a", b"b", None]
+
+
+async def test_pipeline_setex(r):
+    """Pipeline setex() command works."""
+    pipe = r.pipeline()
+    pipe.setex("pse", 60, "val")
+    await pipe.execute()
+    result = await r.get("pse")
+    assert result == b"val"
+
+
+async def test_pipeline_xpending(r):
+    """Pipeline xpending() summary command works."""
+    await r.xadd("pstream", {"f": "v"})
+    await r.xgroup_create("pstream", "pgroup", id="0")
+    await r.xreadgroup("pgroup", "pc1", {"pstream": ">"}, count=1)
+    pipe = r.pipeline()
+    pipe.xpending("pstream", "pgroup")
+    results = await pipe.execute()
+    assert results[0]["pending"] == 1
