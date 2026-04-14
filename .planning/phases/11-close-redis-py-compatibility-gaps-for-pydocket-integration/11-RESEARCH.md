@@ -418,22 +418,22 @@ fn xreadgroup<'py>(
 | A3 | XCLAIM is the only major missing command | Gap Inventory | If wrong, the D-05 inventory step will discover additional gaps. This is by design. |
 | A4 | The Notify approach won't cause performance regression for non-blocking callers | Code Examples | Tokio Notify is zero-cost when no waiters exist, so this should be safe. [ASSUMED based on Tokio docs knowledge] |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **How to run pydocket's test suite**
    - What we know: pydocket has 72 test files in tests/ directory, uses pytest with Docker Redis fixtures
    - What's unclear: Which tests can run without modification? Which require cluster mode? How many need the `key_leak_checker` (which calls FLUSHALL)?
-   - Recommendation: Clone pydocket repo, create conftest override, run and triage failures (D-05 inventory step)
+   - RESOLVED: Plan 11-02 Task 1 clones pydocket repo, creates conftest override, runs and triages failures (D-05 inventory step). Fallback to expanding our own integration tests if pydocket's test infrastructure requires Docker or other infeasible dependencies.
 
 2. **Exact scope of XCLAIM needed**
    - What we know: pydocket uses XCLAIM for lease renewal (same consumer, idle=0)
    - What's unclear: Do any pydocket tests exercise cross-consumer XCLAIM?
-   - Recommendation: Implement full XCLAIM semantics per D-03
+   - RESOLVED: Plan 11-01 Task 2 implements full XCLAIM semantics per D-03 (all parameters: idle, time, retrycount, force, justid, min_idle_time). Cross-consumer transfer is implemented regardless of whether pydocket tests exercise it.
 
 3. **Whether `Notify` needs to be per-stream or global**
    - What we know: XREADGROUP waits on specific streams
    - What's unclear: Whether spurious wakeups from unrelated streams cause performance issues
-   - Recommendation: Start with global Notify (simple), optimize to per-stream only if needed
+   - RESOLVED: Plan 11-01 Task 1 uses global `tokio::sync::Notify` on the Store struct. Spurious wakeups cause only one extra non-blocking read attempt (O(1) overhead), acceptable for embedded single-process use. Per-stream optimization deferred unless profiling shows a problem.
 
 ## Validation Architecture
 
