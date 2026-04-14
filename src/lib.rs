@@ -1316,11 +1316,14 @@ impl BurnerRedis {
                             });
                             match delivered {
                                 Some(Ok(())) => {
-                                    // Message delivered
+                                    // Message delivered successfully
                                 }
-                                _ => {
-                                    // GIL not available or Python error -- stop task
-                                    break;
+                                Some(Err(e)) => {
+                                    // Python error (e.g. QueueFull) -- log and continue
+                                    eprintln!("burner-redis pubsub: delivery error: {}", e);
+                                }
+                                None => {
+                                    // GIL not available -- transient, continue
                                 }
                             }
                         }
