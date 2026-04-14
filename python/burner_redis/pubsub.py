@@ -4,6 +4,7 @@ Provides redis-py compatible async PubSub API with subscribe/unsubscribe,
 pattern matching, message handlers, and background thread processing.
 """
 import asyncio
+import inspect
 import threading
 
 
@@ -248,7 +249,7 @@ class PubSub:
                 handler = self.channels.get(message.get("channel"))
 
             if handler is not None:
-                if asyncio.iscoroutinefunction(handler):
+                if inspect.iscoroutinefunction(handler):
                     await handler(message)
                 else:
                     handler(message)
