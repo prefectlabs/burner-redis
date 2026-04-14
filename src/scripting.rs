@@ -620,6 +620,42 @@ fn dispatch_command(
             }
         }
 
+        "HINCRBY" => {
+            if args.len() != 3 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'hincrby' command".to_string(),
+                ));
+            }
+            let key = args[0].clone();
+            let field = &args[1];
+            let increment: i64 = String::from_utf8_lossy(&args[2])
+                .parse()
+                .map_err(|_| "ERR value is not an integer or out of range".to_string())?;
+
+            // Passive expiration
+            if let Some(entry) = data.get(&key) {
+                if entry.is_expired() {
+                    data.remove(&key);
+                }
+            }
+
+            let entry = data.entry(key).or_insert_with(ValueEntry::new_hash);
+            match entry.data {
+                ValueData::Hash(ref mut map) => {
+                    let current = map
+                        .get(field)
+                        .and_then(|v| String::from_utf8_lossy(v).parse::<i64>().ok())
+                        .unwrap_or(0);
+                    let new_val = current + increment;
+                    map.insert(field.clone(), Bytes::from(new_val.to_string()));
+                    Ok(RedisValue::Integer(new_val))
+                }
+                _ => Ok(RedisValue::Error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+                )),
+            }
+        }
+
         // ── Set commands ─────────────────────────────────────────────
         "SADD" => {
             if args.len() < 2 {
@@ -984,6 +1020,125 @@ fn dispatch_command(
             }
         }
 
+        "ZCARD" => {
+            if args.len() != 1 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'zcard' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => match &entry.data {
+                    ValueData::SortedSet(zset) => Ok(RedisValue::Integer(zset.len() as i64)),
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "ZSCORE" => {
+            if args.len() != 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'zscore' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let member = &args[1];
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Nil);
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Nil),
+                Some(entry) => match &entry.data {
+                    ValueData::SortedSet(zset) => match zset.by_member.get(member) {
+                        Some(&score) => Ok(RedisValue::BulkString(Bytes::from(score.to_string()))),
+                        None => Ok(RedisValue::Nil),
+                    },
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        // ── Key commands ────────────────────────────────────────────
+        "EXPIRE" => {
+            if args.len() != 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'expire' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let seconds: u64 = String::from_utf8_lossy(&args[1])
+                .parse()
+                .map_err(|_| "ERR value is not an integer or out of range".to_string())?;
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get_mut(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => {
+                    entry.expires_at =
+                        Some(std::time::Instant::now() + Duration::from_secs(seconds));
+                    Ok(RedisValue::Integer(1))
+                }
+            }
+        }
+
+        "PEXPIRE" => {
+            if args.len() != 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'pexpire' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let ms: u64 = String::from_utf8_lossy(&args[1])
+                .parse()
+                .map_err(|_| "ERR value is not an integer or out of range".to_string())?;
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get_mut(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => {
+                    entry.expires_at =
+                        Some(std::time::Instant::now() + Duration::from_millis(ms));
+                    Ok(RedisValue::Integer(1))
+                }
+            }
+        }
+
         // ── Stream commands ──────────────────────────────────────────
         "XADD" => {
             if args.len() < 4 || (args.len() - 2) % 2 != 0 {
@@ -1180,6 +1335,101 @@ fn dispatch_command(
                 Ok(RedisValue::Nil)
             } else {
                 Ok(RedisValue::Array(result))
+            }
+        }
+
+        "XDEL" => {
+            if args.len() < 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'xdel' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get_mut(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => match entry.data {
+                    ValueData::Stream(ref mut stream) => {
+                        let mut count = 0i64;
+                        for id_bytes in &args[1..] {
+                            let id_str = String::from_utf8_lossy(id_bytes);
+                            let parts: Vec<&str> = id_str.splitn(2, '-').collect();
+                            if parts.len() == 2 {
+                                let ms: u64 = parts[0].parse().unwrap_or(0);
+                                let seq: u64 = parts[1].parse().unwrap_or(0);
+                                if stream.entries.remove(&(ms, seq)).is_some() {
+                                    count += 1;
+                                }
+                            }
+                        }
+                        Ok(RedisValue::Integer(count))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "XACK" => {
+            // XACK key group id [id ...]
+            if args.len() < 3 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'xack' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let group = &args[1];
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get_mut(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => match entry.data {
+                    ValueData::Stream(ref mut stream) => {
+                        let cg = match stream.groups.get_mut(group) {
+                            Some(g) => g,
+                            None => return Ok(RedisValue::Integer(0)),
+                        };
+                        let mut count = 0i64;
+                        for id_bytes in &args[2..] {
+                            let id_str = String::from_utf8_lossy(id_bytes);
+                            let parts: Vec<&str> = id_str.splitn(2, '-').collect();
+                            if parts.len() == 2 {
+                                let ms: u64 = parts[0].parse().unwrap_or(0);
+                                let seq: u64 = parts[1].parse().unwrap_or(0);
+                                let stream_id = (ms, seq);
+                                // Search all consumers for this pending entry
+                                for consumer in cg.consumers.values_mut() {
+                                    if consumer.pending.remove(&stream_id).is_some() {
+                                        count += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Ok(RedisValue::Integer(count))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
             }
         }
 

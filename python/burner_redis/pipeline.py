@@ -121,8 +121,8 @@ class Pipeline:
         self._commands.append(("xadd", (name, fields), {"id": id}))
         return self
 
-    def xread(self, streams, count=None):
-        self._commands.append(("xread", (streams,), {"count": count}))
+    def xread(self, streams, count=None, block=None):
+        self._commands.append(("xread", (streams,), {"count": count, "block": block}))
         return self
 
     def xlen(self, name):
@@ -143,8 +143,8 @@ class Pipeline:
         self._commands.append(("xgroup_destroy", (name, groupname), {}))
         return self
 
-    def xreadgroup(self, groupname, consumername, streams, count=None):
-        self._commands.append(("xreadgroup", (groupname, consumername, streams), {"count": count}))
+    def xreadgroup(self, groupname, consumername, streams, count=None, block=None, noack=False):
+        self._commands.append(("xreadgroup", (groupname, consumername, streams), {"count": count, "block": block, "noack": noack}))
         return self
 
     def xack(self, name, groupname, *ids):
@@ -191,10 +191,22 @@ class Pipeline:
         self._commands.append(("hexists", (name, key), {}))
         return self
 
+    def hincrby(self, name, key, amount=1):
+        self._commands.append(("hincrby", (name, key), {"amount": amount}))
+        return self
+
     # ---- Additional Sorted Set Commands ----
 
     def zcard(self, name):
         self._commands.append(("zcard", (name,), {}))
+        return self
+
+    def zscore(self, name, value):
+        self._commands.append(("zscore", (name, value), {}))
+        return self
+
+    def zcount(self, name, min, max):
+        self._commands.append(("zcount", (name, min, max), {}))
         return self
 
     # ---- Key Commands ----

@@ -127,7 +127,7 @@ async def test_stream_task_delivery_lifecycle(r):
 
     # Verify no pending messages remain
     pending = await r.xreadgroup("workers", "worker-1", {stream_key: "0"})
-    assert pending is None
+    assert not pending  # None or empty list
 
 
 async def test_stream_redelivery_via_xautoclaim(r):

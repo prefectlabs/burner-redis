@@ -59,6 +59,15 @@ class Script:
         self.script = script if isinstance(script, str) else script.decode()
         self.sha = None
 
+    @staticmethod
+    def _coerce_arg(arg):
+        """Coerce a script argument to str or bytes for evalsha compatibility."""
+        if isinstance(arg, (str, bytes, memoryview)):
+            return arg
+        if isinstance(arg, (int, float)):
+            return str(arg)
+        return str(arg)
+
     async def __call__(self, keys=[], args=[], client=None):
         """Execute the script with the given keys and args.
 
@@ -70,7 +79,9 @@ class Script:
         target = client or self.client
         if self.sha is None:
             self.sha = await target.script_load(self.script)
-        return await target.evalsha(self.sha, len(keys), *keys, *args)
+        coerced_keys = [self._coerce_arg(k) for k in keys]
+        coerced_args = [self._coerce_arg(a) for a in args]
+        return await target.evalsha(self.sha, len(coerced_keys), *coerced_keys, *coerced_args)
 
 
 def _register_script(self, script):

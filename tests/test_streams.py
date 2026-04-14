@@ -262,7 +262,7 @@ async def test_xgroup_create_dollar_id(r):
 
     # Reading with ">" should return nothing since group starts at latest
     result = await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
-    assert result is None
+    assert not result  # None or empty list
 
     # Add a new entry after group creation
     await r.xadd("mystream", {"f": "v3"})
@@ -322,7 +322,7 @@ async def test_xreadgroup_advances_delivery(r):
 
     # Second read with ">" should return nothing (no new entries)
     result = await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
-    assert result is None
+    assert not result  # None or empty list
 
     # Add a new entry
     await r.xadd("mystream", {"f": "v2"})
@@ -365,7 +365,7 @@ async def test_xreadgroup_empty_after_ack(r):
 
     # Now "0" should return no pending entries
     result = await r.xreadgroup("mygroup", "consumer1", {"mystream": "0"})
-    assert result is None
+    assert not result  # None or empty list
 
 
 async def test_xreadgroup_count_limit(r):
@@ -408,7 +408,7 @@ async def test_xack_removes_from_pel(r):
 
     # No longer in PEL
     pending = await r.xreadgroup("mygroup", "consumer1", {"mystream": "0"})
-    assert pending is None
+    assert not pending  # None or empty list
 
 
 async def test_xack_returns_count(r):

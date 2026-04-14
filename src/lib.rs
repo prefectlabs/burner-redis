@@ -25,7 +25,7 @@ fn redis_value_to_py(py: Python<'_>, val: RedisValue) -> PyResult<Py<PyAny>> {
         RedisValue::Integer(n) => Ok(n.into_pyobject(py)?.into_any().unbind()),
         RedisValue::Nil => Ok(py.None()),
         RedisValue::Status(s) => Ok(PyBytes::new(py, s.as_bytes()).into_any().unbind()),
-        RedisValue::Error(msg) => Err(pyo3::exceptions::PyException::new_err(msg)),
+        RedisValue::Error(msg) => Err(make_response_error(msg)),
         RedisValue::Array(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> = items
                 .into_iter()
@@ -36,22 +36,28 @@ fn redis_value_to_py(py: Python<'_>, val: RedisValue) -> PyResult<Py<PyAny>> {
     }
 }
 
+/// Create a Redis-compatible ResponseError.
+/// Uses redis.exceptions.ResponseError if available (for pydocket/redis-py compatibility),
+/// falls back to Python's Exception.
+fn make_response_error(msg: String) -> PyErr {
+    match Python::try_attach(|py| -> PyResult<PyErr> {
+        if let Ok(redis_exc) = py.import("redis.exceptions") {
+            if let Ok(response_error_type) = redis_exc.getattr("ResponseError") {
+                if let Ok(exc_type) = response_error_type.downcast::<pyo3::types::PyType>() {
+                    return Ok(PyErr::from_type(exc_type.clone(), msg.clone()));
+                }
+            }
+        }
+        Ok(pyo3::exceptions::PyException::new_err(msg.clone()))
+    }) {
+        Some(Ok(err)) => err,
+        _ => pyo3::exceptions::PyException::new_err(msg),
+    }
+}
+
 /// Convert a StoreError into a Python exception with the Redis-compatible error message.
 fn store_err_to_py(e: StoreError) -> PyErr {
-    match e {
-        StoreError::WrongType => {
-            pyo3::exceptions::PyException::new_err(e.to_string())
-        }
-        StoreError::NoGroup(_, _) => {
-            pyo3::exceptions::PyException::new_err(e.to_string())
-        }
-        StoreError::BusyGroup => {
-            pyo3::exceptions::PyException::new_err(e.to_string())
-        }
-        StoreError::KeyNotFound => {
-            pyo3::exceptions::PyException::new_err(e.to_string())
-        }
-    }
+    make_response_error(e.to_string())
 }
 
 #[pyclass]
@@ -376,6 +382,25 @@ impl BurnerRedis {
         })
     }
 
+    /// HINCRBY command matching redis.asyncio.Redis.hincrby() signature.
+    /// Increments the integer value of a hash field. Returns new value.
+    #[pyo3(signature = (name, key, amount=1))]
+    fn hincrby<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        key: &Bound<'py, PyAny>,
+        amount: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+        let field_bytes = extract_bytes(key)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.hincrby(name_bytes, field_bytes, amount).map_err(store_err_to_py)
+        })
+    }
+
     // ── Set Commands ─────────────────────────────────────────────────
 
     /// SADD command matching redis.asyncio.Redis.sadd() signature.
@@ -653,21 +678,70 @@ impl BurnerRedis {
         })
     }
 
+    /// ZSCORE command matching redis.asyncio.Redis.zscore() signature.
+    /// Returns the score of a member in a sorted set, or None if not found.
+    fn zscore<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+        let member_bytes = extract_bytes(value)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.zscore(&name_bytes, &member_bytes).map_err(store_err_to_py)
+        })
+    }
+
+    /// ZCOUNT command matching redis.asyncio.Redis.zcount() signature.
+    /// Returns count of members with scores in [min, max] range.
+    #[pyo3(signature = (name, min, max))]
+    fn zcount<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        min: &Bound<'py, PyAny>,
+        max: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+        let min_f64 = parse_score_bound(min)?;
+        let max_f64 = parse_score_bound(max)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.zcount(&name_bytes, min_f64, max_f64).map_err(store_err_to_py)
+        })
+    }
+
     // ── Key Commands ────────────────────────────────────────────────
 
     /// EXPIRE command matching redis.asyncio.Redis.expire() signature.
     /// Sets a timeout on an existing key in seconds. Returns True if set, False if key doesn't exist.
+    /// Accepts int seconds or datetime.timedelta (extracts total_seconds).
     fn expire<'py>(
         &self,
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
-        time: u64,
+        time: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
 
+        // Accept int or timedelta
+        let seconds: u64 = if let Ok(secs) = time.extract::<u64>() {
+            secs
+        } else if let Ok(secs_f64) = time.call_method0("total_seconds")?.extract::<f64>() {
+            secs_f64.max(0.0) as u64
+        } else {
+            return Err(pyo3::exceptions::PyTypeError::new_err(
+                "expire time must be int (seconds) or timedelta",
+            ));
+        };
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(store.expire(&name_bytes, time))
+            Ok(store.expire(&name_bytes, seconds))
         })
     }
 
@@ -706,12 +780,15 @@ impl BurnerRedis {
     /// XREAD command matching redis.asyncio.Redis.xread() signature.
     /// Reads entries from one or more streams after given IDs.
     /// Returns list of [stream_name, [(id, {field: value}), ...]] or None if empty.
-    #[pyo3(signature = (streams, count=None))]
+    /// The block parameter is accepted for API compatibility but ignored (in-process DB).
+    #[pyo3(signature = (streams, count=None, block=None))]
     fn xread<'py>(
         &self,
         py: Python<'py>,
         streams: &Bound<'py, PyDict>,
         count: Option<usize>,
+        #[allow(unused_variables)]
+        block: Option<u64>,  // Accepted for API compatibility, ignored (in-process DB)
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
 
@@ -1005,7 +1082,8 @@ impl BurnerRedis {
     /// XREADGROUP command matching redis.asyncio.Redis.xreadgroup() signature.
     /// Reads entries from streams as a consumer in a group.
     /// Returns list of [stream_name, [(id, {field: value}), ...]] or None if empty.
-    #[pyo3(signature = (groupname, consumername, streams, count=None))]
+    /// The block and noack parameters are accepted for API compatibility but ignored.
+    #[pyo3(signature = (groupname, consumername, streams, count=None, block=None, noack=false))]
     fn xreadgroup<'py>(
         &self,
         py: Python<'py>,
@@ -1013,6 +1091,10 @@ impl BurnerRedis {
         consumername: &Bound<'py, PyAny>,
         streams: &Bound<'py, PyDict>,
         count: Option<usize>,
+        #[allow(unused_variables)]
+        block: Option<u64>,
+        #[allow(unused_variables)]
+        noack: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
         let group = extract_bytes(groupname)?;
@@ -1038,11 +1120,19 @@ impl BurnerRedis {
                 .map_err(store_err_to_py)?;
 
             if results.is_empty() {
-                return Ok(None::<pyo3::Py<pyo3::PyAny>>);
+                // Return empty list (not None) so callers can iterate safely
+                return Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+                    Ok(pyo3::types::PyList::empty(py).into_any().unbind())
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?;
             }
 
             // Build the nested Python structure (same format as xread)
-            Python::try_attach(|py| -> PyResult<Option<pyo3::Py<pyo3::PyAny>>> {
+            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
                 let outer = pyo3::types::PyList::empty(py);
                 for (stream_name, entries) in &results {
                     let entry_list = pyo3::types::PyList::empty(py);
@@ -1073,7 +1163,7 @@ impl BurnerRedis {
                     )?;
                     outer.append(stream_pair)?;
                 }
-                Ok(Some(outer.into_any().unbind()))
+                Ok(outer.into_any().unbind())
             })
             .ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -1360,7 +1450,7 @@ impl BurnerRedis {
                             )
                         })?
                 }
-                Err(msg) => Err(pyo3::exceptions::PyException::new_err(msg)),
+                Err(msg) => Err(make_response_error(msg)),
             }
         })
     }
@@ -1401,7 +1491,7 @@ impl BurnerRedis {
                             )
                         })?
                 }
-                Err(msg) => Err(pyo3::exceptions::PyException::new_err(msg)),
+                Err(msg) => Err(make_response_error(msg)),
             }
         })
     }

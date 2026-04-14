@@ -522,6 +522,36 @@ impl Store {
         }
     }
 
+    /// HINCRBY: Increment the integer value of a hash field by the given amount.
+    /// Creates the hash and/or field if they don't exist (starting from 0).
+    /// Returns the new value after incrementing.
+    /// Returns Err(WrongType) if the key holds a non-hash value.
+    pub fn hincrby(&self, key: Bytes, field: Bytes, increment: i64) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(&key) {
+            if entry.is_expired() {
+                data.remove(&key);
+            }
+        }
+
+        let entry = data.entry(key).or_insert_with(ValueEntry::new_hash);
+
+        match entry.data {
+            ValueData::Hash(ref mut map) => {
+                let current = map
+                    .get(&field)
+                    .and_then(|v| String::from_utf8_lossy(v).parse::<i64>().ok())
+                    .unwrap_or(0);
+                let new_val = current + increment;
+                map.insert(field, Bytes::from(new_val.to_string()));
+                Ok(new_val)
+            }
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
     // ── Set Operations ───────────────────────────────────────────────
 
     /// SADD: Adds members to a set. Creates the set if it doesn't exist.
@@ -959,6 +989,60 @@ impl Store {
             None => Ok(0),
             Some(entry) => match &entry.data {
                 ValueData::SortedSet(zset) => Ok(zset.len() as i64),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// ZSCORE: Returns the score of a member in a sorted set.
+    /// Returns Ok(None) if the key or member doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-sorted-set value.
+    pub fn zscore(&self, key: &Bytes, member: &Bytes) -> Result<Option<f64>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(None);
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(None),
+            Some(entry) => match &entry.data {
+                ValueData::SortedSet(zset) => Ok(zset.by_member.get(member).copied()),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// ZCOUNT: Returns the number of members in a sorted set with scores in [min, max] range.
+    /// Returns 0 if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-sorted-set value.
+    pub fn zcount(&self, key: &Bytes, min: f64, max: f64) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(0),
+            Some(entry) => match &entry.data {
+                ValueData::SortedSet(zset) => {
+                    let lower = Bound::Included((OrderedFloat(min), Bytes::new()));
+                    let count = zset
+                        .by_score
+                        .range((lower, Bound::Unbounded))
+                        .take_while(|((score, _), _)| score.0 <= max)
+                        .count();
+                    Ok(count as i64)
+                }
                 _ => Err(StoreError::WrongType),
             },
         }
