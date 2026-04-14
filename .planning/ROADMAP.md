@@ -22,7 +22,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 8: Persistence** - Flush-to-disk and reload-from-disk with crash-safe writes
 - [ ] **Phase 9: Distribution** - PyPI package with pre-built wheels for Linux and macOS
 - [x] **Phase 10: Pub/Sub** - Redis pub/sub with SUBSCRIBE, UNSUBSCRIBE, PUBLISH, PSUBSCRIBE, PUNSUBSCRIBE, and PUBSUB introspection (completed 2026-04-14)
-- [ ] **Phase 11: Pydocket Compatibility** - Close redis-py compatibility gaps for pydocket integration
+- [x] **Phase 11: Pydocket Compatibility** - Close redis-py compatibility gaps for pydocket integration (completed 2026-04-14)
 
 ## Phase Details
 
@@ -181,11 +181,11 @@ Plans:
   3. XTRIM accepts the approximate parameter without error
   4. All pydocket integration tests pass with zero xfails and zero skips
   5. Regression tests cover every gap fixed in this phase
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] 11-01-PLAN.md — XREADGROUP blocking with tokio::sync::Notify, XCLAIM implementation, XTRIM approximate parameter
-- [ ] 11-02-PLAN.md — Pydocket test suite validation, gap closure, regression tests, zero xfails
+- [x] 11-01-PLAN.md — XREADGROUP blocking with tokio::sync::Notify, XCLAIM implementation, XTRIM approximate parameter
+- [x] 11-02-PLAN.md — Pydocket test suite validation, gap closure, regression tests, zero xfails
 
 ## Progress
 
@@ -204,4 +204,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 8. Persistence | 0/2 | Planning complete | - |
 | 9. Distribution | 0/2 | Not started | - |
 | 10. Pub/Sub | 2/2 | Complete    | 2026-04-14 |
-| 11. Pydocket Compatibility | 0/2 | Planning complete | - |
+| 11. Pydocket Compatibility | 2/2 | Complete    | 2026-04-14 |
