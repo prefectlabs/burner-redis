@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 10
 Plan: Not started
 Status: Executing Phase 10
-Last activity: 2026-04-14 - Completed quick task 260413-vbg: Update the integration tests that ensure compatibility with pydocket include PUB/SUB coverage
+Last activity: 2026-04-14 - Completed quick task 260414-9ub: Update pydocket to use burner-redis and run its test suite to verify compatibility
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -152,6 +152,7 @@ None yet.
 | 260411-b8i | Add integration tests that simulate how Prefect servers use Redis to verify compatibility | 2026-04-11 | 5fd90f5 | [260411-b8i-add-integration-tests-that-simulate-how-](./quick/260411-b8i-add-integration-tests-that-simulate-how-/) |
 | 260411-ipj | Run integration tests in CI on merge to main | 2026-04-11 | 577c6e8 | [260411-ipj-run-integration-tests-in-ci-on-merge-to-](./quick/260411-ipj-run-integration-tests-in-ci-on-merge-to-/) |
 | 260413-vbg | Update the integration tests that ensure compatibility with pydocket include PUB/SUB coverage | 2026-04-14 | 4cc3619 | [260413-vbg-update-the-integration-tests-that-ensure](./quick/260413-vbg-update-the-integration-tests-that-ensure/) |
+| 260414-9ub | Update pydocket to use burner-redis and run its test suite to verify compatibility | 2026-04-14 | 842ee25 | [260414-9ub-update-pydocket-to-use-burner-redis-and-](./quick/260414-9ub-update-pydocket-to-use-burner-redis-and-/) |
 
 ## Session Continuity
 
