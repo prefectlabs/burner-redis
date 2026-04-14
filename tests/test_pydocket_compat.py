@@ -222,10 +222,6 @@ async def test_docket_cancel_task(patch_pydocket):
     assert ("cancel_task",) not in _call_log
 
 
-@pytest.mark.xfail(
-    reason="burner-redis: missing xpending_range command needed by DocketSnapshot",
-    strict=True,
-)
 async def test_docket_snapshot(patch_pydocket):
     """Schedule multiple tasks, take a snapshot, verify it reflects state.
 
