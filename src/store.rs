@@ -1795,9 +1795,8 @@ impl Store {
             }
         }
 
-        // Send regular message (for exact channel subscribers)
-        if channel_count > 0 || pattern_count == 0 {
-            // Always send the message event so broadcast receivers get it
+        // Send regular "message" event only when there are exact-channel subscribers
+        if channel_count > 0 {
             let _ = registry.tx.send(PubSubMessage {
                 kind: "message".to_string(),
                 pattern: None,
