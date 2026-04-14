@@ -8,6 +8,7 @@ for atomic multi-key operations, pipeline batching, and distributed locks.
 Purpose: Verify burner-redis can serve as a drop-in backend for Prefect's Docket-based
 task scheduling, and identify any missing commands or behavioral gaps with clear markers.
 """
+import asyncio
 import time
 
 import pytest
@@ -672,3 +673,203 @@ async def test_missing_xrange(r):
     """
     await r.xadd("stream", {"f": "v"})
     await r.xrange("stream", "-", "+")
+
+
+# =============================================================================
+# 8. PUB/SUB Event Notifications (task lifecycle notifications via pub/sub)
+# =============================================================================
+
+
+async def test_pubsub_task_scheduled_notification(r):
+    """Models a pattern where the scheduler publishes event notifications after
+    enqueuing tasks, allowing monitoring systems to react to task scheduling events.
+
+    Simulate publishing a notification when a task is scheduled via the
+    sorted-set queue: ZADD the task, then PUBLISH the event.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.subscribe("docket:events:default")
+
+    # Schedule a task via sorted set queue
+    queue_key = "docket:queue:default"
+    await r.zadd(queue_key, {"task:notify-test": time.time() + 60})
+
+    # Publish the scheduling event notification
+    await r.publish(b"docket:events:default", b"scheduled:task:notify-test")
+    await asyncio.sleep(0.1)
+
+    msg = await ps.get_message(timeout=1.0)
+    assert msg is not None
+    assert msg["type"] == "message"
+    assert msg["channel"] == b"docket:events:default"
+    assert msg["data"] == b"scheduled:task:notify-test"
+
+    await ps.aclose()
+
+
+async def test_pubsub_task_completed_notification_pattern(r):
+    """Models a monitoring system that uses pattern subscriptions to observe
+    task lifecycle events across all Docket queues.
+
+    Simulate subscribing to a glob pattern for task lifecycle events
+    using PSUBSCRIBE and verifying pmessage delivery.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.psubscribe("docket:events:*")
+
+    # Publish a completion event
+    await r.publish(b"docket:events:default", b"completed:task:abc123")
+    await asyncio.sleep(0.1)
+
+    msg = await ps.get_message(timeout=1.0)
+    assert msg is not None
+    assert msg["type"] == "pmessage"
+    assert msg["pattern"] == b"docket:events:*"
+    assert msg["channel"] == b"docket:events:default"
+    assert msg["data"] == b"completed:task:abc123"
+
+    await ps.aclose()
+
+
+async def test_pubsub_with_stream_task_lifecycle(r):
+    """Models a worker that publishes a completion event after processing a task
+    from the stream, enabling external observers to track task progress.
+
+    Full lifecycle combining streams and pub/sub: schedule via stream, process
+    with consumer group, acknowledge, then publish completion event.
+    """
+    stream_key = "docket:stream:pubsub-lifecycle"
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.subscribe("docket:events:default")
+
+    # Create consumer group, add task, read and ack
+    await r.xgroup_create(stream_key, "workers", id="0", mkstream=True)
+    await r.xadd(stream_key, {"key": "task:lifecycle-test", "function": "my_module.work"})
+    result = await r.xreadgroup("workers", "worker-1", {stream_key: ">"})
+    assert result is not None
+    msg_id = result[0][1][0][0]
+    await r.xack(stream_key, "workers", msg_id.decode())
+
+    # After processing, publish completion event
+    await r.publish(b"docket:events:default", b"completed:task:lifecycle-test")
+    await asyncio.sleep(0.1)
+
+    msg = await ps.get_message(timeout=1.0)
+    assert msg is not None
+    assert msg["data"] == b"completed:task:lifecycle-test"
+
+    await ps.aclose()
+
+
+async def test_lua_publish_task_event(r):
+    """Models Docket's atomic Lua scripts extended with PUBLISH -- after atomically
+    updating task state, a notification is sent so watchers are informed without polling.
+
+    Lua script that atomically writes state via HSET and publishes a notification
+    via PUBLISH in a single eval call.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.subscribe("docket:events:default")
+
+    runs_key = "docket:runs:task:lua-event-test"
+    event_channel = "docket:events:default"
+
+    script = """
+    local runs_key = KEYS[1]
+    local event_channel = KEYS[2]
+    local task_key = ARGV[1]
+    local state = ARGV[2]
+    redis.call('HSET', runs_key, 'state', state)
+    return redis.call('PUBLISH', event_channel, state .. ':' .. task_key)
+    """
+
+    result = await r.eval(
+        script, 2, runs_key, event_channel,
+        "task:lua-event-test", "completed"
+    )
+
+    # PUBLISH return value is subscriber count (an int)
+    assert isinstance(result, int)
+
+    # Verify HSET wrote the state
+    assert await r.hget(runs_key, "state") == b"completed"
+
+    await asyncio.sleep(0.1)
+
+    msg = await ps.get_message(timeout=1.0)
+    assert msg is not None
+    assert msg["data"] == b"completed:task:lua-event-test"
+
+    await ps.aclose()
+
+
+async def test_pipeline_publish_task_events(r):
+    """Models batched task completion with notifications -- a worker pipeline that
+    acknowledges multiple tasks and publishes events for each in a single batch.
+
+    Pipeline that performs task operations and publishes multiple event
+    notifications in a single execute() call.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.subscribe("docket:events:default")
+
+    pipe = r.pipeline()
+    pipe.hset("docket:runs:task:pipe-event", key="state", value="completed")
+    pipe.publish("docket:events:default", b"completed:task:pipe-event-1")
+    pipe.publish("docket:events:default", b"completed:task:pipe-event-2")
+    results = await pipe.execute()
+
+    # results[0] is hset field count, results[1] and [2] are publish subscriber counts
+    assert isinstance(results[0], int)
+    assert isinstance(results[1], int)
+    assert isinstance(results[2], int)
+
+    await asyncio.sleep(0.1)
+
+    # Collect both messages
+    messages = []
+    for _ in range(2):
+        msg = await ps.get_message(timeout=1.0)
+        if msg is not None:
+            messages.append(msg)
+
+    assert len(messages) == 2
+    data_values = {m["data"] for m in messages}
+    assert b"completed:task:pipe-event-1" in data_values
+    assert b"completed:task:pipe-event-2" in data_values
+
+    await ps.aclose()
+
+
+async def test_pubsub_multiple_queue_monitoring(r):
+    """Models a centralized monitoring system that observes task events across
+    multiple Docket queues using a single pattern subscription.
+
+    Subscribe to events from multiple queues simultaneously using pattern
+    subscribe, then verify messages from different channels are received.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.psubscribe("docket:events:*")
+
+    # Publish to two different queue event channels
+    await r.publish(b"docket:events:queue-a", b"scheduled:task:a")
+    await r.publish(b"docket:events:queue-b", b"completed:task:b")
+    await asyncio.sleep(0.1)
+
+    # Collect 2 messages
+    messages = []
+    for _ in range(2):
+        msg = await ps.get_message(timeout=1.0)
+        if msg is not None:
+            messages.append(msg)
+
+    assert len(messages) == 2
+    channels = {m["channel"] for m in messages}
+    assert b"docket:events:queue-a" in channels
+    assert b"docket:events:queue-b" in channels
+
+    data_values = {m["data"] for m in messages}
+    assert b"scheduled:task:a" in data_values
+    assert b"completed:task:b" in data_values
+
+    await ps.aclose()
