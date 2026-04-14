@@ -981,12 +981,23 @@ fn dispatch_command_inner(
                 None => Ok(RedisValue::Array(Vec::new())),
                 Some(entry) => match &entry.data {
                     ValueData::SortedSet(zset) => {
-                        let lower =
-                            std::ops::Bound::Included((OrderedFloat(min), Bytes::new()));
+                        let lower = min.lower_btree_bound();
+                        let max_val = max.value();
+                        let max_inclusive = max.is_inclusive();
                         let result: Vec<RedisValue> = zset
                             .by_score
                             .range((lower, std::ops::Bound::Unbounded))
-                            .take_while(|((score, _), _)| score.0 <= max)
+                            // Skip members at the lower-bound score when it is exclusive
+                            .skip_while(|((score, _), _)| {
+                                !min.is_inclusive() && score.0 == min.value()
+                            })
+                            .take_while(|((score, _), _)| {
+                                if max_inclusive {
+                                    score.0 <= max_val
+                                } else {
+                                    score.0 < max_val
+                                }
+                            })
                             .map(|((_, member), _)| RedisValue::BulkString(member.clone()))
                             .collect();
                         Ok(RedisValue::Array(result))
@@ -1021,12 +1032,23 @@ fn dispatch_command_inner(
                 None => Ok(RedisValue::Integer(0)),
                 Some(entry) => match entry.data {
                     ValueData::SortedSet(ref mut zset) => {
-                        let lower =
-                            std::ops::Bound::Included((OrderedFloat(min), Bytes::new()));
+                        let lower = min.lower_btree_bound();
+                        let max_val = max.value();
+                        let max_inclusive = max.is_inclusive();
                         let to_remove: Vec<Bytes> = zset
                             .by_score
                             .range((lower, std::ops::Bound::Unbounded))
-                            .take_while(|((score, _), _)| score.0 <= max)
+                            // Skip members at the lower-bound score when it is exclusive
+                            .skip_while(|((score, _), _)| {
+                                !min.is_inclusive() && score.0 == min.value()
+                            })
+                            .take_while(|((score, _), _)| {
+                                if max_inclusive {
+                                    score.0 <= max_val
+                                } else {
+                                    score.0 < max_val
+                                }
+                            })
                             .map(|((_, member), _)| member.clone())
                             .collect();
 
@@ -1708,20 +1730,48 @@ fn dispatch_command_inner(
     }
 }
 
-/// Parse a score argument string (supports "-inf", "+inf", "inf", "(exclusive" prefix).
-fn parse_score_arg(arg: &Bytes) -> f64 {
+/// Represents an inclusive or exclusive score bound for range queries.
+enum ScoreBound {
+    Inclusive(f64),
+    Exclusive(f64),
+}
+
+impl ScoreBound {
+    /// Return the underlying f64 value.
+    fn value(&self) -> f64 {
+        match self {
+            ScoreBound::Inclusive(v) | ScoreBound::Exclusive(v) => *v,
+        }
+    }
+
+    /// Whether this bound is inclusive.
+    fn is_inclusive(&self) -> bool {
+        matches!(self, ScoreBound::Inclusive(_))
+    }
+
+    /// Return the BTreeMap lower-bound. Since the BTreeMap key is
+    /// `(OrderedFloat<f64>, Bytes)` and members can have arbitrary bytes,
+    /// exclusive lower bounds cannot be represented by a single BTreeMap key.
+    /// Instead, we always return `Included((v, Bytes::new()))` (the smallest
+    /// possible key at score v) and rely on a `.skip_while` filter at the call
+    /// site to drop members whose score equals v when the bound is exclusive.
+    fn lower_btree_bound(&self) -> std::ops::Bound<(OrderedFloat<f64>, Bytes)> {
+        std::ops::Bound::Included((OrderedFloat(self.value()), Bytes::new()))
+    }
+}
+
+/// Parse a score argument string (supports "-inf", "+inf", "inf", "(" exclusive prefix).
+fn parse_score_arg(arg: &Bytes) -> ScoreBound {
     let s = String::from_utf8_lossy(arg);
     let s = s.trim();
     match s {
-        "-inf" => f64::NEG_INFINITY,
-        "+inf" | "inf" => f64::INFINITY,
+        "-inf" => ScoreBound::Inclusive(f64::NEG_INFINITY),
+        "+inf" | "inf" => ScoreBound::Inclusive(f64::INFINITY),
         _ => {
             if let Some(stripped) = s.strip_prefix('(') {
-                // Exclusive bound - for simplicity we treat as inclusive
-                // (full exclusive support would need Bound enum in range queries)
-                stripped.parse::<f64>().unwrap_or(0.0)
+                ScoreBound::Exclusive(stripped.parse::<f64>().unwrap_or(0.0))
             } else {
-                s.parse::<f64>().unwrap_or(0.0)
+                ScoreBound::Inclusive(s.parse::<f64>().unwrap_or(0.0))
             }
         }
     }
