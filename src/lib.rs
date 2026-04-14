@@ -805,13 +805,19 @@ impl BurnerRedis {
 
     /// XADD command matching redis.asyncio.Redis.xadd() signature.
     /// Adds an entry to a stream. Returns the entry ID as bytes (e.g., b"1234567890123-0").
-    #[pyo3(signature = (name, fields, id="*"))]
+    /// The maxlen and minid trimming parameters are accepted for API compatibility but not
+    /// yet acted upon — stream trimming via XADD is a known gap (use XTRIM separately).
+    #[pyo3(signature = (name, fields, id="*", maxlen=None, minid=None))]
     fn xadd<'py>(
         &self,
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
         fields: &Bound<'py, PyDict>,
         id: &str,
+        #[allow(unused_variables)]
+        maxlen: Option<usize>,
+        #[allow(unused_variables)]
+        minid: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
         let key = extract_bytes(name)?;
