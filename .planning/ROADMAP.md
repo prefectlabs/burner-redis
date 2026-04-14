@@ -21,6 +21,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 7: Pipeline and Locking** - Batched command execution and Lock/AsyncLock semantics for distributed locking
 - [ ] **Phase 8: Persistence** - Flush-to-disk and reload-from-disk with crash-safe writes
 - [ ] **Phase 9: Distribution** - PyPI package with pre-built wheels for Linux and macOS
+- [ ] **Phase 10: Pub/Sub** - Redis pub/sub with SUBSCRIBE, UNSUBSCRIBE, PUBLISH, PSUBSCRIBE, PUNSUBSCRIBE, and PUBSUB introspection
 
 ## Phase Details
 
@@ -150,10 +151,28 @@ Plans:
 - [x] 09-01-PLAN.md — CI workflow with maturin-action for cross-platform wheel building
 - [x] 09-02-PLAN.md — PyPI publishing and release automation
 
+### Phase 10: Add PUB/SUB support (SUBSCRIBE, UNSUBSCRIBE, PUBLISH, PSUBSCRIBE, PUNSUBSCRIBE, and message dispatch)
+
+**Goal:** Users can subscribe to channels and patterns, publish messages with fire-and-forget semantics, and consume messages via an async PubSub class matching the redis-py interface -- enabling pydocket compatibility and general Redis pub/sub usage
+**Requirements**: PUBSUB-01, PUBSUB-02, PUBSUB-03, PUBSUB-04, PUBSUB-05, PUBSUB-06, PUBSUB-07, PUBSUB-08, PUBSUB-09, PUBSUB-10, PUBSUB-11, PUBSUB-12
+**Depends on:** Phase 9
+**Success Criteria** (what must be TRUE):
+  1. User can SUBSCRIBE to channels and receive published messages via PubSub.get_message() or PubSub.listen()
+  2. User can PSUBSCRIBE to glob patterns and receive matching messages as pmessage type
+  3. User can PUBLISH messages to channels, receiving subscriber count as return value
+  4. PubSub class supports handler callbacks, ignore_subscribe_messages, and run_in_thread()
+  5. PUBLISH works inside Lua scripts via redis.call() and inside Pipelines
+  6. PUBSUB CHANNELS/NUMSUB/NUMPAT introspection commands return correct data
+**Plans:** 2 plans
+
+Plans:
+- [ ] 10-01-PLAN.md — Rust pub/sub engine: PubSubRegistry in Store, broadcast fan-out, glob matching, PyO3 bindings
+- [ ] 10-02-PLAN.md — Python PubSub class, Pipeline/Lua PUBLISH integration, and comprehensive test suite
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -166,3 +185,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9
 | 7. Pipeline and Locking | 2/2 | Complete | - |
 | 8. Persistence | 0/2 | Planning complete | - |
 | 9. Distribution | 0/2 | Not started | - |
+| 10. Pub/Sub | 0/2 | Planning complete | - |
