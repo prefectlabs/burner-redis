@@ -5,8 +5,9 @@ use sha1::{Digest, Sha1};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::broadcast;
 
-use crate::store::{ValueData, ValueEntry};
+use crate::store::{PubSubMessage, ValueData, ValueEntry};
 
 /// Represents a Redis command return value for Lua-Redis type conversion.
 #[derive(Debug, Clone)]
@@ -105,17 +106,21 @@ impl LuaEngine {
     ///
     /// `data` is the ALREADY WRITE-LOCKED store data HashMap -- the caller (Store::eval)
     /// acquires the write lock and passes the mutable reference. This ensures atomicity.
+    /// `pubsub_tx` is an optional broadcast sender for PUBLISH command support in Lua scripts.
     pub fn execute(
         script: &str,
         keys: Vec<Bytes>,
         args: Vec<Bytes>,
         data: &mut HashMap<Bytes, ValueEntry>,
+        pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
     ) -> Result<RedisValue, String> {
         // Create a fresh Lua VM per execution (isolation, no state leakage)
         let lua = Lua::new();
 
         // Use RefCell to allow mutable access from within Lua callbacks
         let data_cell = RefCell::new(data);
+        // Clone the broadcast sender for use inside Lua closures
+        let pubsub_tx_clone = pubsub_tx.cloned();
 
         let scope_result: LuaResult<RedisValue> = lua.scope(|scope| {
             // Set up KEYS global
@@ -167,7 +172,8 @@ impl LuaEngine {
                         .collect();
 
                     let mut data_ref = data_cell.borrow_mut();
-                    let result = dispatch_command(&cmd_name, &cmd_args, *data_ref);
+                    let pubsub_tx_ref = pubsub_tx_clone.as_ref();
+                    let result = dispatch_command(&cmd_name, &cmd_args, *data_ref, pubsub_tx_ref);
 
                     match result {
                         Ok(RedisValue::Error(msg)) => Err(LuaError::RuntimeError(msg)),
@@ -210,7 +216,8 @@ impl LuaEngine {
                         .collect();
 
                     let mut data_ref = data_cell.borrow_mut();
-                    let result = dispatch_command(&cmd_name, &cmd_args, *data_ref);
+                    let pubsub_tx_ref = pubsub_tx_clone.as_ref();
+                    let result = dispatch_command(&cmd_name, &cmd_args, *data_ref, pubsub_tx_ref);
 
                     match result {
                         Ok(RedisValue::Error(msg)) => {
@@ -243,10 +250,12 @@ impl LuaEngine {
 
 /// Dispatch a Redis command to the appropriate operation on the raw data HashMap.
 /// This operates directly on the write-locked data for atomicity during Lua execution.
+/// `pubsub_tx` is an optional broadcast sender for PUBLISH support in Lua scripts.
 fn dispatch_command(
     cmd: &str,
     args: &[Bytes],
     data: &mut HashMap<Bytes, ValueEntry>,
+    pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
 ) -> Result<RedisValue, String> {
     match cmd {
         // ── String commands ──────────────────────────────────────────
@@ -1096,6 +1105,34 @@ fn dispatch_command(
                 Ok(RedisValue::Nil)
             } else {
                 Ok(RedisValue::Array(result))
+            }
+        }
+
+        // ── Pub/Sub commands ─────────────────────────────────────────
+        "PUBLISH" => {
+            if args.len() != 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'publish' command".to_string(),
+                ));
+            }
+            let channel = &args[0];
+            let message = &args[1];
+
+            match pubsub_tx {
+                Some(tx) => {
+                    // Send message through broadcast channel and return receiver count
+                    let _ = tx.send(PubSubMessage {
+                        kind: "message".to_string(),
+                        pattern: None,
+                        channel: channel.clone(),
+                        data: message.clone(),
+                    });
+                    Ok(RedisValue::Integer(tx.receiver_count() as i64))
+                }
+                None => {
+                    // No pubsub sender available
+                    Ok(RedisValue::Integer(0))
+                }
             }
         }
 

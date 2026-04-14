@@ -1624,9 +1624,12 @@ impl Store {
         let sha1 = LuaEngine::sha1_hex(script);
         self.scripts.write().insert(sha1, script.to_string());
 
+        // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
+        let pubsub_tx = self.pubsub_sender();
+
         // Acquire write lock on data -- held for entire script execution
         let mut data = self.data.write();
-        LuaEngine::execute(script, keys, args, &mut *data)
+        LuaEngine::execute(script, keys, args, &mut *data, Some(&pubsub_tx))
     }
 
     /// EVALSHA: Execute a cached Lua script by SHA1 hash.
@@ -1642,9 +1645,12 @@ impl Store {
             }
         };
 
+        // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
+        let pubsub_tx = self.pubsub_sender();
+
         // Acquire write lock on data -- held for entire script execution
         let mut data = self.data.write();
-        LuaEngine::execute(&script, keys, args, &mut *data)
+        LuaEngine::execute(&script, keys, args, &mut *data, Some(&pubsub_tx))
     }
 
     // -- Pub/Sub Methods --

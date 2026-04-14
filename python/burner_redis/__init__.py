@@ -1,6 +1,7 @@
 from burner_redis._burner_redis import BurnerRedis
 from burner_redis.pipeline import Pipeline
 from burner_redis.lock import Lock, LockError
+from burner_redis.pubsub import PubSub
 
 
 class ResponseError(Exception):
@@ -37,4 +38,12 @@ def _lock(self, name, timeout=None, sleep=0.1, blocking=True, blocking_timeout=N
 
 BurnerRedis.lock = _lock
 
-__all__ = ["BurnerRedis", "Lock", "LockError", "Pipeline", "ResponseError"]
+
+def _pubsub(self, ignore_subscribe_messages=False):
+    """Create a PubSub for channel/pattern message subscription."""
+    return PubSub(self, ignore_subscribe_messages=ignore_subscribe_messages)
+
+
+BurnerRedis.pubsub = _pubsub
+
+__all__ = ["BurnerRedis", "Lock", "LockError", "Pipeline", "PubSub", "ResponseError"]

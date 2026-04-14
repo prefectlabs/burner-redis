@@ -180,3 +180,9 @@ class Pipeline:
     def script_exists(self, *args):
         self._commands.append(("script_exists", args, {}))
         return self
+
+    # ---- Pub/Sub Commands ----
+
+    def publish(self, channel, message):
+        self._commands.append(("publish", (channel, message), {}))
+        return self
