@@ -4,7 +4,9 @@ use parking_lot::RwLock;
 use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use tokio::sync::broadcast;
 
 use crate::commands::streams::StreamId;
 use crate::scripting::{LuaEngine, RedisValue};
@@ -182,9 +184,50 @@ pub enum StoreError {
     KeyNotFound,
 }
 
+/// A pub/sub message delivered through the broadcast channel.
+#[derive(Clone, Debug)]
+pub struct PubSubMessage {
+    pub kind: String,           // "message" or "pmessage"
+    pub pattern: Option<Bytes>, // pattern that matched (for pmessage only)
+    pub channel: Bytes,         // channel name
+    pub data: Bytes,            // message payload
+}
+
+/// Registry tracking all active pub/sub subscriptions.
+/// Separate from keyspace data -- pub/sub is orthogonal to key-value storage.
+pub struct PubSubRegistry {
+    /// Global broadcast sender -- all messages flow through here
+    pub tx: broadcast::Sender<PubSubMessage>,
+    /// Channel name -> set of subscriber IDs
+    channel_subscribers: HashMap<Bytes, HashSet<u64>>,
+    /// Pattern (glob) -> set of subscriber IDs
+    pattern_subscribers: HashMap<Bytes, HashSet<u64>>,
+    /// Subscriber ID -> set of channels subscribed
+    subscriber_channels: HashMap<u64, HashSet<Bytes>>,
+    /// Subscriber ID -> set of patterns subscribed
+    subscriber_patterns: HashMap<u64, HashSet<Bytes>>,
+    /// Next subscriber ID counter
+    next_id: AtomicU64,
+}
+
+impl PubSubRegistry {
+    pub fn new() -> Self {
+        let (tx, _rx) = broadcast::channel(4096);
+        PubSubRegistry {
+            tx,
+            channel_subscribers: HashMap::new(),
+            pattern_subscribers: HashMap::new(),
+            subscriber_channels: HashMap::new(),
+            subscriber_patterns: HashMap::new(),
+            next_id: AtomicU64::new(0),
+        }
+    }
+}
+
 pub struct Store {
     data: RwLock<HashMap<Bytes, ValueEntry>>,
     scripts: RwLock<HashMap<String, String>>,
+    pub(crate) pubsub: RwLock<PubSubRegistry>,
 }
 
 impl Store {
@@ -192,6 +235,7 @@ impl Store {
         Store {
             data: RwLock::new(HashMap::new()),
             scripts: RwLock::new(HashMap::new()),
+            pubsub: RwLock::new(PubSubRegistry::new()),
         }
     }
 
@@ -1601,6 +1645,199 @@ impl Store {
         // Acquire write lock on data -- held for entire script execution
         let mut data = self.data.write();
         LuaEngine::execute(&script, keys, args, &mut *data)
+    }
+
+    // -- Pub/Sub Methods --
+
+    /// Get a clone of the broadcast sender for use in contexts that cannot hold the pubsub lock
+    /// (e.g., Lua script dispatch which holds the data write lock).
+    pub fn pubsub_sender(&self) -> broadcast::Sender<PubSubMessage> {
+        self.pubsub.read().tx.clone()
+    }
+
+    /// Create a new subscriber, returning (subscriber_id, broadcast::Receiver).
+    pub fn new_subscriber(&self) -> (u64, broadcast::Receiver<PubSubMessage>) {
+        let registry = self.pubsub.read();
+        let id = registry.next_id.fetch_add(1, Ordering::Relaxed);
+        let rx = registry.tx.subscribe();
+        (id, rx)
+    }
+
+    /// SUBSCRIBE: Register a subscriber for exact channels.
+    /// Returns Vec<(channel_name, total_subscription_count_for_this_subscriber)>.
+    pub fn subscribe(&self, subscriber_id: u64, channels: Vec<Bytes>) -> Vec<(Bytes, i64)> {
+        let mut registry = self.pubsub.write();
+        let mut results = Vec::new();
+        for channel in channels {
+            registry.channel_subscribers
+                .entry(channel.clone())
+                .or_default()
+                .insert(subscriber_id);
+            registry.subscriber_channels
+                .entry(subscriber_id)
+                .or_default()
+                .insert(channel.clone());
+            let total = registry.subscriber_channels.get(&subscriber_id).map(|c| c.len()).unwrap_or(0)
+                + registry.subscriber_patterns.get(&subscriber_id).map(|p| p.len()).unwrap_or(0);
+            results.push((channel, total as i64));
+        }
+        results
+    }
+
+    /// UNSUBSCRIBE: Remove a subscriber from exact channels.
+    /// If channels is empty, unsubscribe from ALL channels.
+    /// Returns Vec<(channel_name, remaining_subscription_count)>.
+    pub fn unsubscribe(&self, subscriber_id: u64, channels: Vec<Bytes>) -> Vec<(Bytes, i64)> {
+        let mut registry = self.pubsub.write();
+        let channels_to_remove = if channels.is_empty() {
+            registry.subscriber_channels.get(&subscriber_id)
+                .cloned().unwrap_or_default().into_iter().collect::<Vec<_>>()
+        } else {
+            channels
+        };
+        let mut results = Vec::new();
+        for channel in channels_to_remove {
+            if let Some(subs) = registry.channel_subscribers.get_mut(&channel) {
+                subs.remove(&subscriber_id);
+                if subs.is_empty() {
+                    registry.channel_subscribers.remove(&channel);
+                }
+            }
+            if let Some(chans) = registry.subscriber_channels.get_mut(&subscriber_id) {
+                chans.remove(&channel);
+            }
+            let total = registry.subscriber_channels.get(&subscriber_id).map(|c| c.len()).unwrap_or(0)
+                + registry.subscriber_patterns.get(&subscriber_id).map(|p| p.len()).unwrap_or(0);
+            results.push((channel, total as i64));
+        }
+        results
+    }
+
+    /// PSUBSCRIBE: Register a subscriber for glob patterns.
+    /// Returns Vec<(pattern, total_subscription_count)>.
+    pub fn psubscribe(&self, subscriber_id: u64, patterns: Vec<Bytes>) -> Vec<(Bytes, i64)> {
+        let mut registry = self.pubsub.write();
+        let mut results = Vec::new();
+        for pattern in patterns {
+            registry.pattern_subscribers
+                .entry(pattern.clone())
+                .or_default()
+                .insert(subscriber_id);
+            registry.subscriber_patterns
+                .entry(subscriber_id)
+                .or_default()
+                .insert(pattern.clone());
+            let total = registry.subscriber_channels.get(&subscriber_id).map(|c| c.len()).unwrap_or(0)
+                + registry.subscriber_patterns.get(&subscriber_id).map(|p| p.len()).unwrap_or(0);
+            results.push((pattern, total as i64));
+        }
+        results
+    }
+
+    /// PUNSUBSCRIBE: Remove a subscriber from glob patterns.
+    /// If patterns is empty, unsubscribe from ALL patterns.
+    /// Returns Vec<(pattern, remaining_subscription_count)>.
+    pub fn punsubscribe(&self, subscriber_id: u64, patterns: Vec<Bytes>) -> Vec<(Bytes, i64)> {
+        let mut registry = self.pubsub.write();
+        let patterns_to_remove = if patterns.is_empty() {
+            registry.subscriber_patterns.get(&subscriber_id)
+                .cloned().unwrap_or_default().into_iter().collect::<Vec<_>>()
+        } else {
+            patterns
+        };
+        let mut results = Vec::new();
+        for pattern in patterns_to_remove {
+            if let Some(subs) = registry.pattern_subscribers.get_mut(&pattern) {
+                subs.remove(&subscriber_id);
+                if subs.is_empty() {
+                    registry.pattern_subscribers.remove(&pattern);
+                }
+            }
+            if let Some(pats) = registry.subscriber_patterns.get_mut(&subscriber_id) {
+                pats.remove(&pattern);
+            }
+            let total = registry.subscriber_channels.get(&subscriber_id).map(|c| c.len()).unwrap_or(0)
+                + registry.subscriber_patterns.get(&subscriber_id).map(|p| p.len()).unwrap_or(0);
+            results.push((pattern, total as i64));
+        }
+        results
+    }
+
+    /// PUBLISH: Send a message to a channel. Returns total subscriber count that will receive it.
+    /// Sends both "message" (for exact subscribers) and "pmessage" (for pattern subscribers).
+    pub fn publish(&self, channel: Bytes, message: Bytes) -> i64 {
+        let registry = self.pubsub.read();
+
+        // Count exact channel subscribers
+        let channel_count = registry.channel_subscribers
+            .get(&channel)
+            .map(|s| s.len() as i64)
+            .unwrap_or(0);
+
+        // Count and send to pattern subscribers
+        let mut pattern_count: i64 = 0;
+        for (pattern, subs) in &registry.pattern_subscribers {
+            if crate::commands::pubsub::glob_match(pattern, &channel) {
+                pattern_count += subs.len() as i64;
+                // Send pmessage for each matching pattern
+                let _ = registry.tx.send(PubSubMessage {
+                    kind: "pmessage".to_string(),
+                    pattern: Some(pattern.clone()),
+                    channel: channel.clone(),
+                    data: message.clone(),
+                });
+            }
+        }
+
+        // Send regular message (for exact channel subscribers)
+        if channel_count > 0 || pattern_count == 0 {
+            // Always send the message event so broadcast receivers get it
+            let _ = registry.tx.send(PubSubMessage {
+                kind: "message".to_string(),
+                pattern: None,
+                channel: channel.clone(),
+                data: message.clone(),
+            });
+        }
+
+        channel_count + pattern_count
+    }
+
+    /// PUBSUB CHANNELS: Return channels with active subscriptions matching the optional glob pattern.
+    pub fn pubsub_channels(&self, pattern: Option<&Bytes>) -> Vec<Bytes> {
+        let registry = self.pubsub.read();
+        let mut channels: Vec<Bytes> = registry.channel_subscribers.keys()
+            .filter(|ch| {
+                match pattern {
+                    Some(pat) => crate::commands::pubsub::glob_match(pat, ch),
+                    None => true,
+                }
+            })
+            .cloned()
+            .collect();
+        channels.sort();
+        channels
+    }
+
+    /// PUBSUB NUMSUB: Return (channel, subscriber_count) for each requested channel.
+    pub fn pubsub_numsub(&self, channels: Vec<Bytes>) -> Vec<(Bytes, i64)> {
+        let registry = self.pubsub.read();
+        channels.into_iter()
+            .map(|ch| {
+                let count = registry.channel_subscribers.get(&ch)
+                    .map(|s| s.len() as i64)
+                    .unwrap_or(0);
+                (ch, count)
+            })
+            .collect()
+    }
+
+    /// PUBSUB NUMPAT: Return the total number of active pattern subscriptions.
+    pub fn pubsub_numpat(&self) -> i64 {
+        let registry = self.pubsub.read();
+        registry.pattern_subscribers.values()
+            .map(|s| s.len() as i64)
+            .sum()
     }
 }
 
