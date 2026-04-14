@@ -202,11 +202,11 @@ Plans:
   7. mget(*keys) returns a list of values with None for missing keys
   8. LockError is subclass of redis.exceptions.LockError when redis is installed
   9. Pipeline has stubs for all new commands
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [x] 12-01-PLAN.md — Rust glob range support, Store methods (keys, ttl, mget, xpending_summary), PyO3 bindings
-- [ ] 12-02-PLAN.md — Python value coercion, exception hierarchy, scan_iter, setex, pipeline stubs, and comprehensive tests
+- [x] 12-02-PLAN.md — Python value coercion, exception hierarchy, scan_iter, setex, pipeline stubs, and comprehensive tests
 
 ## Progress
 
@@ -226,4 +226,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 9. Distribution | 0/2 | Not started | - |
 | 10. Pub/Sub | 2/2 | Complete    | 2026-04-14 |
 | 11. Pydocket Compatibility | 2/2 | Complete    | 2026-04-14 |
-| 12. Drop-in Replacement | 1/2 | In Progress|  |
+| 12. Drop-in Replacement | 2/2 | Complete    | 2026-04-14 |
