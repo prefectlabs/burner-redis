@@ -1181,22 +1181,35 @@ impl BurnerRedis {
                 return format_xreadgroup_result(results);
             }
 
-            // Blocking: wait for stream notification or timeout
+            // Blocking: wait for stream notification or timeout, retrying until
+            // data is available or the deadline expires. A single notify may fire
+            // because a different stream received data, or another consumer claimed
+            // the entry first, so we loop until we get results or time out.
             let block_ms = block.unwrap();
             let notify = store.stream_notify();
             let timeout_duration = Duration::from_millis(block_ms);
+            let deadline = tokio::time::Instant::now() + timeout_duration;
 
-            tokio::select! {
-                _ = notify.notified() => {
-                    // New data arrived, retry
-                    let results = store
-                        .xreadgroup(&group, &consumer, &keys, &id_strs, count)
-                        .map_err(store_err_to_py)?;
-                    format_xreadgroup_result(results)
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break format_xreadgroup_result(Vec::new());
                 }
-                _ = tokio::time::sleep(timeout_duration) => {
-                    // Timeout, return empty
-                    format_xreadgroup_result(Vec::new())
+                tokio::select! {
+                    _ = notify.notified() => {
+                        // New data arrived, retry read
+                        let results = store
+                            .xreadgroup(&group, &consumer, &keys, &id_strs, count)
+                            .map_err(store_err_to_py)?;
+                        if !results.is_empty() {
+                            break format_xreadgroup_result(results);
+                        }
+                        // No data for this consumer yet; loop and wait again
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        // Deadline reached, return empty
+                        break format_xreadgroup_result(Vec::new());
+                    }
                 }
             }
         })
