@@ -118,7 +118,7 @@ class Pipeline:
     # ---- Stream Commands ----
 
     def xadd(self, name, fields, id="*", maxlen=None, minid=None):
-        self._commands.append(("xadd", (name, fields), {"id": id}))
+        self._commands.append(("xadd", (name, fields), {"id": id, "maxlen": maxlen, "minid": minid}))
         return self
 
     def xread(self, streams, count=None, block=None):
