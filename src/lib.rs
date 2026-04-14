@@ -1943,6 +1943,109 @@ impl BurnerRedis {
             Ok(store.pubsub_numpat())
         })
     }
+
+    // ── Key Enumeration & Multi-Key Commands ────────────────────────
+
+    /// KEYS command matching redis.asyncio.Redis.keys() signature.
+    /// Returns list of keys matching the glob pattern.
+    #[pyo3(signature = (pattern="*"))]
+    fn keys<'py>(
+        &self,
+        py: Python<'py>,
+        pattern: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let pat = Bytes::from(pattern.to_owned().into_bytes());
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let keys = store.keys(pat.as_ref());
+            let result: Vec<Vec<u8>> = keys.into_iter().map(|k| k.to_vec()).collect();
+            Ok(result)
+        })
+    }
+
+    /// TTL command matching redis.asyncio.Redis.ttl() signature.
+    /// Returns seconds remaining, -1 for no TTL, -2 for missing key.
+    fn ttl<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(store.ttl(&key))
+        })
+    }
+
+    /// MGET command matching redis.asyncio.Redis.mget() signature.
+    /// Returns list of values (or None) for each key.
+    #[pyo3(signature = (*keys))]
+    fn mget<'py>(
+        &self,
+        py: Python<'py>,
+        keys: &Bound<'py, PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key_list: Vec<Bytes> = keys
+            .iter()
+            .map(|k| extract_bytes(&k))
+            .collect::<PyResult<Vec<Bytes>>>()?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store.mget(&key_list);
+            let py_results: Vec<Option<Vec<u8>>> = results
+                .into_iter()
+                .map(|opt| opt.map(|b| b.to_vec()))
+                .collect();
+            Ok(py_results)
+        })
+    }
+
+    /// XPENDING summary command matching redis.asyncio.Redis.xpending() signature.
+    /// Returns dict with pending count, min/max IDs, and per-consumer counts.
+    fn xpending<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (total, min_id, max_id, consumers) = store
+                .xpending_summary(&key, &group)
+                .map_err(store_err_to_py)?;
+
+            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                let dict = PyDict::new(py);
+                dict.set_item("pending", total)?;
+                match min_id {
+                    Some(id) => dict.set_item("min", format_stream_id(id))?,
+                    None => dict.set_item("min", py.None())?,
+                }
+                match max_id {
+                    Some(id) => dict.set_item("max", format_stream_id(id))?,
+                    None => dict.set_item("max", py.None())?,
+                }
+                let consumer_list = pyo3::types::PyList::empty(py);
+                for (cname, count) in consumers {
+                    let cdict = PyDict::new(py);
+                    cdict.set_item("name", PyBytes::new(py, &cname))?;
+                    cdict.set_item("pending", count)?;
+                    consumer_list.append(cdict)?;
+                }
+                dict.set_item("consumers", consumer_list)?;
+                Ok(dict.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("failed to attach to Python interpreter")
+            })?
+        })
+    }
 }
 
 #[pymodule]
