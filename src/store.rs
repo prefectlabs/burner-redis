@@ -1849,6 +1849,100 @@ impl Store {
         Ok(result)
     }
 
+    /// XPENDING RANGE: Returns detailed pending entry information with filtering.
+    /// Each result contains (entry_id, consumer_name, idle_time_ms, delivery_count).
+    pub fn xpending_range(
+        &self,
+        key: &Bytes,
+        group: &Bytes,
+        min_id: StreamId,
+        max_id: StreamId,
+        count: usize,
+        consumer_filter: Option<&Bytes>,
+        min_idle_ms: Option<u64>,
+    ) -> Result<Vec<(StreamId, Bytes, u128, u64)>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(e) => e,
+        };
+
+        let stream = match &entry.data {
+            ValueData::Stream(s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let cg = match stream.groups.get(group) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(g) => g,
+        };
+
+        let now = Instant::now();
+        let mut results: Vec<(StreamId, Bytes, u128, u64)> = Vec::new();
+
+        // Iterate consumers: either the filtered one or all
+        let consumers_to_check: Vec<(&Bytes, &Consumer)> = match consumer_filter {
+            Some(name) => {
+                if let Some(consumer) = cg.consumers.get(name) {
+                    vec![(name, consumer)]
+                } else {
+                    vec![]
+                }
+            }
+            None => cg.consumers.iter().collect(),
+        };
+
+        for (consumer_name, consumer_data) in consumers_to_check {
+            for (entry_id, pe) in &consumer_data.pending {
+                // Filter by ID range
+                if *entry_id < min_id || *entry_id > max_id {
+                    continue;
+                }
+
+                let idle_ms = now.duration_since(pe.delivery_time).as_millis();
+
+                // Filter by minimum idle time
+                if let Some(min_idle) = min_idle_ms {
+                    if idle_ms < min_idle as u128 {
+                        continue;
+                    }
+                }
+
+                results.push((*entry_id, consumer_name.clone(), idle_ms, pe.delivery_count));
+            }
+        }
+
+        // Sort by StreamId ascending
+        results.sort_by_key(|(id, _, _, _)| *id);
+
+        // Truncate to count
+        results.truncate(count);
+
+        Ok(results)
+    }
+
     // ── Lua Scripting Operations ───────────────────────��─────────────
 
     /// SCRIPT LOAD: Cache a Lua script by its SHA1 hash. Returns the SHA1 hex digest.

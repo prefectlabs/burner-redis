@@ -1412,6 +1412,102 @@ impl BurnerRedis {
         })
     }
 
+    /// XPENDING RANGE command matching redis.asyncio.Redis.xpending_range() signature.
+    /// Returns list of dicts with message_id, consumer, time_since_delivered, times_delivered.
+    #[pyo3(signature = (name, groupname, min="-", max="+", count=100, consumername=None, idle=None))]
+    fn xpending_range<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+        min: &str,
+        max: &str,
+        count: usize,
+        consumername: Option<&Bound<'py, PyAny>>,
+        idle: Option<u64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+        let consumer_filter = match consumername {
+            Some(c) => Some(extract_bytes(c)?),
+            None => None,
+        };
+
+        // Parse min: "-" means (0, 0)
+        let min_id: StreamId = if min == "-" {
+            (0, 0)
+        } else {
+            parse_stream_id(min).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    min
+                ))
+            })?
+        };
+
+        // Parse max: "+" means (u64::MAX, u64::MAX)
+        let max_id: StreamId = if max == "+" {
+            (u64::MAX, u64::MAX)
+        } else {
+            parse_stream_id(max).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    max
+                ))
+            })?
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let entries = store
+                .xpending_range(
+                    &key,
+                    &group,
+                    min_id,
+                    max_id,
+                    count,
+                    consumer_filter.as_ref(),
+                    idle,
+                )
+                .map_err(store_err_to_py)?;
+
+            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+                let result_list = pyo3::types::PyList::empty(py);
+                for (entry_id, consumer_name, idle_ms, delivery_count) in &entries {
+                    let dict = pyo3::types::PyDict::new(py);
+                    // message_id -> bytes
+                    let id_str = format_stream_id(*entry_id).into_bytes();
+                    dict.set_item(
+                        pyo3::types::PyBytes::new(py, b"message_id"),
+                        pyo3::types::PyBytes::new(py, &id_str),
+                    )?;
+                    // consumer -> bytes
+                    dict.set_item(
+                        pyo3::types::PyBytes::new(py, b"consumer"),
+                        pyo3::types::PyBytes::new(py, consumer_name.as_ref()),
+                    )?;
+                    // time_since_delivered -> int (milliseconds)
+                    dict.set_item(
+                        pyo3::types::PyBytes::new(py, b"time_since_delivered"),
+                        *idle_ms as i64,
+                    )?;
+                    // times_delivered -> int
+                    dict.set_item(
+                        pyo3::types::PyBytes::new(py, b"times_delivered"),
+                        *delivery_count as i64,
+                    )?;
+                    result_list.append(dict)?;
+                }
+                Ok(result_list.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
     // ── Scripting Commands ────────────────────────────────────────────
 
     /// EVAL command matching redis.asyncio.Redis.eval() signature.

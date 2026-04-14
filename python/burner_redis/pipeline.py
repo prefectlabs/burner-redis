@@ -163,6 +163,10 @@ class Pipeline:
         self._commands.append(("xinfo_consumers", (name, groupname), {}))
         return self
 
+    def xpending_range(self, name, groupname, min="-", max="+", count=100, consumername=None, idle=None):
+        self._commands.append(("xpending_range", (name, groupname, min, max, count), {"consumername": consumername, "idle": idle}))
+        return self
+
     # ---- Scripting Commands ----
 
     def eval(self, script, numkeys, *keys_and_args):
