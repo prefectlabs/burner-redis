@@ -1724,7 +1724,12 @@ impl Store {
                 deleted_ids.push(*entry_id);
             }
 
-            // Add to claiming consumer's PEL with incremented delivery count
+            // Add to claiming consumer's PEL unconditionally, even when the
+            // stream entry has been trimmed (deleted_ids path above). This matches
+            // Redis 7+ behaviour: XAUTOCLAIM transfers the PEL entry to the new
+            // consumer and reports it in the deleted_ids list so the caller can
+            // immediately XACK it. Without this, a trimmed entry would remain
+            // permanently un-acked if the original consumer disappeared.
             let claiming_consumer = cg
                 .consumers
                 .entry(consumer.clone())
