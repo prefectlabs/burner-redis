@@ -243,4 +243,39 @@ mod tests {
         assert!(glob_match(pattern, b"anything"));
         assert!(glob_match(pattern, b""));
     }
+
+    // -- Character class ranges (D-04) --
+    #[test]
+    fn test_char_class_range_lowercase() {
+        assert!(glob_match(b"h[a-z]llo", b"hello"));
+        assert!(glob_match(b"h[a-z]llo", b"hallo"));
+        assert!(!glob_match(b"h[a-z]llo", b"hAllo")); // A is outside a-z
+    }
+
+    #[test]
+    fn test_char_class_range_digits() {
+        assert!(glob_match(b"[0-9]abc", b"5abc"));
+        assert!(!glob_match(b"[0-9]abc", b"xabc"));
+    }
+
+    #[test]
+    fn test_char_class_reversed_range() {
+        // Reversed range [z-a] should match nothing (empty range)
+        assert!(!glob_match(b"[z-a]llo", b"ello"));
+        assert!(!glob_match(b"[z-a]llo", b"mllo"));
+    }
+
+    #[test]
+    fn test_char_class_leading_hyphen() {
+        // Leading hyphen is literal
+        assert!(glob_match(b"[-abc]def", b"-def"));
+        assert!(glob_match(b"[-abc]def", b"adef"));
+    }
+
+    #[test]
+    fn test_char_class_trailing_hyphen() {
+        // Trailing hyphen is literal
+        assert!(glob_match(b"[abc-]def", b"-def"));
+        assert!(glob_match(b"[abc-]def", b"bdef"));
+    }
 }

@@ -3695,4 +3695,144 @@ mod tests {
         assert!(removed <= 20, "sweep should remove at most 20 keys, removed {}", removed);
         assert!(removed > 0, "sweep should remove some expired keys");
     }
+
+    // ── keys() tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_keys_star_returns_all() {
+        let store = Store::new();
+        store.set(Bytes::from("a"), Bytes::from("1"), None, false, false);
+        store.set(Bytes::from("b"), Bytes::from("2"), None, false, false);
+        store.set(Bytes::from("c"), Bytes::from("3"), None, false, false);
+        let mut keys = store.keys(b"*");
+        keys.sort();
+        assert_eq!(keys, vec![Bytes::from("a"), Bytes::from("b"), Bytes::from("c")]);
+    }
+
+    #[test]
+    fn test_keys_prefix_pattern() {
+        let store = Store::new();
+        store.set(Bytes::from("user:1"), Bytes::from("a"), None, false, false);
+        store.set(Bytes::from("user:2"), Bytes::from("b"), None, false, false);
+        store.set(Bytes::from("session:1"), Bytes::from("c"), None, false, false);
+        let mut keys = store.keys(b"user:*");
+        keys.sort();
+        assert_eq!(keys, vec![Bytes::from("user:1"), Bytes::from("user:2")]);
+    }
+
+    #[test]
+    fn test_keys_no_match() {
+        let store = Store::new();
+        store.set(Bytes::from("a"), Bytes::from("1"), None, false, false);
+        let keys = store.keys(b"nonexistent*");
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn test_keys_excludes_expired() {
+        let store = Store::new();
+        store.set(Bytes::from("alive"), Bytes::from("1"), None, false, false);
+        store.set(Bytes::from("dead"), Bytes::from("2"), Some(Duration::from_millis(1)), false, false);
+        std::thread::sleep(Duration::from_millis(10));
+        let keys = store.keys(b"*");
+        assert_eq!(keys, vec![Bytes::from("alive")]);
+    }
+
+    // ── ttl() tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_ttl_missing_key() {
+        let store = Store::new();
+        assert_eq!(store.ttl(&Bytes::from("missing")), -2);
+    }
+
+    #[test]
+    fn test_ttl_no_expiry() {
+        let store = Store::new();
+        store.set(Bytes::from("k"), Bytes::from("v"), None, false, false);
+        assert_eq!(store.ttl(&Bytes::from("k")), -1);
+    }
+
+    #[test]
+    fn test_ttl_with_expiry() {
+        let store = Store::new();
+        store.set(Bytes::from("k"), Bytes::from("v"), Some(Duration::from_secs(30)), false, false);
+        let ttl = store.ttl(&Bytes::from("k"));
+        assert!(ttl > 0 && ttl <= 30, "expected positive TTL, got {}", ttl);
+    }
+
+    #[test]
+    fn test_ttl_expired_key() {
+        let store = Store::new();
+        store.set(Bytes::from("k"), Bytes::from("v"), Some(Duration::from_millis(1)), false, false);
+        std::thread::sleep(Duration::from_millis(10));
+        assert_eq!(store.ttl(&Bytes::from("k")), -2);
+    }
+
+    // ── mget() tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_mget_mixed() {
+        let store = Store::new();
+        store.set(Bytes::from("k1"), Bytes::from("v1"), None, false, false);
+        // k2 missing
+        store.set(Bytes::from("k3"), Bytes::from("v3"), None, false, false);
+        let result = store.mget(&[Bytes::from("k1"), Bytes::from("k2"), Bytes::from("k3")]);
+        assert_eq!(result, vec![Some(Bytes::from("v1")), None, Some(Bytes::from("v3"))]);
+    }
+
+    #[test]
+    fn test_mget_non_string_returns_none() {
+        let store = Store::new();
+        store.set(Bytes::from("str"), Bytes::from("v"), None, false, false);
+        // Create a hash key
+        store.hset(Bytes::from("hash"), vec![(Bytes::from("f"), Bytes::from("v"))]);
+        let result = store.mget(&[Bytes::from("str"), Bytes::from("hash")]);
+        assert_eq!(result, vec![Some(Bytes::from("v")), None]);
+    }
+
+    // ── xpending_summary() tests ────────────────────────────────────
+
+    #[test]
+    fn test_xpending_summary_no_pending() {
+        let store = Store::new();
+        // Create stream and group
+        let fields = vec![(Bytes::from("f"), Bytes::from("v"))];
+        store.xadd(&Bytes::from("s"), None, fields);
+        store.xgroup_create(&Bytes::from("s"), &Bytes::from("g"), (0, 0), false).unwrap();
+
+        let (total, min, max, consumers) = store.xpending_summary(&Bytes::from("s"), &Bytes::from("g")).unwrap();
+        assert_eq!(total, 0);
+        assert_eq!(min, None);
+        assert_eq!(max, None);
+        assert!(consumers.is_empty());
+    }
+
+    #[test]
+    fn test_xpending_summary_with_pending() {
+        let store = Store::new();
+        // Create stream entries
+        let fields1 = vec![(Bytes::from("f"), Bytes::from("v1"))];
+        let fields2 = vec![(Bytes::from("f"), Bytes::from("v2"))];
+        store.xadd(&Bytes::from("s"), None, fields1);
+        store.xadd(&Bytes::from("s"), None, fields2);
+        store.xgroup_create(&Bytes::from("s"), &Bytes::from("g"), (0, 0), false).unwrap();
+
+        // Read messages (creates pending entries)
+        store.xreadgroup(
+            &Bytes::from("g"),
+            &Bytes::from("consumer1"),
+            &[(Bytes::from("s"), (0, 0))],
+            Some(10),
+            false,
+        ).unwrap();
+
+        let (total, min, max, consumers) = store.xpending_summary(&Bytes::from("s"), &Bytes::from("g")).unwrap();
+        assert_eq!(total, 2);
+        assert!(min.is_some());
+        assert!(max.is_some());
+        assert_eq!(consumers.len(), 1);
+        assert_eq!(consumers[0].0, Bytes::from("consumer1"));
+        assert_eq!(consumers[0].1, 2);
+    }
 }
