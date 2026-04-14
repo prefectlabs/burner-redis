@@ -4,6 +4,7 @@ use pyo3::types::{PyAny, PyBytes, PyCFunction, PyDict, PyTuple};
 use std::collections::HashSet as StdHashSet;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::broadcast;
 
 mod store;
 mod commands;
@@ -1251,6 +1252,181 @@ impl BurnerRedis {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let results = store.script_exists(&shas);
             Ok(results)
+        })
+    }
+
+    // -- Pub/Sub Commands --
+
+    /// PUBLISH: Send a message to a channel. Returns number of subscribers that received it.
+    fn publish<'py>(&self, py: Python<'py>, channel: &Bound<'py, PyAny>, message: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let channel_bytes = extract_bytes(channel)?;
+        let message_bytes = extract_bytes(message)?;
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let count = store.publish(
+                Bytes::from(channel_bytes),
+                Bytes::from(message_bytes),
+            );
+            Ok(count)
+        })
+    }
+
+    /// Internal: Create a new subscriber ID. Used by Python PubSub class.
+    /// Returns the subscriber_id as an integer. The Python side manages the
+    /// broadcast receiver via a background Tokio task.
+    fn _new_subscriber(&self) -> PyResult<u64> {
+        let (id, _rx) = self.store.new_subscriber();
+        // Note: _rx is dropped here. The Python PubSub class will set up its own
+        // message consumption via _subscribe_listener.
+        Ok(id)
+    }
+
+    /// Internal: Subscribe and start a background task that filters messages
+    /// into a Python asyncio.Queue. Returns subscriber_id.
+    /// Called once by Python PubSub on first subscribe.
+    fn _subscribe_listener<'py>(&self, py: Python<'py>, subscriber_id: u64, queue: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (_id, mut rx) = {
+                // Get a receiver from the broadcast channel
+                // NOTE: store.pubsub is pub(crate), set in Task 1 specifically for this access
+                let registry = store.pubsub.read();
+                (subscriber_id, registry.tx.subscribe())
+            };
+
+            // Spawn a background Tokio task that forwards matching messages to the Python queue
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(msg) => {
+                            // Push message to Python asyncio.Queue
+                            // Use try_attach (PyO3 0.28.3) to acquire the GIL from a background task
+                            let delivered = Python::try_attach(|py| -> Result<(), PyErr> {
+                                let dict = PyDict::new(py);
+                                dict.set_item("type", &msg.kind)?;
+                                match &msg.pattern {
+                                    Some(p) => dict.set_item("pattern", PyBytes::new(py, p))?,
+                                    None => dict.set_item("pattern", py.None())?,
+                                };
+                                dict.set_item("channel", PyBytes::new(py, &msg.channel))?;
+                                dict.set_item("data", PyBytes::new(py, &msg.data))?;
+                                let put_nowait = queue.getattr(py, "put_nowait")?;
+                                put_nowait.call1(py, (dict,))?;
+                                Ok(())
+                            });
+                            match delivered {
+                                Some(Ok(())) => {
+                                    // Message delivered
+                                }
+                                _ => {
+                                    // GIL not available or Python error -- stop task
+                                    break;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            // Messages were lost due to slow consumer -- continue
+                            eprintln!("burner-redis pubsub: subscriber lagged, {} messages dropped", n);
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            // Broadcast channel closed (Store dropped) -- stop
+                            break;
+                        }
+                    }
+                }
+            });
+
+            Ok(subscriber_id)
+        })
+    }
+
+    /// SUBSCRIBE: Register channels for a subscriber.
+    /// Returns list of (channel_bytes, subscription_count) tuples.
+    fn subscribe_channels<'py>(&self, py: Python<'py>, subscriber_id: u64, channels: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
+            let results = store.subscribe(subscriber_id, channel_bytes);
+            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+                .map(|(ch, count)| (ch.to_vec(), count))
+                .collect();
+            Ok(tuples)
+        })
+    }
+
+    /// UNSUBSCRIBE: Remove channels from a subscriber.
+    /// Returns list of (channel_bytes, remaining_subscription_count) tuples.
+    fn unsubscribe_channels<'py>(&self, py: Python<'py>, subscriber_id: u64, channels: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
+            let results = store.unsubscribe(subscriber_id, channel_bytes);
+            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+                .map(|(ch, count)| (ch.to_vec(), count))
+                .collect();
+            Ok(tuples)
+        })
+    }
+
+    /// PSUBSCRIBE: Register glob patterns for a subscriber.
+    /// Returns list of (pattern_bytes, subscription_count) tuples.
+    fn psubscribe_patterns<'py>(&self, py: Python<'py>, subscriber_id: u64, patterns: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let pattern_bytes: Vec<Bytes> = patterns.into_iter().map(Bytes::from).collect();
+            let results = store.psubscribe(subscriber_id, pattern_bytes);
+            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+                .map(|(pat, count)| (pat.to_vec(), count))
+                .collect();
+            Ok(tuples)
+        })
+    }
+
+    /// PUNSUBSCRIBE: Remove glob patterns from a subscriber.
+    /// Returns list of (pattern_bytes, remaining_subscription_count) tuples.
+    fn punsubscribe_patterns<'py>(&self, py: Python<'py>, subscriber_id: u64, patterns: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let pattern_bytes: Vec<Bytes> = patterns.into_iter().map(Bytes::from).collect();
+            let results = store.punsubscribe(subscriber_id, pattern_bytes);
+            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+                .map(|(pat, count)| (pat.to_vec(), count))
+                .collect();
+            Ok(tuples)
+        })
+    }
+
+    /// PUBSUB CHANNELS: Return active channels matching optional glob pattern.
+    #[pyo3(signature = (pattern=None))]
+    fn pubsub_channels<'py>(&self, py: Python<'py>, pattern: Option<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let pat_bytes = pattern.map(Bytes::from);
+            let channels = store.pubsub_channels(pat_bytes.as_ref());
+            let result: Vec<Vec<u8>> = channels.into_iter().map(|ch| ch.to_vec()).collect();
+            Ok(result)
+        })
+    }
+
+    /// PUBSUB NUMSUB: Return (channel, count) for requested channels.
+    fn pubsub_numsub<'py>(&self, py: Python<'py>, channels: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
+            let results = store.pubsub_numsub(channel_bytes);
+            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+                .map(|(ch, count)| (ch.to_vec(), count))
+                .collect();
+            Ok(tuples)
+        })
+    }
+
+    /// PUBSUB NUMPAT: Return total number of active pattern subscriptions.
+    fn pubsub_numpat<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(store.pubsub_numpat())
         })
     }
 }
