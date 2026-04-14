@@ -1710,14 +1710,21 @@ fn dispatch_command_inner(
 
             match pubsub_tx {
                 Some(tx) => {
-                    // Send message through broadcast channel and return receiver count
+                    // Send the message through the broadcast channel.
+                    // We return 0 here rather than tx.receiver_count(), because
+                    // receiver_count() reflects ALL active broadcast receivers
+                    // (including those subscribed to different channels/patterns),
+                    // which inflates the count compared to what Store::publish()
+                    // returns (only matching channel + pattern subscribers).
+                    // Accurate counting would require passing the PubSubRegistry
+                    // into the Lua dispatch context — a future improvement.
                     let _ = tx.send(PubSubMessage {
                         kind: "message".to_string(),
                         pattern: None,
                         channel: channel.clone(),
                         data: message.clone(),
                     });
-                    Ok(RedisValue::Integer(tx.receiver_count() as i64))
+                    Ok(RedisValue::Integer(0))
                 }
                 None => {
                     // No pubsub sender available
