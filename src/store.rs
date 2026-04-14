@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, Notify};
 
+use crate::commands::pubsub::glob_match;
 use crate::commands::streams::StreamId;
 use crate::scripting::{LuaEngine, RedisValue};
 
@@ -371,6 +372,66 @@ impl Store {
             }
         }
         count
+    }
+
+    // ── Key Enumeration & Multi-Key Operations ────────────────────────
+
+    /// KEYS: Returns all non-expired keys matching a glob pattern.
+    pub fn keys(&self, pattern: &[u8]) -> Vec<Bytes> {
+        let data = self.data.read();
+        let mut result = Vec::new();
+        for (key, entry) in data.iter() {
+            if !entry.is_expired() && glob_match(pattern, key.as_ref()) {
+                result.push(key.clone());
+            }
+        }
+        result
+    }
+
+    /// TTL: Returns remaining time-to-live in seconds.
+    /// Returns -2 if key does not exist (or is expired).
+    /// Returns -1 if key exists but has no TTL set.
+    /// Returns positive integer: remaining seconds (truncated, matching Redis).
+    pub fn ttl(&self, key: &Bytes) -> i64 {
+        let mut data = self.data.write();
+        match data.get(key) {
+            None => -2,
+            Some(entry) if entry.is_expired() => {
+                data.remove(key);
+                -2
+            }
+            Some(entry) => match entry.expires_at {
+                None => -1,
+                Some(exp) => {
+                    match exp.checked_duration_since(Instant::now()) {
+                        Some(remaining) => remaining.as_secs() as i64,
+                        None => {
+                            // Expired between check and computation
+                            data.remove(key);
+                            -2
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    /// MGET: Returns values for multiple keys at once in a single read lock.
+    /// Returns None for missing, expired, or non-string keys (matches GET behavior).
+    pub fn mget(&self, keys: &[Bytes]) -> Vec<Option<Bytes>> {
+        let data = self.data.read();
+        keys.iter().map(|key| {
+            match data.get(key) {
+                Some(entry) if !entry.is_expired() => {
+                    if let ValueData::String(ref v) = entry.data {
+                        Some(v.clone())
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        }).collect()
     }
 
     // ── Hash Operations ──────────────────────────────────────────────
@@ -2103,6 +2164,75 @@ impl Store {
         Ok(results)
     }
 
+    /// XPENDING summary form: Returns aggregated pending message info for a consumer group.
+    /// Returns (total_pending, min_id, max_id, per_consumer_counts).
+    pub fn xpending_summary(
+        &self,
+        key: &Bytes,
+        group: &Bytes,
+    ) -> Result<(usize, Option<StreamId>, Option<StreamId>, Vec<(Bytes, usize)>), StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => return Err(StoreError::NoGroup(
+                String::from_utf8_lossy(group.as_ref()).into_owned(),
+                String::from_utf8_lossy(key.as_ref()).into_owned(),
+            )),
+            Some(e) => e,
+        };
+
+        let stream = match &entry.data {
+            ValueData::Stream(s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let cg = match stream.groups.get(group) {
+            None => return Err(StoreError::NoGroup(
+                String::from_utf8_lossy(group.as_ref()).into_owned(),
+                String::from_utf8_lossy(key.as_ref()).into_owned(),
+            )),
+            Some(g) => g,
+        };
+
+        let mut total_pending: usize = 0;
+        let mut min_id: Option<StreamId> = None;
+        let mut max_id: Option<StreamId> = None;
+        let mut consumer_counts: Vec<(Bytes, usize)> = Vec::new();
+
+        for (consumer_name, consumer) in &cg.consumers {
+            let count = consumer.pending.len();
+            if count > 0 {
+                consumer_counts.push((consumer_name.clone(), count));
+                total_pending += count;
+                for (entry_id, _) in &consumer.pending {
+                    match min_id {
+                        None => min_id = Some(*entry_id),
+                        Some(m) if *entry_id < m => min_id = Some(*entry_id),
+                        _ => {}
+                    }
+                    match max_id {
+                        None => max_id = Some(*entry_id),
+                        Some(m) if *entry_id > m => max_id = Some(*entry_id),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        Ok((total_pending, min_id, max_id, consumer_counts))
+    }
+
     // ── Lua Scripting Operations ───────────────────────��─────────────
 
     /// SCRIPT LOAD: Cache a Lua script by its SHA1 hash. Returns the SHA1 hex digest.
@@ -3797,9 +3927,10 @@ mod tests {
     fn test_xpending_summary_no_pending() {
         let store = Store::new();
         // Create stream and group
-        let fields = vec![(Bytes::from("f"), Bytes::from("v"))];
-        store.xadd(&Bytes::from("s"), None, fields);
-        store.xgroup_create(&Bytes::from("s"), &Bytes::from("g"), (0, 0), false).unwrap();
+        let mut fields = HashMap::new();
+        fields.insert(Bytes::from("f"), Bytes::from("v"));
+        store.xadd(Bytes::from("s"), fields, None).unwrap();
+        store.xgroup_create(&Bytes::from("s"), Bytes::from("g"), (0, 0), false).unwrap();
 
         let (total, min, max, consumers) = store.xpending_summary(&Bytes::from("s"), &Bytes::from("g")).unwrap();
         assert_eq!(total, 0);
@@ -3812,19 +3943,21 @@ mod tests {
     fn test_xpending_summary_with_pending() {
         let store = Store::new();
         // Create stream entries
-        let fields1 = vec![(Bytes::from("f"), Bytes::from("v1"))];
-        let fields2 = vec![(Bytes::from("f"), Bytes::from("v2"))];
-        store.xadd(&Bytes::from("s"), None, fields1);
-        store.xadd(&Bytes::from("s"), None, fields2);
-        store.xgroup_create(&Bytes::from("s"), &Bytes::from("g"), (0, 0), false).unwrap();
+        let mut fields1 = HashMap::new();
+        fields1.insert(Bytes::from("f"), Bytes::from("v1"));
+        let mut fields2 = HashMap::new();
+        fields2.insert(Bytes::from("f"), Bytes::from("v2"));
+        store.xadd(Bytes::from("s"), fields1, None).unwrap();
+        store.xadd(Bytes::from("s"), fields2, None).unwrap();
+        store.xgroup_create(&Bytes::from("s"), Bytes::from("g"), (0, 0), false).unwrap();
 
         // Read messages (creates pending entries)
         store.xreadgroup(
             &Bytes::from("g"),
             &Bytes::from("consumer1"),
-            &[(Bytes::from("s"), (0, 0))],
+            &[Bytes::from("s")],
+            &[">".to_string()],
             Some(10),
-            false,
         ).unwrap();
 
         let (total, min, max, consumers) = store.xpending_summary(&Bytes::from("s"), &Bytes::from("g")).unwrap();

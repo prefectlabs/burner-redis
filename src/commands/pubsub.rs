@@ -50,10 +50,21 @@ pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
             let mut found = false;
             let mut class_end = false;
             while pi < pattern.len() && pattern[pi] != b']' {
-                if string[si] == pattern[pi] {
-                    found = true;
+                // Check for range: a-z (only if hyphen is NOT at start or end of class)
+                if pi + 2 < pattern.len() && pattern[pi + 1] == b'-' && pattern[pi + 2] != b']' {
+                    let range_start = pattern[pi];
+                    let range_end = pattern[pi + 2];
+                    // Only match if range is valid (start <= end), otherwise treat as no match
+                    if range_start <= range_end && string[si] >= range_start && string[si] <= range_end {
+                        found = true;
+                    }
+                    pi += 3; // skip char, '-', char
+                } else {
+                    if string[si] == pattern[pi] {
+                        found = true;
+                    }
+                    pi += 1;
                 }
-                pi += 1;
             }
 
             if pi < pattern.len() && pattern[pi] == b']' {
