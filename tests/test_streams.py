@@ -670,3 +670,96 @@ async def test_xinfo_consumers_nogroup_error(r):
 
     with pytest.raises(Exception):
         await r.xinfo_consumers("mystream", "nogroup")
+
+
+# --- XPENDING_RANGE ---
+
+
+async def test_xpending_range_returns_all_pending(r):
+    """xpending_range with '-' and '+' returns all pending entries with correct dict keys."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    result = await r.xpending_range("mystream", "mygroup", "-", "+", 10)
+    assert isinstance(result, list)
+    assert len(result) == 2
+
+    # Each entry should be a dict with the correct keys
+    for entry in result:
+        assert isinstance(entry, dict)
+        assert b"message_id" in entry
+        assert b"consumer" in entry
+        assert b"time_since_delivered" in entry
+        assert b"times_delivered" in entry
+        assert entry[b"consumer"] == b"consumer1"
+        assert isinstance(entry[b"time_since_delivered"], int)
+        assert entry[b"time_since_delivered"] >= 0
+        assert entry[b"times_delivered"] >= 1
+
+
+async def test_xpending_range_consumer_filter(r):
+    """xpending_range with consumername filter returns only that consumer's entries."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xadd("mystream", {"f": "v3"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+
+    # consumer1 reads first 2
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, count=2)
+    # consumer2 reads the 3rd
+    await r.xreadgroup("mygroup", "consumer2", {"mystream": ">"})
+
+    # Filter by consumer1
+    result = await r.xpending_range("mystream", "mygroup", "-", "+", 10, consumername="consumer1")
+    assert len(result) == 2
+    for entry in result:
+        assert entry[b"consumer"] == b"consumer1"
+
+    # Filter by consumer2
+    result2 = await r.xpending_range("mystream", "mygroup", "-", "+", 10, consumername="consumer2")
+    assert len(result2) == 1
+    assert result2[0][b"consumer"] == b"consumer2"
+
+
+async def test_xpending_range_count_limits_results(r):
+    """xpending_range count parameter limits number of results."""
+    for i in range(5):
+        await r.xadd("mystream", {"f": f"v{i}"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    result = await r.xpending_range("mystream", "mygroup", "-", "+", 2)
+    assert len(result) == 2
+
+
+async def test_xpending_range_nogroup_error(r):
+    """xpending_range on non-existent group raises error."""
+    await r.xadd("mystream", {"f": "v1"})
+    with pytest.raises(Exception, match="NOGROUP"):
+        await r.xpending_range("mystream", "nogroup", "-", "+", 10)
+
+
+async def test_xpending_range_empty(r):
+    """xpending_range with no pending entries returns empty list."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+
+    result = await r.xpending_range("mystream", "mygroup", "-", "+", 10)
+    assert result == []
+
+
+async def test_xpending_range_idle_filter(r):
+    """xpending_range idle filter excludes recently-delivered entries."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # With a very high idle threshold, nothing should qualify
+    result = await r.xpending_range("mystream", "mygroup", "-", "+", 10, idle=999999)
+    assert result == []
+
+    # With idle=0, everything qualifies
+    result2 = await r.xpending_range("mystream", "mygroup", "-", "+", 10, idle=0)
+    assert len(result2) == 1
