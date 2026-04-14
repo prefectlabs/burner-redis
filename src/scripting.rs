@@ -1457,6 +1457,225 @@ fn dispatch_command_inner(
             }
         }
 
+        "XCLAIM" => {
+            // XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [FORCE] [JUSTID] [RETRYCOUNT n]
+            if args.len() < 5 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'xclaim' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let group = &args[1];
+            let consumer = args[2].clone();
+            let min_idle_str = String::from_utf8_lossy(&args[3]);
+            let min_idle_time: u64 = min_idle_str.parse().map_err(|_| {
+                "ERR Invalid min-idle-time argument for XCLAIM".to_string()
+            })?;
+
+            // Parse remaining args: IDs and optional flags
+            let mut ids = Vec::new();
+            let mut idle: Option<u64> = None;
+            let mut force = false;
+            let mut justid = false;
+            let mut retrycount: Option<u64> = None;
+            let mut i = 4;
+            while i < args.len() {
+                let arg_upper = String::from_utf8_lossy(&args[i]).to_uppercase();
+                match arg_upper.as_str() {
+                    "IDLE" => {
+                        if i + 1 < args.len() {
+                            idle = Some(
+                                String::from_utf8_lossy(&args[i + 1])
+                                    .parse()
+                                    .unwrap_or(0),
+                            );
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    "RETRYCOUNT" => {
+                        if i + 1 < args.len() {
+                            retrycount = Some(
+                                String::from_utf8_lossy(&args[i + 1])
+                                    .parse()
+                                    .unwrap_or(0),
+                            );
+                            i += 2;
+                            continue;
+                        }
+                        i += 1;
+                        continue;
+                    }
+                    "FORCE" => {
+                        force = true;
+                        i += 1;
+                        continue;
+                    }
+                    "JUSTID" => {
+                        justid = true;
+                        i += 1;
+                        continue;
+                    }
+                    _ => {
+                        // Must be a stream ID
+                        let id_str = String::from_utf8_lossy(&args[i]);
+                        if let Some(parsed) = crate::commands::streams::parse_stream_id(&id_str) {
+                            ids.push(parsed);
+                        }
+                        i += 1;
+                    }
+                }
+            }
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Error(format!(
+                        "NOGROUP No such key '{}' or consumer group '{}' in XCLAIM",
+                        String::from_utf8_lossy(key),
+                        String::from_utf8_lossy(group),
+                    )));
+                }
+            }
+
+            match data.get_mut(key) {
+                None => Ok(RedisValue::Error(format!(
+                    "NOGROUP No such key '{}' or consumer group '{}' in XCLAIM",
+                    String::from_utf8_lossy(key),
+                    String::from_utf8_lossy(group),
+                ))),
+                Some(entry) => match entry.data {
+                    ValueData::Stream(ref mut stream) => {
+                        let cg = match stream.groups.get_mut(group) {
+                            Some(g) => g,
+                            None => {
+                                return Ok(RedisValue::Error(format!(
+                                    "NOGROUP No such key '{}' or consumer group '{}' in XCLAIM",
+                                    String::from_utf8_lossy(key),
+                                    String::from_utf8_lossy(group),
+                                )));
+                            }
+                        };
+
+                        let now = std::time::Instant::now();
+                        let min_idle = std::time::Duration::from_millis(min_idle_time);
+                        let mut claimed = Vec::new();
+
+                        for &id in &ids {
+                            // Find entry in any consumer's PEL
+                            let mut found_consumer: Option<Bytes> = None;
+                            let mut found_entry: Option<crate::store::PendingEntry> = None;
+                            for (cname, c) in cg.consumers.iter() {
+                                if let Some(pe) = c.pending.get(&id) {
+                                    let idle_dur = now.duration_since(pe.delivery_time);
+                                    if idle_dur >= min_idle || force {
+                                        found_consumer = Some(cname.clone());
+                                        found_entry = Some(pe.clone());
+                                    }
+                                    break;
+                                }
+                            }
+
+                            // Force create if not found
+                            if found_consumer.is_none() && force {
+                                if stream.entries.contains_key(&id) {
+                                    let new_dt = match idle {
+                                        Some(ms) => now - std::time::Duration::from_millis(ms),
+                                        None => now,
+                                    };
+                                    let target = cg
+                                        .consumers
+                                        .entry(consumer.clone())
+                                        .or_insert_with(|| crate::store::Consumer {
+                                            pending: HashMap::new(),
+                                        });
+                                    target.pending.insert(
+                                        id,
+                                        crate::store::PendingEntry {
+                                            delivery_time: new_dt,
+                                            delivery_count: retrycount.unwrap_or(1),
+                                        },
+                                    );
+                                    if justid {
+                                        claimed.push(RedisValue::BulkString(Bytes::from(
+                                            format!("{}-{}", id.0, id.1),
+                                        )));
+                                    } else if let Some(fields) = stream.entries.get(&id) {
+                                        let mut items = Vec::new();
+                                        items.push(RedisValue::BulkString(Bytes::from(
+                                            format!("{}-{}", id.0, id.1),
+                                        )));
+                                        let mut field_items = Vec::new();
+                                        for (fk, fv) in fields {
+                                            field_items
+                                                .push(RedisValue::BulkString(fk.clone()));
+                                            field_items
+                                                .push(RedisValue::BulkString(fv.clone()));
+                                        }
+                                        items.push(RedisValue::Array(field_items));
+                                        claimed.push(RedisValue::Array(items));
+                                    }
+                                }
+                                continue;
+                            }
+
+                            if let (Some(from_consumer), Some(pe)) =
+                                (found_consumer, found_entry)
+                            {
+                                if let Some(orig) = cg.consumers.get_mut(&from_consumer) {
+                                    orig.pending.remove(&id);
+                                }
+                                let new_dt = match idle {
+                                    Some(ms) => now - std::time::Duration::from_millis(ms),
+                                    None => pe.delivery_time,
+                                };
+                                let new_dc = retrycount.unwrap_or(pe.delivery_count + 1);
+                                let target = cg
+                                    .consumers
+                                    .entry(consumer.clone())
+                                    .or_insert_with(|| crate::store::Consumer {
+                                        pending: HashMap::new(),
+                                    });
+                                target.pending.insert(
+                                    id,
+                                    crate::store::PendingEntry {
+                                        delivery_time: new_dt,
+                                        delivery_count: new_dc,
+                                    },
+                                );
+                                if justid {
+                                    claimed.push(RedisValue::BulkString(Bytes::from(
+                                        format!("{}-{}", id.0, id.1),
+                                    )));
+                                } else if let Some(fields) = stream.entries.get(&id) {
+                                    let mut items = Vec::new();
+                                    items.push(RedisValue::BulkString(Bytes::from(
+                                        format!("{}-{}", id.0, id.1),
+                                    )));
+                                    let mut field_items = Vec::new();
+                                    for (fk, fv) in fields {
+                                        field_items.push(RedisValue::BulkString(fk.clone()));
+                                        field_items.push(RedisValue::BulkString(fv.clone()));
+                                    }
+                                    items.push(RedisValue::Array(field_items));
+                                    claimed.push(RedisValue::Array(items));
+                                }
+                            }
+                        }
+
+                        Ok(RedisValue::Array(claimed))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
         // ── Pub/Sub commands ─────────────────────────────────────────
         "PUBLISH" => {
             if args.len() != 2 {

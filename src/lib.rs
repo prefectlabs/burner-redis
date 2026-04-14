@@ -942,13 +942,15 @@ impl BurnerRedis {
 
     /// XTRIM command matching redis.asyncio.Redis.xtrim() signature.
     /// Trims a stream by maxlen or minid. Returns count of entries removed.
-    #[pyo3(signature = (name, maxlen=None, minid=None))]
+    #[pyo3(signature = (name, maxlen=None, minid=None, approximate=true))]
     fn xtrim<'py>(
         &self,
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
         maxlen: Option<usize>,
         minid: Option<&str>,
+        #[allow(unused_variables)]
+        approximate: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
         let key = extract_bytes(name)?;
@@ -1315,6 +1317,97 @@ impl BurnerRedis {
                     ],
                 )?;
                 Ok(result.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// XCLAIM command matching redis.asyncio.Redis.xclaim() signature.
+    /// Transfers ownership of pending stream entries to a different consumer.
+    #[pyo3(signature = (name, groupname, consumername, min_idle_time, message_ids, idle=None, time=None, retrycount=None, force=false, justid=false))]
+    fn xclaim<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        groupname: &Bound<'py, PyAny>,
+        consumername: &Bound<'py, PyAny>,
+        min_idle_time: u64,
+        message_ids: &Bound<'py, PyAny>,
+        idle: Option<u64>,
+        time: Option<u64>,
+        retrycount: Option<u64>,
+        force: bool,
+        justid: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+        let group = extract_bytes(groupname)?;
+        let consumer = extract_bytes(consumername)?;
+
+        // Parse message_ids from Python list/tuple of bytes/str
+        let ids_list: Vec<Py<PyAny>> = message_ids.extract()?;
+        let mut ids: Vec<StreamId> = Vec::new();
+        for id_obj in &ids_list {
+            let id_str: String = id_obj.bind(py).extract::<String>().or_else(|_| {
+                id_obj
+                    .bind(py)
+                    .extract::<Vec<u8>>()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })?;
+            ids.push(parse_stream_id(&id_str).ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid stream ID: {}",
+                    id_str
+                ))
+            })?);
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let results = store
+                .xclaim(
+                    &key,
+                    &group,
+                    consumer,
+                    min_idle_time,
+                    &ids,
+                    idle,
+                    time,
+                    retrycount,
+                    force,
+                    justid,
+                )
+                .map_err(store_err_to_py)?;
+
+            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                let outer = pyo3::types::PyList::empty(py);
+                for (id, fields_opt) in &results {
+                    if justid {
+                        let id_bytes = format_stream_id(*id).into_bytes();
+                        outer.append(PyBytes::new(py, &id_bytes))?;
+                    } else if let Some(fields) = fields_opt {
+                        let id_bytes = format_stream_id(*id).into_bytes();
+                        let field_dict = PyDict::new(py);
+                        for (fk, fv) in fields {
+                            field_dict.set_item(
+                                PyBytes::new(py, fk.as_ref()),
+                                PyBytes::new(py, fv.as_ref()),
+                            )?;
+                        }
+                        let tuple = PyTuple::new(
+                            py,
+                            &[
+                                PyBytes::new(py, &id_bytes).into_any(),
+                                field_dict.into_any(),
+                            ],
+                        )?;
+                        outer.append(tuple)?;
+                    }
+                }
+                Ok(outer.into_any().unbind())
             })
             .ok_or_else(|| {
                 PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(

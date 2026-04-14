@@ -129,8 +129,8 @@ class Pipeline:
         self._commands.append(("xlen", (name,), {}))
         return self
 
-    def xtrim(self, name, maxlen=None, minid=None):
-        self._commands.append(("xtrim", (name,), {"maxlen": maxlen, "minid": minid}))
+    def xtrim(self, name, maxlen=None, minid=None, approximate=True):
+        self._commands.append(("xtrim", (name,), {"maxlen": maxlen, "minid": minid, "approximate": approximate}))
         return self
 
     # ---- Consumer Group Commands ----
@@ -153,6 +153,13 @@ class Pipeline:
 
     def xautoclaim(self, name, groupname, consumername, min_idle_time, start_id="0-0", count=None):
         self._commands.append(("xautoclaim", (name, groupname, consumername, min_idle_time), {"start_id": start_id, "count": count}))
+        return self
+
+    def xclaim(self, name, groupname, consumername, min_idle_time, message_ids,
+               idle=None, time=None, retrycount=None, force=False, justid=False):
+        self._commands.append(("xclaim", (name, groupname, consumername, min_idle_time, message_ids),
+                              {"idle": idle, "time": time, "retrycount": retrycount,
+                               "force": force, "justid": justid}))
         return self
 
     def xinfo_groups(self, name):

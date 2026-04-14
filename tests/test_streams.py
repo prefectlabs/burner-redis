@@ -830,3 +830,81 @@ async def test_xreadgroup_block_lua_xadd_wakes_reader(r):
     assert len(result) > 0
     stream_name, entries = result[0]
     assert entries[0][1][b"f"] == b"from_lua"
+
+
+# --- XCLAIM ---
+
+
+async def test_xclaim_transfers_ownership(r):
+    """XCLAIM transfers pending entries from one consumer to another."""
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    id2 = await r.xadd("mystream", {"f": "v2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # consumer2 claims both entries
+    result = await r.xclaim("mystream", "mygroup", "consumer2", 0, [id1, id2])
+    assert len(result) == 2
+    assert result[0][1][b"f"] == b"v1"
+    assert result[1][1][b"f"] == b"v2"
+
+
+async def test_xclaim_resets_idle_time(r):
+    """XCLAIM with idle=0 resets the entry's idle time."""
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Wait a tiny bit so entry has some idle time
+    await asyncio.sleep(0.01)
+
+    # Claim with idle=0 (reset idle time) -- same consumer (lease renewal pattern)
+    result = await r.xclaim("mystream", "mygroup", "consumer1", 0, [id1], idle=0)
+    assert len(result) == 1
+
+
+async def test_xclaim_respects_min_idle_time(r):
+    """XCLAIM skips entries not idle long enough."""
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    # Claim with huge min_idle_time -- nothing qualifies
+    result = await r.xclaim("mystream", "mygroup", "consumer2", 999999, [id1])
+    assert len(result) == 0
+
+
+async def test_xclaim_justid_returns_ids_only(r):
+    """XCLAIM with justid=True returns only IDs, not field data."""
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    result = await r.xclaim("mystream", "mygroup", "consumer2", 0, [id1], justid=True)
+    assert len(result) == 1
+    # Should be just the ID bytes, not a tuple
+    assert isinstance(result[0], bytes)
+
+
+async def test_xclaim_nonexistent_id_is_skipped(r):
+    """XCLAIM silently skips IDs not in any consumer's PEL."""
+    id1 = await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    result = await r.xclaim("mystream", "mygroup", "consumer2", 0, ["99999-0"])
+    assert len(result) == 0
+
+
+# --- XTRIM approximate ---
+
+
+async def test_xtrim_accepts_approximate_parameter(r):
+    """XTRIM accepts approximate parameter without error."""
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xadd("mystream", {"f": "v2"})
+    await r.xadd("mystream", {"f": "v3"})
+
+    # Should work with approximate=False (pydocket's docket.clear() pattern)
+    trimmed = await r.xtrim("mystream", maxlen=0, approximate=False)
+    assert trimmed == 3

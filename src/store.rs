@@ -1743,6 +1743,151 @@ impl Store {
         Ok((next_start_id, claimed_entries, deleted_ids))
     }
 
+    /// XCLAIM: Transfer ownership of pending stream entries to a different consumer.
+    /// Moves PEL entries from their current consumer to the target consumer.
+    /// Only claims entries that have been idle for at least min_idle_time_ms.
+    /// If `idle` is Some, resets the entry's idle time to the specified ms value.
+    /// If `force` is true, creates the PEL entry even if it doesn't exist in any consumer's PEL.
+    /// Returns the claimed entries with their field data (or just IDs if justid is true).
+    pub fn xclaim(
+        &self,
+        key: &Bytes,
+        group: &Bytes,
+        consumer: Bytes,
+        min_idle_time_ms: u64,
+        ids: &[StreamId],
+        idle: Option<u64>,
+        _time: Option<u64>,
+        retrycount: Option<u64>,
+        force: bool,
+        justid: bool,
+    ) -> Result<Vec<(StreamId, Option<HashMap<Bytes, Bytes>>)>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(e) => e,
+        };
+
+        let stream = match entry.data {
+            ValueData::Stream(ref mut s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let cg = match stream.groups.get_mut(group) {
+            None => {
+                return Err(StoreError::NoGroup(
+                    String::from_utf8_lossy(group.as_ref()).into_owned(),
+                    String::from_utf8_lossy(key.as_ref()).into_owned(),
+                ));
+            }
+            Some(g) => g,
+        };
+
+        let now = Instant::now();
+        let min_idle = Duration::from_millis(min_idle_time_ms);
+        let mut claimed = Vec::new();
+
+        for &id in ids {
+            // Find the entry in any consumer's PEL
+            let mut found_consumer: Option<Bytes> = None;
+            let mut found_entry: Option<PendingEntry> = None;
+            for (cname, c) in cg.consumers.iter() {
+                if let Some(pe) = c.pending.get(&id) {
+                    let idle_duration = now.duration_since(pe.delivery_time);
+                    if idle_duration >= min_idle || force {
+                        found_consumer = Some(cname.clone());
+                        found_entry = Some(pe.clone());
+                    }
+                    break;
+                }
+            }
+
+            // If force is set and entry not found in any PEL but exists in stream, create it
+            if found_consumer.is_none() && force {
+                if stream.entries.contains_key(&id) {
+                    let new_delivery_time = match idle {
+                        Some(idle_ms) => now - Duration::from_millis(idle_ms),
+                        None => now,
+                    };
+                    let target = cg
+                        .consumers
+                        .entry(consumer.clone())
+                        .or_insert_with(|| Consumer {
+                            pending: HashMap::new(),
+                        });
+                    target.pending.insert(
+                        id,
+                        PendingEntry {
+                            delivery_time: new_delivery_time,
+                            delivery_count: retrycount.unwrap_or(1),
+                        },
+                    );
+                    if justid {
+                        claimed.push((id, None));
+                    } else if let Some(fields) = stream.entries.get(&id) {
+                        claimed.push((id, Some(fields.clone())));
+                    }
+                }
+                continue;
+            }
+
+            if let (Some(from_consumer), Some(pe)) = (found_consumer, found_entry) {
+                // Remove from source consumer's PEL
+                if let Some(orig) = cg.consumers.get_mut(&from_consumer) {
+                    orig.pending.remove(&id);
+                }
+
+                // Determine new delivery time based on idle parameter
+                let new_delivery_time = match idle {
+                    Some(idle_ms) => now - Duration::from_millis(idle_ms),
+                    None => pe.delivery_time, // Keep original
+                };
+                let new_delivery_count = retrycount.unwrap_or(pe.delivery_count + 1);
+
+                // Add to target consumer's PEL
+                let target = cg
+                    .consumers
+                    .entry(consumer.clone())
+                    .or_insert_with(|| Consumer {
+                        pending: HashMap::new(),
+                    });
+                target.pending.insert(
+                    id,
+                    PendingEntry {
+                        delivery_time: new_delivery_time,
+                        delivery_count: new_delivery_count,
+                    },
+                );
+
+                // Return the entry data
+                if justid {
+                    claimed.push((id, None));
+                } else if let Some(fields) = stream.entries.get(&id) {
+                    claimed.push((id, Some(fields.clone())));
+                }
+            }
+        }
+
+        Ok(claimed)
+    }
+
     /// XINFO GROUPS: Returns metadata about all consumer groups on a stream.
     /// Each group entry contains: name, consumers count, pending count, last-delivered-id.
     pub fn xinfo_groups(&self, key: &Bytes) -> Result<Vec<HashMap<String, String>>, StoreError> {
