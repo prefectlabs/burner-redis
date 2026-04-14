@@ -215,7 +215,6 @@ async def test_execution_state_write_and_read_fields(r):
     assert await r.hget(runs_key, "kwargs") == b'{"priority": "high"}'
 
 
-@pytest.mark.xfail(reason="hgetall not yet implemented", raises=AttributeError, strict=True)
 async def test_execution_state_hgetall(r):
     """HSET multiple fields, then HGETALL to read all at once.
 
@@ -232,7 +231,6 @@ async def test_execution_state_hgetall(r):
     assert result[b"function"] == b"my_module.sync_task"
 
 
-@pytest.mark.xfail(reason="hexists not yet implemented", raises=AttributeError, strict=True)
 async def test_execution_state_hexists(r):
     """HSET with known field, then HEXISTS to check presence.
 
@@ -287,7 +285,6 @@ async def test_pipeline_check_for_work(r):
     assert results[0] == 2  # xlen returns entry count
 
 
-@pytest.mark.xfail(reason="zcard not yet implemented", raises=AttributeError, strict=True)
 async def test_pipeline_check_for_work_with_zcard(r):
     """Pipeline with zcard to check queue depth.
 
@@ -502,10 +499,6 @@ async def test_lua_cancel_task(r):
     assert await r.hget(runs_key, "state") == b"cancelled"
 
 
-@pytest.mark.xfail(
-    reason="HGETALL not yet available in Lua dispatch",
-    strict=True,
-)
 async def test_lua_move_due_tasks_to_stream(r):
     """Lua script: ZRANGEBYSCORE + HGETALL + XADD + DEL + HSET for each due task.
 
@@ -615,64 +608,64 @@ async def test_lock_for_task_scheduling(r):
 # =============================================================================
 
 
-@pytest.mark.xfail(reason="hgetall not yet implemented", raises=AttributeError, strict=True)
 async def test_missing_hgetall(r):
     """Documents that HGETALL Python API method is needed for Docket compatibility.
 
     Used by: Execution.sync(), Docket.get_execution(), scheduler_loop Lua script.
     """
     await r.hset("key", key="field", value="value")
-    await r.hgetall("key")
+    result = await r.hgetall("key")
+    assert result[b"field"] == b"value"
 
 
-@pytest.mark.xfail(reason="hexists not yet implemented", raises=AttributeError, strict=True)
 async def test_missing_hexists(r):
     """Documents that HEXISTS Python API method is needed for Docket compatibility.
 
     Used by: schedule Lua script's known_exists check.
     """
     await r.hset("key", key="field", value="value")
-    await r.hexists("key", "field")
+    result = await r.hexists("key", "field")
+    assert result is True
 
 
-@pytest.mark.xfail(reason="zcard not yet implemented", raises=AttributeError, strict=True)
 async def test_missing_zcard(r):
     """Documents that ZCARD Python API method is needed for Docket compatibility.
 
     Used by: Worker.check_for_work() to get queue depth.
     """
     await r.zadd("key", {"member": 1.0})
-    await r.zcard("key")
+    result = await r.zcard("key")
+    assert result == 1
 
 
-@pytest.mark.xfail(reason="expire not yet implemented", raises=AttributeError, strict=True)
 async def test_missing_expire(r):
     """Documents that EXPIRE Python API method is needed for Docket compatibility.
 
     Used by: Various Docket patterns for key TTL management.
     """
     await r.set("key", "value")
-    await r.expire("key", 60)
+    result = await r.expire("key", 60)
+    assert result is True
 
 
-@pytest.mark.xfail(reason="xdel not yet implemented", raises=AttributeError, strict=True)
 async def test_missing_xdel(r):
     """Documents that XDEL Python API method is needed for Docket compatibility.
 
     Used by: Worker.ack_message() to delete processed stream entries.
     """
     entry_id = await r.xadd("stream", {"f": "v"})
-    await r.xdel("stream", entry_id.decode())
+    result = await r.xdel("stream", entry_id.decode())
+    assert result == 1
 
 
-@pytest.mark.xfail(reason="xrange not yet implemented", raises=AttributeError, strict=True)
 async def test_missing_xrange(r):
     """Documents that XRANGE Python API method is needed for Docket compatibility.
 
     Used by: Various Docket debugging and inspection patterns.
     """
     await r.xadd("stream", {"f": "v"})
-    await r.xrange("stream", "-", "+")
+    result = await r.xrange("stream", "-", "+")
+    assert len(result) == 1
 
 
 # =============================================================================

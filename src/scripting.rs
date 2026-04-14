@@ -238,6 +238,10 @@ impl LuaEngine {
 
             lua.globals().set("redis", redis_table)?;
 
+            // Lua 5.4 compatibility: Redis uses Lua 5.1 where `unpack` is a global.
+            // In Lua 5.4, it was moved to `table.unpack`. Provide the global alias.
+            lua.load("unpack = unpack or table.unpack").exec()?;
+
             // Execute the script and capture return value
             let result: LuaValue = lua.load(script).eval()?;
 
@@ -536,6 +540,77 @@ fn dispatch_command(
                             .map(|v| RedisValue::BulkString(v.clone()))
                             .collect();
                         Ok(RedisValue::Array(vals))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "HGETALL" => {
+            if args.len() != 1 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'hgetall' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Array(Vec::new()));
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Array(Vec::new())),
+                Some(entry) => match &entry.data {
+                    ValueData::Hash(map) => {
+                        // Return alternating field/value list (Redis wire format for Lua)
+                        let mut result = Vec::new();
+                        for (field, value) in map {
+                            result.push(RedisValue::BulkString(field.clone()));
+                            result.push(RedisValue::BulkString(value.clone()));
+                        }
+                        Ok(RedisValue::Array(result))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "HEXISTS" => {
+            if args.len() != 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'hexists' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let field = &args[1];
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => match &entry.data {
+                    ValueData::Hash(map) => {
+                        if map.contains_key(field) {
+                            Ok(RedisValue::Integer(1))
+                        } else {
+                            Ok(RedisValue::Integer(0))
+                        }
                     }
                     _ => Ok(RedisValue::Error(
                         "WRONGTYPE Operation against a key holding the wrong kind of value"

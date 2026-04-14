@@ -329,6 +329,53 @@ impl BurnerRedis {
         })
     }
 
+    /// HGETALL command matching redis.asyncio.Redis.hgetall() signature.
+    /// Returns dict of all field-value pairs as bytes->bytes.
+    fn hgetall<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let map = store.hgetall(&name_bytes).map_err(store_err_to_py)?;
+            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                let dict = PyDict::new(py);
+                for (k, v) in &map {
+                    dict.set_item(
+                        PyBytes::new(py, k.as_ref()),
+                        PyBytes::new(py, v.as_ref()),
+                    )?;
+                }
+                Ok(dict.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
+        })
+    }
+
+    /// HEXISTS command matching redis.asyncio.Redis.hexists() signature.
+    /// Returns bool: True if the field exists in the hash.
+    fn hexists<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        key: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+        let field_bytes = extract_bytes(key)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.hexists(&name_bytes, &field_bytes).map_err(store_err_to_py)
+        })
+    }
+
     // ── Set Commands ─────────────────────────────────────────────────
 
     /// SADD command matching redis.asyncio.Redis.sadd() signature.
@@ -591,6 +638,39 @@ impl BurnerRedis {
         })
     }
 
+    /// ZCARD command matching redis.asyncio.Redis.zcard() signature.
+    /// Returns the cardinality (member count) of a sorted set.
+    fn zcard<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.zcard(&name_bytes).map_err(store_err_to_py)
+        })
+    }
+
+    // ── Key Commands ────────────────────────────────────────────────
+
+    /// EXPIRE command matching redis.asyncio.Redis.expire() signature.
+    /// Sets a timeout on an existing key in seconds. Returns True if set, False if key doesn't exist.
+    fn expire<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        time: u64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let name_bytes = extract_bytes(name)?;
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(store.expire(&name_bytes, time))
+        })
+    }
+
     // ── Stream Commands ──────────────────────────────────────────────
 
     /// XADD command matching redis.asyncio.Redis.xadd() signature.
@@ -755,6 +835,112 @@ impl BurnerRedis {
                 .xtrim(&key, maxlen, minid_parsed)
                 .map_err(store_err_to_py)?;
             Ok(trimmed as i64)
+        })
+    }
+
+    /// XDEL command matching redis.asyncio.Redis.xdel() signature.
+    /// Deletes specific entries from a stream by ID. Returns count of entries deleted.
+    #[pyo3(signature = (name, *ids))]
+    fn xdel<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        ids: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+
+        // Parse each ID string into a StreamId
+        let mut stream_ids: Vec<StreamId> = Vec::new();
+        for id_obj in ids.iter() {
+            let id_str: String = id_obj.extract::<String>().or_else(|_| {
+                id_obj
+                    .extract::<Vec<u8>>()
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+            })?;
+            let stream_id = parse_stream_id(&id_str).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    id_str
+                ))
+            })?;
+            stream_ids.push(stream_id);
+        }
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            store.xdel(&key, &stream_ids).map_err(store_err_to_py)
+        })
+    }
+
+    /// XRANGE command matching redis.asyncio.Redis.xrange() signature.
+    /// Returns stream entries in ID range. Supports "-" as min and "+" as max.
+    /// Returns list of (id_bytes, {field_bytes: value_bytes}) tuples.
+    #[pyo3(signature = (name, min="-", max="+", count=None))]
+    fn xrange<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        min: &str,
+        max: &str,
+        count: Option<usize>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let store = self.store.clone();
+        let key = extract_bytes(name)?;
+
+        // Parse min: "-" means (0, 0)
+        let min_id: StreamId = if min == "-" {
+            (0, 0)
+        } else {
+            parse_stream_id(min).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    min
+                ))
+            })?
+        };
+
+        // Parse max: "+" means (u64::MAX, u64::MAX)
+        let max_id: StreamId = if max == "+" {
+            (u64::MAX, u64::MAX)
+        } else {
+            parse_stream_id(max).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "Invalid stream ID format: {}",
+                    max
+                ))
+            })?
+        };
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let entries = store.xrange(&key, min_id, max_id, count).map_err(store_err_to_py)?;
+
+            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                let result_list = pyo3::types::PyList::empty(py);
+                for (id, fields) in &entries {
+                    let id_bytes = format_stream_id(*id).into_bytes();
+                    let field_dict = PyDict::new(py);
+                    for (fk, fv) in fields {
+                        field_dict.set_item(
+                            PyBytes::new(py, fk.as_ref()),
+                            PyBytes::new(py, fv.as_ref()),
+                        )?;
+                    }
+                    let tuple = pyo3::types::PyTuple::new(
+                        py,
+                        &[
+                            PyBytes::new(py, &id_bytes).into_any(),
+                            field_dict.into_any(),
+                        ],
+                    )?;
+                    result_list.append(tuple)?;
+                }
+                Ok(result_list.into_any().unbind())
+            })
+            .ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                    "failed to attach to Python interpreter",
+                )
+            })?
         })
     }
 

@@ -181,6 +181,38 @@ class Pipeline:
         self._commands.append(("script_exists", args, {}))
         return self
 
+    # ---- Additional Hash Commands ----
+
+    def hgetall(self, name):
+        self._commands.append(("hgetall", (name,), {}))
+        return self
+
+    def hexists(self, name, key):
+        self._commands.append(("hexists", (name, key), {}))
+        return self
+
+    # ---- Additional Sorted Set Commands ----
+
+    def zcard(self, name):
+        self._commands.append(("zcard", (name,), {}))
+        return self
+
+    # ---- Key Commands ----
+
+    def expire(self, name, time):
+        self._commands.append(("expire", (name, time), {}))
+        return self
+
+    # ---- Additional Stream Commands ----
+
+    def xdel(self, name, *ids):
+        self._commands.append(("xdel", (name, *ids), {}))
+        return self
+
+    def xrange(self, name, min="-", max="+", count=None):
+        self._commands.append(("xrange", (name,), {"min": min, "max": max, "count": count}))
+        return self
+
     # ---- Pub/Sub Commands ----
 
     def publish(self, channel, message):

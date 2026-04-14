@@ -476,6 +476,52 @@ impl Store {
         }
     }
 
+    /// HGETALL: Returns all field-value pairs in a hash as a HashMap.
+    /// Returns Ok(empty map) if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-hash value.
+    pub fn hgetall(&self, key: &Bytes) -> Result<HashMap<Bytes, Bytes>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(HashMap::new());
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(HashMap::new()),
+            Some(entry) => match &entry.data {
+                ValueData::Hash(map) => Ok(map.clone()),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// HEXISTS: Returns true if the field exists in the hash.
+    /// Returns Ok(false) if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-hash value.
+    pub fn hexists(&self, key: &Bytes, field: &Bytes) -> Result<bool, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(false);
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(false),
+            Some(entry) => match &entry.data {
+                ValueData::Hash(map) => Ok(map.contains_key(field)),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
     // ── Set Operations ───────────────────────────────────────────────
 
     /// SADD: Adds members to a set. Creates the set if it doesn't exist.
@@ -895,6 +941,53 @@ impl Store {
         }
     }
 
+    /// ZCARD: Returns the cardinality (member count) of a sorted set.
+    /// Returns 0 if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-sorted-set value.
+    pub fn zcard(&self, key: &Bytes) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(0),
+            Some(entry) => match &entry.data {
+                ValueData::SortedSet(zset) => Ok(zset.len() as i64),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    // ── Key Operations ───────────────────────────────────────────────
+
+    /// EXPIRE: Set a timeout on a key in seconds. Returns true if the key exists and timeout was set.
+    /// Returns false if the key does not exist.
+    pub fn expire(&self, key: &Bytes, seconds: u64) -> bool {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return false;
+            }
+        }
+
+        match data.get_mut(key) {
+            None => false,
+            Some(entry) => {
+                entry.expires_at = Some(std::time::Instant::now() + Duration::from_secs(seconds));
+                true
+            }
+        }
+    }
+
     // ── Stream Operations ─────────────────────────────────────────────
 
     /// XADD: Appends an entry to a stream. Auto-generates a monotonic ID if none is provided.
@@ -1073,6 +1166,77 @@ impl Store {
                     }
 
                     Ok(removed)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// XDEL: Deletes specific entries from a stream by ID.
+    /// Returns the count of entries actually deleted.
+    /// Returns 0 if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-stream value.
+    pub fn xdel(&self, key: &Bytes, ids: &[StreamId]) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        match data.get_mut(key) {
+            None => Ok(0),
+            Some(entry) => match entry.data {
+                ValueData::Stream(ref mut stream) => {
+                    let mut count = 0i64;
+                    for id in ids {
+                        if stream.entries.remove(id).is_some() {
+                            count += 1;
+                        }
+                    }
+                    Ok(count)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// XRANGE: Returns stream entries in the given ID range [min, max].
+    /// Supports "-" as minimum (0,0) and "+" as maximum (u64::MAX, u64::MAX).
+    /// Optional count parameter limits the number of results.
+    /// Returns Ok(empty vec) if the key doesn't exist.
+    /// Returns Err(WrongType) if the key holds a non-stream value.
+    pub fn xrange(
+        &self,
+        key: &Bytes,
+        min: StreamId,
+        max: StreamId,
+        count: Option<usize>,
+    ) -> Result<Vec<(StreamId, HashMap<Bytes, Bytes>)>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(Vec::new());
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(Vec::new()),
+            Some(entry) => match &entry.data {
+                ValueData::Stream(stream) => {
+                    let entries: Vec<(StreamId, HashMap<Bytes, Bytes>)> = stream
+                        .entries
+                        .range(min..=max)
+                        .take(count.unwrap_or(usize::MAX))
+                        .map(|(id, fields)| (*id, fields.clone()))
+                        .collect();
+                    Ok(entries)
                 }
                 _ => Err(StoreError::WrongType),
             },
