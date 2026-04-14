@@ -82,6 +82,7 @@ class PubSub:
     async def unsubscribe(self, *args):
         """Unsubscribe from one or more channels. If no args, unsubscribe from all."""
         if self._subscriber_id is None:
+            self.channels.clear()  # defensive: clear local state even if no backend call needed
             return
 
         if args:
@@ -142,6 +143,7 @@ class PubSub:
     async def punsubscribe(self, *args):
         """Unsubscribe from one or more patterns. If no args, unsubscribe from all."""
         if self._subscriber_id is None:
+            self.patterns.clear()  # defensive: clear local state even if no backend call needed
             return
 
         if args:
