@@ -1716,6 +1716,14 @@ impl Store {
                 + registry.subscriber_patterns.get(&subscriber_id).map(|p| p.len()).unwrap_or(0);
             results.push((channel, total as i64));
         }
+        // Clean up empty subscriber_channels entry to prevent unbounded growth
+        if registry.subscriber_channels
+            .get(&subscriber_id)
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+        {
+            registry.subscriber_channels.remove(&subscriber_id);
+        }
         results
     }
 
@@ -1765,6 +1773,14 @@ impl Store {
             let total = registry.subscriber_channels.get(&subscriber_id).map(|c| c.len()).unwrap_or(0)
                 + registry.subscriber_patterns.get(&subscriber_id).map(|p| p.len()).unwrap_or(0);
             results.push((pattern, total as i64));
+        }
+        // Clean up empty subscriber_patterns entry to prevent unbounded growth
+        if registry.subscriber_patterns
+            .get(&subscriber_id)
+            .map(|s| s.is_empty())
+            .unwrap_or(true)
+        {
+            registry.subscriber_patterns.remove(&subscriber_id);
         }
         results
     }
