@@ -187,10 +187,31 @@ Plans:
 - [x] 11-01-PLAN.md — XREADGROUP blocking with tokio::sync::Notify, XCLAIM implementation, XTRIM approximate parameter
 - [x] 11-02-PLAN.md — Pydocket test suite validation, gap closure, regression tests, zero xfails
 
+### Phase 12: Close remaining redis-py compatibility gaps for drop-in replacement
+
+**Goal:** burner-redis is a true drop-in replacement for redis.asyncio.Redis with value coercion, key enumeration, TTL inspection, exception hierarchy alignment, and missing convenience commands -- no wrapper shims needed
+**Requirements**: D-01, D-02, D-03, D-04, D-05, D-06, D-07, D-08, D-09, D-10, D-11, D-12, D-13
+**Depends on:** Phase 11
+**Success Criteria** (what must be TRUE):
+  1. set(key, 42) coerces integer to string bytes; set(key, True) raises TypeError -- matching redis-py exactly
+  2. keys(pattern) returns all matching keys with full Redis glob syntax including [a-z] ranges
+  3. scan_iter(match=pattern) yields keys as an async generator
+  4. ttl(name) returns seconds remaining (-1 no TTL, -2 missing key)
+  5. xpending(name, groupname) summary form returns dict with pending/min/max/consumers
+  6. setex(name, time, value) stores a key with TTL
+  7. mget(*keys) returns a list of values with None for missing keys
+  8. LockError is subclass of redis.exceptions.LockError when redis is installed
+  9. Pipeline has stubs for all new commands
+**Plans:** 2 plans
+
+Plans:
+- [ ] 12-01-PLAN.md — Rust glob range support, Store methods (keys, ttl, mget, xpending_summary), PyO3 bindings
+- [ ] 12-02-PLAN.md — Python value coercion, exception hierarchy, scan_iter, setex, pipeline stubs, and comprehensive tests
+
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11
+Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10 -> 11 -> 12
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -205,3 +226,4 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 9. Distribution | 0/2 | Not started | - |
 | 10. Pub/Sub | 2/2 | Complete    | 2026-04-14 |
 | 11. Pydocket Compatibility | 2/2 | Complete    | 2026-04-14 |
+| 12. Drop-in Replacement | 0/2 | Planning complete | - |
