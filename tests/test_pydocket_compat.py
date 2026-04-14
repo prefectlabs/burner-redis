@@ -4,8 +4,8 @@ These tests monkey-patch pydocket's RedisConnection to use a shared BurnerRedis
 instance, then exercise the full Docket + Worker lifecycle to verify compatibility.
 
 Purpose: Validate that burner-redis can serve as a drop-in backend for pydocket,
-which is the primary use case (Prefect's Docket task scheduling). Tests either pass
-(proving compatibility) or are marked xfail with specific missing commands documented.
+which is the primary use case (Prefect's Docket task scheduling). All tests pass,
+proving full compatibility with pydocket's usage patterns.
 """
 
 import asyncio
@@ -147,10 +147,6 @@ async def test_docket_add_immediate_task(patch_pydocket):
     assert ("immediate_task", "hello", "world") in _call_log
 
 
-@pytest.mark.xfail(
-    reason="burner-redis: delayed task delivery race -- scheduler moves task to stream but xreadgroup with > returns empty due to last_delivered_id timing",
-    strict=False,
-)
 async def test_docket_add_delayed_task(patch_pydocket):
     """Schedule a task with when= in the near future, verify it executes after delay.
 
