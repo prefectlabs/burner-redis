@@ -198,12 +198,18 @@ async def test_pipeline_method_chaining(r):
 
 
 async def test_pipeline_wrongtype_error(r):
-    """Pipeline propagates WRONGTYPE errors from individual commands."""
+    """Pipeline returns WRONGTYPE errors inline matching redis-py behavior."""
     await r.set("str_key", "value")
     pipe = r.pipeline()
-    pipe.hset("str_key", key="field", value="val")
-    with pytest.raises(Exception, match="WRONGTYPE"):
-        await pipe.execute()
+    pipe.set("good_key", "good_value")
+    pipe.hset("str_key", key="field", value="val")  # WRONGTYPE error
+    pipe.get("good_key")
+    results = await pipe.execute()
+    # All three commands should execute; error is inline at index 1
+    assert results[0] is True  # set succeeded
+    assert isinstance(results[1], Exception)  # WRONGTYPE returned as exception object
+    assert "WRONGTYPE" in str(results[1])
+    assert results[2] == b"good_value"  # get after error still executes
 
 
 # ---- Pipeline Stubs for Phase 12 Commands (D-09) ----
