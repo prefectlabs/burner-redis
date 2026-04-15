@@ -1,5 +1,7 @@
 # burner-redis
 
+> **Experimental:** This library is under active development and not yet ready for production use. APIs may change without notice.
+
 An embedded, in-process Redis-compatible database written in Rust with Python bindings. Drop-in replacement for `redis.asyncio.Redis` that runs inside the host process with no external server needed.
 
 Built to back [docket](https://github.com/chrisguidry/docket) and self-hosted [Prefect](https://github.com/PrefectHQ/prefect) servers without requiring a separate Redis deployment.
