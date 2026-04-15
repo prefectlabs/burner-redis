@@ -1456,7 +1456,7 @@ impl BurnerRedis {
                     // name -> bytes
                     if let Some(name_val) = group_info.get("name") {
                         dict.set_item(
-                            pyo3::types::PyBytes::new(py, b"name"),
+                            pyo3::types::PyString::new(py, "name"),
                             pyo3::types::PyBytes::new(py, name_val.as_bytes()),
                         )?;
                     }
@@ -1464,7 +1464,7 @@ impl BurnerRedis {
                     if let Some(consumers_val) = group_info.get("consumers") {
                         let count: i64 = consumers_val.parse().unwrap_or(0);
                         dict.set_item(
-                            pyo3::types::PyBytes::new(py, b"consumers"),
+                            pyo3::types::PyString::new(py, "consumers"),
                             count,
                         )?;
                     }
@@ -1472,14 +1472,14 @@ impl BurnerRedis {
                     if let Some(pending_val) = group_info.get("pending") {
                         let count: i64 = pending_val.parse().unwrap_or(0);
                         dict.set_item(
-                            pyo3::types::PyBytes::new(py, b"pending"),
+                            pyo3::types::PyString::new(py, "pending"),
                             count,
                         )?;
                     }
                     // last-delivered-id -> bytes
                     if let Some(id_val) = group_info.get("last-delivered-id") {
                         dict.set_item(
-                            pyo3::types::PyBytes::new(py, b"last-delivered-id"),
+                            pyo3::types::PyString::new(py, "last-delivered-id"),
                             pyo3::types::PyBytes::new(py, id_val.as_bytes()),
                         )?;
                     }
@@ -1519,7 +1519,7 @@ impl BurnerRedis {
                     // name -> bytes
                     if let Some(name_val) = consumer_info.get("name") {
                         dict.set_item(
-                            pyo3::types::PyBytes::new(py, b"name"),
+                            pyo3::types::PyString::new(py, "name"),
                             pyo3::types::PyBytes::new(py, name_val.as_bytes()),
                         )?;
                     }
@@ -1527,7 +1527,7 @@ impl BurnerRedis {
                     if let Some(pending_val) = consumer_info.get("pending") {
                         let count: i64 = pending_val.parse().unwrap_or(0);
                         dict.set_item(
-                            pyo3::types::PyBytes::new(py, b"pending"),
+                            pyo3::types::PyString::new(py, "pending"),
                             count,
                         )?;
                     }
@@ -1535,7 +1535,7 @@ impl BurnerRedis {
                     if let Some(idle_val) = consumer_info.get("idle") {
                         let idle: i64 = idle_val.parse().unwrap_or(0);
                         dict.set_item(
-                            pyo3::types::PyBytes::new(py, b"idle"),
+                            pyo3::types::PyString::new(py, "idle"),
                             idle,
                         )?;
                     }
