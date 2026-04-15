@@ -15,6 +15,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+docket = pytest.importorskip("docket", reason="docket not installed")
+
 from burner_redis import BurnerRedis
 from docket import Docket, Worker
 

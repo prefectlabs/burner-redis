@@ -487,9 +487,9 @@ async def test_xautoclaim_increments_delivery_count(r):
 
     # Verify consumer3 has the message in its PEL
     info = await r.xinfo_consumers("mystream", "mygroup")
-    consumer3_info = [c for c in info if c[b"name"] == b"consumer3"]
+    consumer3_info = [c for c in info if c["name"] == b"consumer3"]
     assert len(consumer3_info) == 1
-    assert consumer3_info[0][b"pending"] == 1
+    assert consumer3_info[0]["pending"] == 1
 
 
 async def test_xautoclaim_returns_deleted_ids(r):
@@ -580,9 +580,9 @@ async def test_xinfo_groups_returns_group_info(r):
 
     info = await r.xinfo_groups("mystream")
     assert len(info) == 1
-    assert info[0][b"name"] == b"mygroup"
-    assert info[0][b"consumers"] == 0
-    assert info[0][b"pending"] == 0
+    assert info[0]["name"] == b"mygroup"
+    assert info[0]["consumers"] == 0
+    assert info[0]["pending"] == 0
 
 
 async def test_xinfo_groups_multiple_groups(r):
@@ -593,7 +593,7 @@ async def test_xinfo_groups_multiple_groups(r):
 
     info = await r.xinfo_groups("mystream")
     assert len(info) == 2
-    names = {entry[b"name"] for entry in info}
+    names = {entry["name"] for entry in info}
     assert b"group1" in names
     assert b"group2" in names
 
@@ -613,8 +613,8 @@ async def test_xinfo_groups_pending_count(r):
     await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
 
     info = await r.xinfo_groups("mystream")
-    assert info[0][b"pending"] == 2
-    assert info[0][b"consumers"] == 1
+    assert info[0]["pending"] == 2
+    assert info[0]["consumers"] == 1
 
 
 # --- STRM-11: XINFO CONSUMERS ---
@@ -629,10 +629,10 @@ async def test_xinfo_consumers_returns_consumer_info(r):
 
     info = await r.xinfo_consumers("mystream", "mygroup")
     assert len(info) == 1
-    assert info[0][b"name"] == b"consumer1"
-    assert info[0][b"pending"] == 2
-    assert b"idle" in info[0]
-    assert info[0][b"idle"] >= 0
+    assert info[0]["name"] == b"consumer1"
+    assert info[0]["pending"] == 2
+    assert "idle" in info[0]
+    assert info[0]["idle"] >= 0
 
 
 async def test_xinfo_consumers_multiple_consumers(r):
@@ -648,7 +648,7 @@ async def test_xinfo_consumers_multiple_consumers(r):
 
     info = await r.xinfo_consumers("mystream", "mygroup")
     assert len(info) == 2
-    names = {entry[b"name"] for entry in info}
+    names = {entry["name"] for entry in info}
     assert b"consumer1" in names
     assert b"consumer2" in names
 
@@ -664,7 +664,7 @@ async def test_xinfo_consumers_after_ack(r):
     await r.xack("mystream", "mygroup", id1.decode())
 
     info = await r.xinfo_consumers("mystream", "mygroup")
-    assert info[0][b"pending"] == 1
+    assert info[0]["pending"] == 1
 
 
 async def test_xinfo_consumers_nogroup_error(r):
