@@ -55,7 +55,10 @@ def _coerce_value(value):
         return repr(value).encode()
     if isinstance(value, str):
         return value
-    return str(value)
+    raise TypeError(
+        f"Invalid input of type: '{type(value).__name__}'. "
+        "Convert to a bytes, string, int or float first."
+    )
 
 
 _original_set = BurnerRedis.set
