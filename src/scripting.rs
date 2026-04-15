@@ -911,6 +911,14 @@ fn dispatch_command_inner(
                 .parse()
                 .map_err(|_| "ERR value is not an integer or out of range".to_string())?;
 
+            // Parse optional WITHSCORES flag
+            let mut zrange_withscores = false;
+            for i in 3..args.len() {
+                if String::from_utf8_lossy(&args[i]).to_uppercase() == "WITHSCORES" {
+                    zrange_withscores = true;
+                }
+            }
+
             // Passive expiration
             if let Some(entry) = data.get(key) {
                 if entry.is_expired() {
@@ -946,7 +954,16 @@ fn dispatch_command_inner(
                             .iter()
                             .skip(real_start as usize)
                             .take((real_stop - real_start + 1) as usize)
-                            .map(|((_, member), _)| RedisValue::BulkString(member.clone()))
+                            .flat_map(|((score, member), _)| {
+                                if zrange_withscores {
+                                    vec![
+                                        RedisValue::BulkString(member.clone()),
+                                        RedisValue::BulkString(Bytes::from(format_redis_score(score.0))),
+                                    ]
+                                } else {
+                                    vec![RedisValue::BulkString(member.clone())]
+                                }
+                            })
                             .collect();
 
                         Ok(RedisValue::Array(result))
@@ -969,6 +986,35 @@ fn dispatch_command_inner(
             let min = parse_score_arg(&args[1]);
             let max = parse_score_arg(&args[2]);
 
+            // Parse optional WITHSCORES and LIMIT flags
+            let mut zbs_withscores = false;
+            let mut zbs_limit: Option<(usize, i64)> = None;
+            let mut i = 3;
+            while i < args.len() {
+                let flag = String::from_utf8_lossy(&args[i]).to_uppercase();
+                match flag.as_str() {
+                    "WITHSCORES" => {
+                        zbs_withscores = true;
+                        i += 1;
+                    }
+                    "LIMIT" => {
+                        if i + 2 < args.len() {
+                            let offset: usize =
+                                String::from_utf8_lossy(&args[i + 1]).parse().unwrap_or(0);
+                            let count: i64 =
+                                String::from_utf8_lossy(&args[i + 2]).parse().unwrap_or(-1);
+                            zbs_limit = Some((offset, count));
+                            i += 3;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+
             // Passive expiration
             if let Some(entry) = data.get(key) {
                 if entry.is_expired() {
@@ -984,7 +1030,7 @@ fn dispatch_command_inner(
                         let lower = min.lower_btree_bound();
                         let max_val = max.value();
                         let max_inclusive = max.is_inclusive();
-                        let result: Vec<RedisValue> = zset
+                        let base: Vec<_> = zset
                             .by_score
                             .range((lower, std::ops::Bound::Unbounded))
                             // Skip members at the lower-bound score when it is exclusive
@@ -998,7 +1044,33 @@ fn dispatch_command_inner(
                                     score.0 < max_val
                                 }
                             })
-                            .map(|((_, member), _)| RedisValue::BulkString(member.clone()))
+                            .collect();
+
+                        // Apply LIMIT if present
+                        let limited: Box<dyn Iterator<Item = &_>> = match zbs_limit {
+                            Some((offset, count)) => {
+                                if count < 0 {
+                                    Box::new(base.iter().skip(offset))
+                                } else {
+                                    Box::new(base.iter().skip(offset).take(count as usize))
+                                }
+                            }
+                            None => Box::new(base.iter()),
+                        };
+
+                        let result: Vec<RedisValue> = limited
+                            .flat_map(|((score, member), _)| {
+                                if zbs_withscores {
+                                    vec![
+                                        RedisValue::BulkString(member.clone()),
+                                        RedisValue::BulkString(Bytes::from(
+                                            format_redis_score(score.0),
+                                        )),
+                                    ]
+                                } else {
+                                    vec![RedisValue::BulkString(member.clone())]
+                                }
+                            })
                             .collect();
                         Ok(RedisValue::Array(result))
                     }
@@ -1734,6 +1806,22 @@ fn dispatch_command_inner(
         }
 
         _ => Ok(RedisValue::Error(format!("ERR unknown command '{}'", cmd))),
+    }
+}
+
+/// Format a f64 score to a string matching Redis's format.
+/// Redis uses a minimal representation: "1" for 1.0, "1.5" for 1.5, etc.
+fn format_redis_score(score: f64) -> String {
+    if score.is_infinite() {
+        if score.is_sign_positive() {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        }
+    } else if score.fract() == 0.0 {
+        format!("{}", score as i64)
+    } else {
+        format!("{}", score)
     }
 }
 
