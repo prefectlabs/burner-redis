@@ -1,8 +1,8 @@
 # burner-redis
 
-An embedded, in-process Redis-compatible database written in Rust with Python bindings.
+An embedded, in-process Redis-compatible database written in Rust with Python bindings. Drop-in replacement for `redis.asyncio.Redis` that runs inside the host process with no external server needed.
 
-Provides a drop-in replacement for `redis.asyncio.Redis` that runs inside the host process with no external server needed. The primary use case is backing a self-hosted Prefect server without requiring a separate Redis deployment.
+Built to back [docket](https://github.com/chrisguidry/docket) and self-hosted [Prefect](https://github.com/PrefectHQ/prefect) servers without requiring a separate Redis deployment.
 
 ## Installation
 
@@ -10,7 +10,9 @@ Provides a drop-in replacement for `redis.asyncio.Redis` that runs inside the ho
 pip install burner-redis
 ```
 
-## Usage
+Requires Python 3.9+. Pre-built wheels available for Linux (x86_64, aarch64) and macOS (x86_64, arm64).
+
+## Quick start
 
 ```python
 from burner_redis import BurnerRedis
@@ -20,17 +22,73 @@ db = BurnerRedis()
 # Use like redis.asyncio.Redis
 await db.set("key", "value")
 value = await db.get("key")
+
+# Persistence across restarts
+db = BurnerRedis(persistence_path="data.dat")
+await db.set("key", "value")
+# Data is saved on process exit and reloaded on next start
 ```
 
-## Features
+## Supported commands
 
-- Drop-in compatible with `redis.asyncio.Redis` API surface used by Prefect
-- String, Hash, Set, Sorted Set, and Stream commands
-- Lua scripting (EVAL/EVALSHA)
-- Pipeline support
-- Key expiration (TTL)
-- Optional persistence (flush to disk / reload on startup)
-- No external Redis server required
+### Strings
+`SET` (with NX/EX/PX), `GET`, `MGET`, `DELETE`, `EXISTS`, `KEYS`, `TTL`, `EXPIRE`
+
+### Hashes
+`HSET`, `HGET`, `HDEL`, `HGETALL`, `HVALS`, `HEXISTS`, `HINCRBY`
+
+### Sets
+`SADD`, `SMEMBERS`, `SISMEMBER`, `SREM`
+
+### Sorted sets
+`ZADD`, `ZREM`, `ZRANGE` (with WITHSCORES), `ZRANGEBYSCORE` (with WITHSCORES/LIMIT), `ZRANGESTORE`, `ZREMRANGEBYSCORE`, `ZCARD`, `ZSCORE`, `ZCOUNT`
+
+### Streams
+`XADD`, `XREAD`, `XLEN`, `XRANGE`, `XDEL`, `XTRIM`, `XGROUP CREATE`, `XGROUP DESTROY`, `XREADGROUP`, `XACK`, `XAUTOCLAIM`, `XCLAIM`, `XINFO GROUPS`, `XINFO CONSUMERS`, `XPENDING`, `XPENDING RANGE`
+
+### Pub/Sub
+`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `PSUBSCRIBE`, `PUNSUBSCRIBE`, `PUBSUB CHANNELS`, `PUBSUB NUMSUB`, `PUBSUB NUMPAT`
+
+### Scripting
+`EVAL`, `EVALSHA`, `SCRIPT LOAD`, `SCRIPT EXISTS`
+
+### Python-layer features
+- **Pipeline** &mdash; buffer commands and execute in batch, matching `redis.asyncio.Redis.pipeline()` semantics
+- **Lock** &mdash; distributed-style locking with atomic Lua-based release, matching `redis.asyncio.Redis.lock()` semantics
+- **PubSub** &mdash; async message listener with channel and pattern subscriptions
+- **Script** &mdash; register and call Lua scripts, matching `redis.asyncio.Redis.register_script()`
+
+## Persistence
+
+Pass `persistence_path` to save state to disk on shutdown and restore on startup:
+
+```python
+db = BurnerRedis(persistence_path="burner-redis.dat")
+```
+
+- Crash-safe writes (atomic temp file + rename)
+- Expired keys excluded from snapshots
+- Manual save available via `await db.save()` or `await db.save(path="custom.dat")`
+- MessagePack binary format
+
+## redis-py compatibility
+
+burner-redis aims to be a drop-in replacement for `redis.asyncio.Redis`. Exceptions subclass `redis.exceptions.ResponseError` and `redis.exceptions.NoScriptError` when the `redis` package is installed, so existing error handling works unchanged.
+
+## Development
+
+```bash
+# Prerequisites: Rust 1.85+, Python 3.9+, uv
+
+# Development build
+uv run maturin develop
+
+# Run tests
+uv run pytest
+
+# Run Rust tests
+cargo test
+```
 
 ## License
 
