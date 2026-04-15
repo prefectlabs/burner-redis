@@ -85,8 +85,8 @@ async def test_set_coercion_bool_false_rejected(r):
 
 def test_lock_error_hierarchy():
     """LockError is subclass of redis.exceptions.LockError when redis is installed."""
-    import redis.exceptions
-    assert issubclass(LockError, redis.exceptions.LockError)
+    redis_exceptions = pytest.importorskip("redis.exceptions")
+    assert issubclass(LockError, redis_exceptions.LockError)
 
 
 # ---- scan_iter Tests (D-05) ----

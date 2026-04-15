@@ -252,5 +252,5 @@ async def test_lock_different_names_independent(r):
 
 def test_lock_error_hierarchy():
     """LockError is subclass of redis.exceptions.LockError when redis is installed."""
-    import redis.exceptions
-    assert issubclass(LockError, redis.exceptions.LockError)
+    redis_exceptions = pytest.importorskip("redis.exceptions")
+    assert issubclass(LockError, redis_exceptions.LockError)
