@@ -8,7 +8,7 @@ name = "_burner_redis"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py39"] }
+pyo3 = { version = "0.28.3", features = ["extension-module", "abi3-py310"] }
 pyo3-async-runtimes = { version = "0.28.0", features = ["tokio-runtime"] }
 tokio = { version = "1.51", features = ["rt", "time", "sync", "macros"] }
 parking_lot = "0.12.5"

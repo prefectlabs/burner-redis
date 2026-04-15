@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "burner-redis"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 description = "An embedded, in-process Redis-compatible database"
 license = {text = "MIT"}
 dynamic = ["version"]
@@ -29,7 +29,7 @@ Issues = "https://github.com/PrefectHQ/burner-redis/issues"
 dev = ["pytest", "pytest-asyncio", "maturin"]
 
 [tool.maturin]
-features = ["pyo3/extension-module", "pyo3/abi3-py39"]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
 module-name = "burner_redis._burner_redis"
 python-source = "python"
 
