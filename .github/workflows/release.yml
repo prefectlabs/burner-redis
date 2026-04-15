@@ -60,6 +60,9 @@ jobs:
   release:
     needs: [build, sdist]
     runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/burner-redis
     permissions:
       id-token: write
       contents: write
@@ -71,12 +74,9 @@ jobs:
           merge-multiple: true
 
       - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
-        env:
-          MATURIN_PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
