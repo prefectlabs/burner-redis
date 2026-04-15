@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 12
 Plan: Not started
 Status: Executing Phase 12
-Last activity: 2026-04-15 - Completed quick task 260415-hb8: Update PyPI publishing to use trusted publishers OIDC
+Last activity: 2026-04-15 - Completed quick task 260415-mn4: Fix asyncio.wait_for cancellation bug in pubsub get_message
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -162,6 +162,7 @@ None yet.
 | 260415-an2 | Eliminate async overhead with sync fast path and native pipeline execution | 2026-04-15 | 9e1fa38 | [260415-an2-eliminate-async-overhead-with-sync-fast-](./quick/260415-an2-eliminate-async-overhead-with-sync-fast-/) |
 | 260415-gtu | Add MIT LICENSE file and set up dynamic versioning | 2026-04-15 | a0ae4da | [260415-gtu-add-mit-license-file-and-set-up-dynamic-](./quick/260415-gtu-add-mit-license-file-and-set-up-dynamic-/) |
 | 260415-hb8 | Update PyPI publishing to use trusted publishers OIDC | 2026-04-15 | 3cfe3b6 | [260415-hb8-update-pypi-publishing-to-use-trusted-pu](./quick/260415-hb8-update-pypi-publishing-to-use-trusted-pu/) |
+| 260415-mn4 | Fix asyncio.wait_for cancellation bug in pubsub get_message | 2026-04-15 | a8161ab | [260415-mn4-fix-asyncio-wait-for-cancellation-bug-in](./quick/260415-mn4-fix-asyncio-wait-for-cancellation-bug-in/) |
 
 ## Session Continuity
 
