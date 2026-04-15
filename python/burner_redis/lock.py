@@ -4,6 +4,7 @@ Provides redis-py compatible Lock API using SET NX PX for atomic
 lock acquisition with UUID token-based ownership verification.
 """
 import asyncio
+import time
 import uuid
 
 
@@ -85,17 +86,15 @@ class Lock:
             return False
 
         # Blocking: poll until acquired or timeout
-        elapsed = 0.0
+        deadline = time.monotonic() + blocking_timeout if blocking_timeout is not None else None
         while True:
             result = await self._client.set(self.name, token, px=px, nx=True)
             if result is True:
                 self.token = token
                 return True
 
-            if blocking_timeout is not None:
-                elapsed += self.sleep
-                if elapsed >= blocking_timeout:
-                    return False
+            if deadline is not None and time.monotonic() >= deadline:
+                return False
 
             await asyncio.sleep(self.sleep)
 
