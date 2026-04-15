@@ -487,3 +487,25 @@ async def test_punsubscribe_all(r):
     assert len(ps.patterns) == 0
 
     await ps.aclose()
+
+
+# --- Cancellation safety (cpython#86296 fix) ---
+
+
+async def test_get_message_cancellation_propagates(r):
+    """Verify external task.cancel() propagates through get_message (cpython#86296 fix)."""
+    ps = r.pubsub()
+    await ps.subscribe("cancel-ch")
+    # Drain subscribe confirmation
+    await ps.get_message(timeout=1.0)
+
+    # Start a get_message with a long timeout
+    task = asyncio.ensure_future(ps.get_message(timeout=5.0))
+    # Give it a moment to enter the wait
+    await asyncio.sleep(0.1)
+    # Cancel from outside
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await ps.aclose()
