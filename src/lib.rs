@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBytes, PyCFunction, PyDict, PyTuple};
+use pyo3::types::{PyAny, PyBytes, PyCFunction, PyDict, PyList, PyTuple};
 use std::collections::HashSet as StdHashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -16,6 +16,37 @@ use commands::sorted_sets::parse_score_bound;
 use commands::streams::{format_stream_id, parse_stream_id, extract_stream_fields, StreamId};
 use scripting::RedisValue;
 use store::{Store, StoreError};
+
+/// A pre-resolved Python awaitable. Returns the stored value immediately
+/// on the first `__next__` call via `StopIteration(value)`.
+///
+/// This eliminates Tokio scheduling and asyncio coroutine overhead for
+/// commands that execute synchronously (no I/O, no blocking).
+#[pyclass]
+struct ResolvedFuture {
+    result: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl ResolvedFuture {
+    fn __await__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        match self.result.take() {
+            Some(val) => Err(pyo3::exceptions::PyStopIteration::new_err(val)),
+            None => Err(pyo3::exceptions::PyStopIteration::new_err(py.None())),
+        }
+    }
+    fn __iter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+}
+
+/// Wrap an already-computed PyObject into a ResolvedFuture awaitable.
+fn resolved<'py>(py: Python<'py>, value: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    Ok(Bound::new(py, ResolvedFuture { result: Some(value) })?.into_any())
+}
 
 /// Convert a RedisValue (from Lua script execution) into a Python object.
 /// Handles recursive conversion for nested arrays.
@@ -60,8 +91,52 @@ fn store_err_to_py(e: StoreError) -> PyErr {
     make_response_error(e.to_string())
 }
 
-/// Format XREADGROUP results into a Python list structure.
-/// Used by both blocking and non-blocking XREADGROUP paths.
+/// Format XREADGROUP results into a Python list structure (GIL-holding version).
+/// Used by the synchronous non-blocking xreadgroup path and execute_pipeline.
+fn format_xreadgroup_result_with_py(
+    py: Python<'_>,
+    results: Vec<(Bytes, Vec<(commands::streams::StreamId, std::collections::HashMap<Bytes, Bytes>)>)>,
+) -> PyResult<Py<PyAny>> {
+    if results.is_empty() {
+        return Ok(pyo3::types::PyList::empty(py).into_any().unbind());
+    }
+
+    let outer = pyo3::types::PyList::empty(py);
+    for (stream_name, entries) in &results {
+        let entry_list = pyo3::types::PyList::empty(py);
+        for (id, fields) in entries {
+            let id_bytes = format_stream_id(*id).into_bytes();
+            let field_dict = pyo3::types::PyDict::new(py);
+            for (fk, fv) in fields {
+                field_dict.set_item(
+                    pyo3::types::PyBytes::new(py, fk.as_ref()),
+                    pyo3::types::PyBytes::new(py, fv.as_ref()),
+                )?;
+            }
+            let tuple = pyo3::types::PyTuple::new(
+                py,
+                &[
+                    pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
+                    field_dict.into_any(),
+                ],
+            )?;
+            entry_list.append(tuple)?;
+        }
+        let stream_pair = pyo3::types::PyList::new(
+            py,
+            &[
+                pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
+                entry_list.into_any(),
+            ],
+        )?;
+        outer.append(stream_pair)?;
+    }
+    Ok(outer.into_any().unbind())
+}
+
+/// Format XREADGROUP results into a Python list structure (async version).
+/// Used by the blocking xreadgroup path which runs inside a Tokio future
+/// and must acquire the GIL via try_attach.
 fn format_xreadgroup_result(
     results: Vec<(Bytes, Vec<(commands::streams::StreamId, std::collections::HashMap<Bytes, Bytes>)>)>,
 ) -> PyResult<pyo3::Py<pyo3::PyAny>> {
@@ -77,37 +152,7 @@ fn format_xreadgroup_result(
     }
 
     Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
-        let outer = pyo3::types::PyList::empty(py);
-        for (stream_name, entries) in &results {
-            let entry_list = pyo3::types::PyList::empty(py);
-            for (id, fields) in entries {
-                let id_bytes = format_stream_id(*id).into_bytes();
-                let field_dict = pyo3::types::PyDict::new(py);
-                for (fk, fv) in fields {
-                    field_dict.set_item(
-                        pyo3::types::PyBytes::new(py, fk.as_ref()),
-                        pyo3::types::PyBytes::new(py, fv.as_ref()),
-                    )?;
-                }
-                let tuple = pyo3::types::PyTuple::new(
-                    py,
-                    &[
-                        pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
-                        field_dict.into_any(),
-                    ],
-                )?;
-                entry_list.append(tuple)?;
-            }
-            let stream_pair = pyo3::types::PyList::new(
-                py,
-                &[
-                    pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
-                    entry_list.into_any(),
-                ],
-            )?;
-            outer.append(stream_pair)?;
-        }
-        Ok(outer.into_any().unbind())
+        format_xreadgroup_result_with_py(py, results)
     })
     .ok_or_else(|| {
         PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
@@ -183,16 +228,13 @@ impl BurnerRedis {
     /// An explicit path argument overrides both.
     #[pyo3(signature = (path=None))]
     fn save<'py>(&self, py: Python<'py>, path: Option<String>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let save_path = path
             .or_else(|| self.persistence_path.clone())
             .unwrap_or_else(|| "burner-redis.dat".to_string());
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.save(&save_path).map_err(|e| {
-                pyo3::exceptions::PyIOError::new_err(e.to_string())
-            })?;
-            Ok(true)
-        })
+        self.store.save(&save_path).map_err(|e| {
+            pyo3::exceptions::PyIOError::new_err(e.to_string())
+        })?;
+        resolved(py, pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
     }
 
     /// Synchronous save for atexit handler. Saves to persistence_path or "burner-redis.dat".
@@ -224,7 +266,6 @@ impl BurnerRedis {
         nx: bool,
         xx: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let val = extract_bytes(value)?;
 
@@ -237,14 +278,13 @@ impl BurnerRedis {
             None
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let success = store.set(key, val, ttl, nx, xx);
-            if success {
-                Ok(Some(true)) // Python: True
-            } else {
-                Ok(None) // Python: None (NX/XX condition failed)
-            }
-        })
+        let success = self.store.set(key, val, ttl, nx, xx);
+        let py_result = if success {
+            pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind()
+        } else {
+            py.None()
+        };
+        resolved(py, py_result)
     }
 
     /// GET command matching redis.asyncio.Redis.get() signature.
@@ -254,13 +294,13 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(store.get(&key).map(|b| b.to_vec()))
-            // Option<Vec<u8>> -> Python bytes or None
-        })
+        let result = self.store.get(&key);
+        let py_result = match result {
+            Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
     }
 
     /// DELETE command matching redis.asyncio.Redis.delete() signature.
@@ -271,15 +311,12 @@ impl BurnerRedis {
         py: Python<'py>,
         names: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let keys: Vec<Bytes> = names
             .iter()
             .map(|obj| extract_bytes(&obj))
             .collect::<PyResult<Vec<_>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(store.delete(&keys))
-        })
+        let count = self.store.delete(&keys);
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// EXISTS command matching redis.asyncio.Redis.exists() signature.
@@ -290,18 +327,15 @@ impl BurnerRedis {
         py: Python<'py>,
         names: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let keys: Vec<Bytes> = names
             .iter()
             .map(|obj| extract_bytes(&obj))
             .collect::<PyResult<Vec<_>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(store.exists(&keys))
-        })
+        let count = self.store.exists(&keys);
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
-    // ── Hash Commands ────────────────────────────────────────────────
+    // -- Hash Commands ----
 
     /// HSET command matching redis.asyncio.Redis.hset() signature.
     /// Sets field-value pairs in a hash. Returns count of NEW fields added.
@@ -314,7 +348,6 @@ impl BurnerRedis {
         value: Option<&Bound<'py, PyAny>>,
         mapping: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
 
         let mut fields: Vec<(Bytes, Bytes)> = Vec::new();
@@ -331,9 +364,8 @@ impl BurnerRedis {
             }
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.hset(name_bytes, fields).map_err(store_err_to_py)
-        })
+        let count = self.store.hset(name_bytes, fields).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// HGET command matching redis.asyncio.Redis.hget() signature.
@@ -344,14 +376,14 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         key: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let field_bytes = extract_bytes(key)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = store.hget(&name_bytes, &field_bytes).map_err(store_err_to_py)?;
-            Ok(result.map(|b| b.to_vec()))
-        })
+        let result = self.store.hget(&name_bytes, &field_bytes).map_err(store_err_to_py)?;
+        let py_result = match result {
+            Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
     }
 
     /// HDEL command matching redis.asyncio.Redis.hdel() signature.
@@ -363,16 +395,13 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         keys: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let fields: Vec<Bytes> = keys
             .iter()
             .map(|obj| extract_bytes(&obj))
             .collect::<PyResult<Vec<_>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.hdel(&name_bytes, &fields).map_err(store_err_to_py)
-        })
+        let count = self.store.hdel(&name_bytes, &fields).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// HVALS command matching redis.asyncio.Redis.hvals() signature.
@@ -382,13 +411,10 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let vals = store.hvals(&name_bytes).map_err(store_err_to_py)?;
-            Ok(vals.into_iter().map(|b| b.to_vec()).collect::<Vec<Vec<u8>>>())
-        })
+        let vals = self.store.hvals(&name_bytes).map_err(store_err_to_py)?;
+        let py_list: Vec<Vec<u8>> = vals.into_iter().map(|b| b.to_vec()).collect();
+        resolved(py, py_list.into_pyobject(py)?.into_any().unbind())
     }
 
     /// HGETALL command matching redis.asyncio.Redis.hgetall() signature.
@@ -398,27 +424,16 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let map = store.hgetall(&name_bytes).map_err(store_err_to_py)?;
-            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
-                let dict = PyDict::new(py);
-                for (k, v) in &map {
-                    dict.set_item(
-                        PyBytes::new(py, k.as_ref()),
-                        PyBytes::new(py, v.as_ref()),
-                    )?;
-                }
-                Ok(dict.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+        let map = self.store.hgetall(&name_bytes).map_err(store_err_to_py)?;
+        let dict = PyDict::new(py);
+        for (k, v) in &map {
+            dict.set_item(
+                PyBytes::new(py, k.as_ref()),
+                PyBytes::new(py, v.as_ref()),
+            )?;
+        }
+        resolved(py, dict.into_any().unbind())
     }
 
     /// HEXISTS command matching redis.asyncio.Redis.hexists() signature.
@@ -429,13 +444,10 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         key: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let field_bytes = extract_bytes(key)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.hexists(&name_bytes, &field_bytes).map_err(store_err_to_py)
-        })
+        let exists = self.store.hexists(&name_bytes, &field_bytes).map_err(store_err_to_py)?;
+        resolved(py, pyo3::types::PyBool::new(py, exists).to_owned().into_any().unbind())
     }
 
     /// HINCRBY command matching redis.asyncio.Redis.hincrby() signature.
@@ -448,16 +460,13 @@ impl BurnerRedis {
         key: &Bound<'py, PyAny>,
         amount: i64,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let field_bytes = extract_bytes(key)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.hincrby(name_bytes, field_bytes, amount).map_err(store_err_to_py)
-        })
+        let new_val = self.store.hincrby(name_bytes, field_bytes, amount).map_err(store_err_to_py)?;
+        resolved(py, new_val.into_pyobject(py)?.into_any().unbind())
     }
 
-    // ── Set Commands ─────────────────────────────────────────────────
+    // -- Set Commands ----
 
     /// SADD command matching redis.asyncio.Redis.sadd() signature.
     /// Accepts variadic members, returns count of NEW members added.
@@ -468,16 +477,13 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         values: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let members: Vec<Bytes> = values
             .iter()
             .map(|obj| extract_bytes(&obj))
             .collect::<PyResult<Vec<_>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.sadd(name_bytes, members).map_err(store_err_to_py)
-        })
+        let count = self.store.sadd(name_bytes, members).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// SMEMBERS command matching redis.asyncio.Redis.smembers() signature.
@@ -487,14 +493,10 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let members = store.smembers(&name_bytes).map_err(store_err_to_py)?;
-            let set: StdHashSet<Vec<u8>> = members.into_iter().map(|b| b.to_vec()).collect();
-            Ok(set)
-        })
+        let members = self.store.smembers(&name_bytes).map_err(store_err_to_py)?;
+        let set: StdHashSet<Vec<u8>> = members.into_iter().map(|b| b.to_vec()).collect();
+        resolved(py, set.into_pyobject(py)?.into_any().unbind())
     }
 
     /// SISMEMBER command matching redis.asyncio.Redis.sismember() signature.
@@ -505,13 +507,10 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let member_bytes = extract_bytes(value)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.sismember(&name_bytes, &member_bytes).map_err(store_err_to_py)
-        })
+        let is_member = self.store.sismember(&name_bytes, &member_bytes).map_err(store_err_to_py)?;
+        resolved(py, pyo3::types::PyBool::new(py, is_member).to_owned().into_any().unbind())
     }
 
     /// SREM command matching redis.asyncio.Redis.srem() signature.
@@ -523,19 +522,16 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         values: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let members: Vec<Bytes> = values
             .iter()
             .map(|obj| extract_bytes(&obj))
             .collect::<PyResult<Vec<_>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.srem(&name_bytes, &members).map_err(store_err_to_py)
-        })
+        let count = self.store.srem(&name_bytes, &members).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
-    // ── Sorted Set Commands ──────────────────────────────────────────
+    // -- Sorted Set Commands ----
 
     /// ZADD command matching redis.asyncio.Redis.zadd() signature.
     /// Adds members with scores to a sorted set. Returns count of new members
@@ -552,7 +548,6 @@ impl BurnerRedis {
         lt: bool,
         ch: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
 
         // Extract mapping: {member: score} dict -> Vec<(f64, Bytes)>
@@ -563,11 +558,10 @@ impl BurnerRedis {
             members.push((score, member));
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store
-                .zadd(name_bytes, members, nx, xx, gt, lt, ch)
-                .map_err(store_err_to_py)
-        })
+        let count = self.store
+            .zadd(name_bytes, members, nx, xx, gt, lt, ch)
+            .map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// ZREM command matching redis.asyncio.Redis.zrem() signature.
@@ -579,16 +573,13 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         values: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let members: Vec<Bytes> = values
             .iter()
             .map(|obj| extract_bytes(&obj))
             .collect::<PyResult<Vec<_>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.zrem(&name_bytes, &members).map_err(store_err_to_py)
-        })
+        let count = self.store.zrem(&name_bytes, &members).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// ZRANGE command matching redis.asyncio.Redis.zrange() signature.
@@ -603,32 +594,22 @@ impl BurnerRedis {
         end: i64,
         withscores: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let results = store
-                .zrange(&name_bytes, start, end, withscores)
-                .map_err(store_err_to_py)?;
-            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
-                if withscores {
-                    let list: Vec<(Vec<u8>, f64)> = results
-                        .into_iter()
-                        .map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0)))
-                        .collect();
-                    Ok(list.into_pyobject(py)?.into_any().unbind())
-                } else {
-                    let list: Vec<Vec<u8>> =
-                        results.into_iter().map(|(m, _)| m.to_vec()).collect();
-                    Ok(list.into_pyobject(py)?.into_any().unbind())
-                }
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+        let results = self.store
+            .zrange(&name_bytes, start, end, withscores)
+            .map_err(store_err_to_py)?;
+        let py_result = if withscores {
+            let list: Vec<(Vec<u8>, f64)> = results
+                .into_iter()
+                .map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0)))
+                .collect();
+            list.into_pyobject(py)?.into_any().unbind()
+        } else {
+            let list: Vec<Vec<u8>> =
+                results.into_iter().map(|(m, _)| m.to_vec()).collect();
+            list.into_pyobject(py)?.into_any().unbind()
+        };
+        resolved(py, py_result)
     }
 
     /// ZRANGEBYSCORE command matching redis.asyncio.Redis.zrangebyscore() signature.
@@ -643,34 +624,24 @@ impl BurnerRedis {
         max: &Bound<'py, PyAny>,
         withscores: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let min_f64 = parse_score_bound(min)?;
         let max_f64 = parse_score_bound(max)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let results = store
-                .zrangebyscore(&name_bytes, min_f64, max_f64, withscores)
-                .map_err(store_err_to_py)?;
-            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
-                if withscores {
-                    let list: Vec<(Vec<u8>, f64)> = results
-                        .into_iter()
-                        .map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0)))
-                        .collect();
-                    Ok(list.into_pyobject(py)?.into_any().unbind())
-                } else {
-                    let list: Vec<Vec<u8>> =
-                        results.into_iter().map(|(m, _)| m.to_vec()).collect();
-                    Ok(list.into_pyobject(py)?.into_any().unbind())
-                }
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+        let results = self.store
+            .zrangebyscore(&name_bytes, min_f64, max_f64, withscores)
+            .map_err(store_err_to_py)?;
+        let py_result = if withscores {
+            let list: Vec<(Vec<u8>, f64)> = results
+                .into_iter()
+                .map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0)))
+                .collect();
+            list.into_pyobject(py)?.into_any().unbind()
+        } else {
+            let list: Vec<Vec<u8>> =
+                results.into_iter().map(|(m, _)| m.to_vec()).collect();
+            list.into_pyobject(py)?.into_any().unbind()
+        };
+        resolved(py, py_result)
     }
 
     /// ZRANGESTORE command matching redis.asyncio.Redis.zrangestore() signature.
@@ -684,17 +655,14 @@ impl BurnerRedis {
         start: &Bound<'py, PyAny>,
         end: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let dst_bytes = extract_bytes(dest)?;
         let src_bytes = extract_bytes(name)?;
         let min_f64 = parse_score_bound(start)?;
         let max_f64 = parse_score_bound(end)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store
-                .zrangestore(dst_bytes, &src_bytes, min_f64, max_f64)
-                .map_err(store_err_to_py)
-        })
+        let count = self.store
+            .zrangestore(dst_bytes, &src_bytes, min_f64, max_f64)
+            .map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// ZREMRANGEBYSCORE command matching redis.asyncio.Redis.zremrangebyscore() signature.
@@ -707,16 +675,13 @@ impl BurnerRedis {
         min: &Bound<'py, PyAny>,
         max: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let min_f64 = parse_score_bound(min)?;
         let max_f64 = parse_score_bound(max)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store
-                .zremrangebyscore(&name_bytes, min_f64, max_f64)
-                .map_err(store_err_to_py)
-        })
+        let count = self.store
+            .zremrangebyscore(&name_bytes, min_f64, max_f64)
+            .map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// ZCARD command matching redis.asyncio.Redis.zcard() signature.
@@ -726,12 +691,9 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.zcard(&name_bytes).map_err(store_err_to_py)
-        })
+        let count = self.store.zcard(&name_bytes).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// ZSCORE command matching redis.asyncio.Redis.zscore() signature.
@@ -742,13 +704,10 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let member_bytes = extract_bytes(value)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.zscore(&name_bytes, &member_bytes).map_err(store_err_to_py)
-        })
+        let score = self.store.zscore(&name_bytes, &member_bytes).map_err(store_err_to_py)?;
+        resolved(py, score.into_pyobject(py)?.into_any().unbind())
     }
 
     /// ZCOUNT command matching redis.asyncio.Redis.zcount() signature.
@@ -761,17 +720,14 @@ impl BurnerRedis {
         min: &Bound<'py, PyAny>,
         max: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
         let min_f64 = parse_score_bound(min)?;
         let max_f64 = parse_score_bound(max)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.zcount(&name_bytes, min_f64, max_f64).map_err(store_err_to_py)
-        })
+        let count = self.store.zcount(&name_bytes, min_f64, max_f64).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
-    // ── Key Commands ────────────────────────────────────────────────
+    // -- Key Commands ----
 
     /// EXPIRE command matching redis.asyncio.Redis.expire() signature.
     /// Sets a timeout on an existing key in seconds. Returns True if set, False if key doesn't exist.
@@ -782,7 +738,6 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         time: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let name_bytes = extract_bytes(name)?;
 
         // Accept int or timedelta
@@ -796,17 +751,14 @@ impl BurnerRedis {
             ));
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(store.expire(&name_bytes, seconds))
-        })
+        let result = self.store.expire(&name_bytes, seconds);
+        resolved(py, pyo3::types::PyBool::new(py, result).to_owned().into_any().unbind())
     }
 
-    // ── Stream Commands ──────────────────────────────────────────────
+    // -- Stream Commands ----
 
     /// XADD command matching redis.asyncio.Redis.xadd() signature.
     /// Adds an entry to a stream. Returns the entry ID as bytes (e.g., b"1234567890123-0").
-    /// The maxlen and minid trimming parameters are accepted for API compatibility but not
-    /// yet acted upon — stream trimming via XADD is a known gap (use XTRIM separately).
     #[pyo3(signature = (name, fields, id="*", maxlen=None, minid=None))]
     fn xadd<'py>(
         &self,
@@ -819,7 +771,6 @@ impl BurnerRedis {
         #[allow(unused_variables)]
         minid: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let field_map = extract_stream_fields(fields)?;
 
@@ -832,17 +783,14 @@ impl BurnerRedis {
             })?)
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream_id = store.xadd(key, field_map, id_opt).map_err(store_err_to_py)?;
-            let id_str = format_stream_id(stream_id);
-            Ok(id_str.into_bytes())
-        })
+        let stream_id = self.store.xadd(key, field_map, id_opt).map_err(store_err_to_py)?;
+        let id_str = format_stream_id(stream_id);
+        resolved(py, PyBytes::new(py, id_str.as_bytes()).into_any().unbind())
     }
 
     /// XREAD command matching redis.asyncio.Redis.xread() signature.
     /// Reads entries from one or more streams after given IDs.
     /// Returns list of [stream_name, [(id, {field: value}), ...]] or None if empty.
-    /// The block parameter is accepted for API compatibility but ignored (in-process DB).
     #[pyo3(signature = (streams, count=None, block=None))]
     fn xread<'py>(
         &self,
@@ -852,8 +800,6 @@ impl BurnerRedis {
         #[allow(unused_variables)]
         block: Option<u64>,  // Accepted for API compatibility, ignored (in-process DB)
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-
         // Extract stream names and IDs from the dict
         let mut keys: Vec<Bytes> = Vec::new();
         let mut ids: Vec<StreamId> = Vec::new();
@@ -880,54 +826,45 @@ impl BurnerRedis {
             ids.push(stream_id);
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let results = store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
+        let results = self.store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
 
-            if results.is_empty() {
-                return Ok(None::<pyo3::Py<pyo3::PyAny>>);
-            }
+        if results.is_empty() {
+            return resolved(py, py.None());
+        }
 
-            // Build the nested Python structure:
-            // [[stream_name_bytes, [(id_bytes, {field_bytes: value_bytes}), ...]], ...]
-            Python::try_attach(|py| -> PyResult<Option<pyo3::Py<pyo3::PyAny>>> {
-                let outer = pyo3::types::PyList::empty(py);
-                for (stream_name, entries) in &results {
-                    let entry_list = pyo3::types::PyList::empty(py);
-                    for (id, fields) in entries {
-                        let id_bytes = format_stream_id(*id).into_bytes();
-                        let field_dict = pyo3::types::PyDict::new(py);
-                        for (fk, fv) in fields {
-                            field_dict.set_item(
-                                pyo3::types::PyBytes::new(py, fk.as_ref()),
-                                pyo3::types::PyBytes::new(py, fv.as_ref()),
-                            )?;
-                        }
-                        let tuple = pyo3::types::PyTuple::new(
-                            py,
-                            &[
-                                pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
-                                field_dict.into_any(),
-                            ],
-                        )?;
-                        entry_list.append(tuple)?;
-                    }
-                    let stream_pair = pyo3::types::PyList::new(
-                        py,
-                        &[
-                            pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
-                            entry_list.into_any(),
-                        ],
+        // Build the nested Python structure:
+        // [[stream_name_bytes, [(id_bytes, {field_bytes: value_bytes}), ...]], ...]
+        let outer = pyo3::types::PyList::empty(py);
+        for (stream_name, entries) in &results {
+            let entry_list = pyo3::types::PyList::empty(py);
+            for (id, fields) in entries {
+                let id_bytes = format_stream_id(*id).into_bytes();
+                let field_dict = pyo3::types::PyDict::new(py);
+                for (fk, fv) in fields {
+                    field_dict.set_item(
+                        pyo3::types::PyBytes::new(py, fk.as_ref()),
+                        pyo3::types::PyBytes::new(py, fv.as_ref()),
                     )?;
-                    outer.append(stream_pair)?;
                 }
-                Ok(Some(outer.into_any().unbind()))
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+                let tuple = pyo3::types::PyTuple::new(
+                    py,
+                    &[
+                        pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
+                        field_dict.into_any(),
+                    ],
+                )?;
+                entry_list.append(tuple)?;
+            }
+            let stream_pair = pyo3::types::PyList::new(
+                py,
+                &[
+                    pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
+                    entry_list.into_any(),
+                ],
+            )?;
+            outer.append(stream_pair)?;
+        }
+        resolved(py, outer.into_any().unbind())
     }
 
     /// XLEN command matching redis.asyncio.Redis.xlen() signature.
@@ -937,13 +874,9 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let len = store.xlen(&key).map_err(store_err_to_py)?;
-            Ok(len as i64)
-        })
+        let len = self.store.xlen(&key).map_err(store_err_to_py)?;
+        resolved(py, (len as i64).into_pyobject(py)?.into_any().unbind())
     }
 
     /// XTRIM command matching redis.asyncio.Redis.xtrim() signature.
@@ -958,7 +891,6 @@ impl BurnerRedis {
         #[allow(unused_variables)]
         approximate: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
 
         let minid_parsed: Option<StreamId> = match minid {
@@ -971,12 +903,10 @@ impl BurnerRedis {
             None => None,
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let trimmed = store
-                .xtrim(&key, maxlen, minid_parsed)
-                .map_err(store_err_to_py)?;
-            Ok(trimmed as i64)
-        })
+        let trimmed = self.store
+            .xtrim(&key, maxlen, minid_parsed)
+            .map_err(store_err_to_py)?;
+        resolved(py, (trimmed as i64).into_pyobject(py)?.into_any().unbind())
     }
 
     /// XDEL command matching redis.asyncio.Redis.xdel() signature.
@@ -988,7 +918,6 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         ids: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
 
         // Parse each ID string into a StreamId
@@ -1008,9 +937,8 @@ impl BurnerRedis {
             stream_ids.push(stream_id);
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store.xdel(&key, &stream_ids).map_err(store_err_to_py)
-        })
+        let count = self.store.xdel(&key, &stream_ids).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// XRANGE command matching redis.asyncio.Redis.xrange() signature.
@@ -1025,7 +953,6 @@ impl BurnerRedis {
         max: &str,
         count: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
 
         // Parse min: "-" means (0, 0)
@@ -1052,40 +979,31 @@ impl BurnerRedis {
             })?
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let entries = store.xrange(&key, min_id, max_id, count).map_err(store_err_to_py)?;
+        let entries = self.store.xrange(&key, min_id, max_id, count).map_err(store_err_to_py)?;
 
-            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
-                let result_list = pyo3::types::PyList::empty(py);
-                for (id, fields) in &entries {
-                    let id_bytes = format_stream_id(*id).into_bytes();
-                    let field_dict = PyDict::new(py);
-                    for (fk, fv) in fields {
-                        field_dict.set_item(
-                            PyBytes::new(py, fk.as_ref()),
-                            PyBytes::new(py, fv.as_ref()),
-                        )?;
-                    }
-                    let tuple = pyo3::types::PyTuple::new(
-                        py,
-                        &[
-                            PyBytes::new(py, &id_bytes).into_any(),
-                            field_dict.into_any(),
-                        ],
-                    )?;
-                    result_list.append(tuple)?;
-                }
-                Ok(result_list.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+        let result_list = pyo3::types::PyList::empty(py);
+        for (id, fields) in &entries {
+            let id_bytes = format_stream_id(*id).into_bytes();
+            let field_dict = PyDict::new(py);
+            for (fk, fv) in fields {
+                field_dict.set_item(
+                    PyBytes::new(py, fk.as_ref()),
+                    PyBytes::new(py, fv.as_ref()),
+                )?;
+            }
+            let tuple = pyo3::types::PyTuple::new(
+                py,
+                &[
+                    PyBytes::new(py, &id_bytes).into_any(),
+                    field_dict.into_any(),
+                ],
+            )?;
+            result_list.append(tuple)?;
+        }
+        resolved(py, result_list.into_any().unbind())
     }
 
-    // ── Consumer Group Commands ───────────────────────────────────────
+    // -- Consumer Group Commands ----
 
     /// XGROUP CREATE command matching redis.asyncio.Redis.xgroup_create() signature.
     /// Creates a consumer group on a stream. Returns True on success.
@@ -1098,7 +1016,6 @@ impl BurnerRedis {
         id: &str,
         mkstream: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
 
@@ -1116,12 +1033,10 @@ impl BurnerRedis {
             })?
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            store
-                .xgroup_create(&key, group, stream_id, mkstream)
-                .map_err(store_err_to_py)?;
-            Ok(true)
-        })
+        self.store
+            .xgroup_create(&key, group, stream_id, mkstream)
+            .map_err(store_err_to_py)?;
+        resolved(py, pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
     }
 
     /// XGROUP DESTROY command matching redis.asyncio.Redis.xgroup_destroy() signature.
@@ -1133,14 +1048,11 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         groupname: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let destroyed = store.xgroup_destroy(&key, &group).map_err(store_err_to_py)?;
-            Ok(if destroyed { 1i64 } else { 0i64 })
-        })
+        let destroyed = self.store.xgroup_destroy(&key, &group).map_err(store_err_to_py)?;
+        let val = if destroyed { 1i64 } else { 0i64 };
+        resolved(py, val.into_pyobject(py)?.into_any().unbind())
     }
 
     /// XREADGROUP command matching redis.asyncio.Redis.xreadgroup() signature.
@@ -1159,7 +1071,6 @@ impl BurnerRedis {
         #[allow(unused_variables)]
         noack: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let group = extract_bytes(groupname)?;
         let consumer = extract_bytes(consumername)?;
 
@@ -1177,13 +1088,24 @@ impl BurnerRedis {
             id_strs.push(id_str);
         }
 
+        // Non-blocking path: execute synchronously
+        if block.is_none() {
+            let results = self.store
+                .xreadgroup(&group, &consumer, &keys, &id_strs, count)
+                .map_err(store_err_to_py)?;
+            let py_result = format_xreadgroup_result_with_py(py, results)?;
+            return resolved(py, py_result);
+        }
+
+        // Blocking path: use future_into_py with Tokio for sleep/select
+        let store = self.store.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             // First non-blocking attempt
             let results = store
                 .xreadgroup(&group, &consumer, &keys, &id_strs, count)
                 .map_err(store_err_to_py)?;
 
-            if !results.is_empty() || block.is_none() {
+            if !results.is_empty() {
                 return format_xreadgroup_result(results);
             }
 
@@ -1231,7 +1153,6 @@ impl BurnerRedis {
         groupname: &Bound<'py, PyAny>,
         ids: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
 
@@ -1252,10 +1173,8 @@ impl BurnerRedis {
             stream_ids.push(stream_id);
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = store.xack(&key, &group, &stream_ids).map_err(store_err_to_py)?;
-            Ok(count)
-        })
+        let count = self.store.xack(&key, &group, &stream_ids).map_err(store_err_to_py)?;
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// XAUTOCLAIM command matching redis.asyncio.Redis.xautoclaim() signature.
@@ -1272,7 +1191,6 @@ impl BurnerRedis {
         start_id: &str,
         count: Option<usize>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
         let consumer_bytes = extract_bytes(consumername)?;
@@ -1289,60 +1207,51 @@ impl BurnerRedis {
             })?
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (next_id, claimed, deleted) = store
-                .xautoclaim(&key, &group, consumer_bytes, min_idle_time, start, count)
-                .map_err(store_err_to_py)?;
+        let (next_id, claimed, deleted) = self.store
+            .xautoclaim(&key, &group, consumer_bytes, min_idle_time, start, count)
+            .map_err(store_err_to_py)?;
 
-            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
-                // Build next_start_id as bytes
-                let next_id_bytes =
-                    pyo3::types::PyBytes::new(py, format_stream_id(next_id).as_bytes());
+        // Build next_start_id as bytes
+        let next_id_bytes =
+            pyo3::types::PyBytes::new(py, format_stream_id(next_id).as_bytes());
 
-                // Build claimed entries list: [(id_bytes, {field: value}), ...]
-                let claimed_list = pyo3::types::PyList::empty(py);
-                for (id, fields) in &claimed {
-                    let id_bytes =
-                        pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
-                    let field_dict = pyo3::types::PyDict::new(py);
-                    for (fk, fv) in fields {
-                        field_dict.set_item(
-                            pyo3::types::PyBytes::new(py, fk.as_ref()),
-                            pyo3::types::PyBytes::new(py, fv.as_ref()),
-                        )?;
-                    }
-                    let tuple = pyo3::types::PyTuple::new(
-                        py,
-                        &[id_bytes.into_any(), field_dict.into_any()],
-                    )?;
-                    claimed_list.append(tuple)?;
-                }
-
-                // Build deleted IDs list
-                let deleted_list = pyo3::types::PyList::empty(py);
-                for id in &deleted {
-                    let id_bytes =
-                        pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
-                    deleted_list.append(id_bytes)?;
-                }
-
-                // Return as tuple: (next_id, claimed, deleted)
-                let result = pyo3::types::PyTuple::new(
-                    py,
-                    &[
-                        next_id_bytes.into_any(),
-                        claimed_list.into_any(),
-                        deleted_list.into_any(),
-                    ],
+        // Build claimed entries list: [(id_bytes, {field: value}), ...]
+        let claimed_list = pyo3::types::PyList::empty(py);
+        for (id, fields) in &claimed {
+            let id_bytes =
+                pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
+            let field_dict = pyo3::types::PyDict::new(py);
+            for (fk, fv) in fields {
+                field_dict.set_item(
+                    pyo3::types::PyBytes::new(py, fk.as_ref()),
+                    pyo3::types::PyBytes::new(py, fv.as_ref()),
                 )?;
-                Ok(result.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+            }
+            let tuple = pyo3::types::PyTuple::new(
+                py,
+                &[id_bytes.into_any(), field_dict.into_any()],
+            )?;
+            claimed_list.append(tuple)?;
+        }
+
+        // Build deleted IDs list
+        let deleted_list = pyo3::types::PyList::empty(py);
+        for id in &deleted {
+            let id_bytes =
+                pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
+            deleted_list.append(id_bytes)?;
+        }
+
+        // Return as tuple: (next_id, claimed, deleted)
+        let result = pyo3::types::PyTuple::new(
+            py,
+            &[
+                next_id_bytes.into_any(),
+                claimed_list.into_any(),
+                deleted_list.into_any(),
+            ],
+        )?;
+        resolved(py, result.into_any().unbind())
     }
 
     /// XCLAIM command matching redis.asyncio.Redis.xclaim() signature.
@@ -1362,7 +1271,6 @@ impl BurnerRedis {
         force: bool,
         justid: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
         let consumer = extract_bytes(consumername)?;
@@ -1385,55 +1293,46 @@ impl BurnerRedis {
             })?);
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let results = store
-                .xclaim(
-                    &key,
-                    &group,
-                    consumer,
-                    min_idle_time,
-                    &ids,
-                    idle,
-                    time,
-                    retrycount,
-                    force,
-                    justid,
-                )
-                .map_err(store_err_to_py)?;
+        let results = self.store
+            .xclaim(
+                &key,
+                &group,
+                consumer,
+                min_idle_time,
+                &ids,
+                idle,
+                time,
+                retrycount,
+                force,
+                justid,
+            )
+            .map_err(store_err_to_py)?;
 
-            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
-                let outer = pyo3::types::PyList::empty(py);
-                for (id, fields_opt) in &results {
-                    if justid {
-                        let id_bytes = format_stream_id(*id).into_bytes();
-                        outer.append(PyBytes::new(py, &id_bytes))?;
-                    } else if let Some(fields) = fields_opt {
-                        let id_bytes = format_stream_id(*id).into_bytes();
-                        let field_dict = PyDict::new(py);
-                        for (fk, fv) in fields {
-                            field_dict.set_item(
-                                PyBytes::new(py, fk.as_ref()),
-                                PyBytes::new(py, fv.as_ref()),
-                            )?;
-                        }
-                        let tuple = PyTuple::new(
-                            py,
-                            &[
-                                PyBytes::new(py, &id_bytes).into_any(),
-                                field_dict.into_any(),
-                            ],
-                        )?;
-                        outer.append(tuple)?;
-                    }
+        let outer = pyo3::types::PyList::empty(py);
+        for (id, fields_opt) in &results {
+            if justid {
+                let id_bytes = format_stream_id(*id).into_bytes();
+                outer.append(PyBytes::new(py, &id_bytes))?;
+            } else if let Some(fields) = fields_opt {
+                let id_bytes = format_stream_id(*id).into_bytes();
+                let field_dict = PyDict::new(py);
+                for (fk, fv) in fields {
+                    field_dict.set_item(
+                        PyBytes::new(py, fk.as_ref()),
+                        PyBytes::new(py, fv.as_ref()),
+                    )?;
                 }
-                Ok(outer.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+                let tuple = PyTuple::new(
+                    py,
+                    &[
+                        PyBytes::new(py, &id_bytes).into_any(),
+                        field_dict.into_any(),
+                    ],
+                )?;
+                outer.append(tuple)?;
+            }
+        }
+        resolved(py, outer.into_any().unbind())
     }
 
     /// XINFO GROUPS command matching redis.asyncio.Redis.xinfo_groups() signature.
@@ -1443,56 +1342,45 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
+        let groups = self.store.xinfo_groups(&key).map_err(store_err_to_py)?;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let groups = store.xinfo_groups(&key).map_err(store_err_to_py)?;
-
-            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
-                let result_list = pyo3::types::PyList::empty(py);
-                for group_info in &groups {
-                    let dict = pyo3::types::PyDict::new(py);
-                    // name -> bytes
-                    if let Some(name_val) = group_info.get("name") {
-                        dict.set_item(
-                            pyo3::types::PyString::new(py, "name"),
-                            pyo3::types::PyBytes::new(py, name_val.as_bytes()),
-                        )?;
-                    }
-                    // consumers -> int
-                    if let Some(consumers_val) = group_info.get("consumers") {
-                        let count: i64 = consumers_val.parse().unwrap_or(0);
-                        dict.set_item(
-                            pyo3::types::PyString::new(py, "consumers"),
-                            count,
-                        )?;
-                    }
-                    // pending -> int
-                    if let Some(pending_val) = group_info.get("pending") {
-                        let count: i64 = pending_val.parse().unwrap_or(0);
-                        dict.set_item(
-                            pyo3::types::PyString::new(py, "pending"),
-                            count,
-                        )?;
-                    }
-                    // last-delivered-id -> bytes
-                    if let Some(id_val) = group_info.get("last-delivered-id") {
-                        dict.set_item(
-                            pyo3::types::PyString::new(py, "last-delivered-id"),
-                            pyo3::types::PyBytes::new(py, id_val.as_bytes()),
-                        )?;
-                    }
-                    result_list.append(dict)?;
-                }
-                Ok(result_list.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+        let result_list = pyo3::types::PyList::empty(py);
+        for group_info in &groups {
+            let dict = pyo3::types::PyDict::new(py);
+            // name -> bytes
+            if let Some(name_val) = group_info.get("name") {
+                dict.set_item(
+                    pyo3::types::PyString::new(py, "name"),
+                    pyo3::types::PyBytes::new(py, name_val.as_bytes()),
+                )?;
+            }
+            // consumers -> int
+            if let Some(consumers_val) = group_info.get("consumers") {
+                let count: i64 = consumers_val.parse().unwrap_or(0);
+                dict.set_item(
+                    pyo3::types::PyString::new(py, "consumers"),
+                    count,
+                )?;
+            }
+            // pending -> int
+            if let Some(pending_val) = group_info.get("pending") {
+                let count: i64 = pending_val.parse().unwrap_or(0);
+                dict.set_item(
+                    pyo3::types::PyString::new(py, "pending"),
+                    count,
+                )?;
+            }
+            // last-delivered-id -> bytes
+            if let Some(id_val) = group_info.get("last-delivered-id") {
+                dict.set_item(
+                    pyo3::types::PyString::new(py, "last-delivered-id"),
+                    pyo3::types::PyBytes::new(py, id_val.as_bytes()),
+                )?;
+            }
+            result_list.append(dict)?;
+        }
+        resolved(py, result_list.into_any().unbind())
     }
 
     /// XINFO CONSUMERS command matching redis.asyncio.Redis.xinfo_consumers() signature.
@@ -1503,52 +1391,41 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         groupname: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
+        let consumers = self.store
+            .xinfo_consumers(&key, &group)
+            .map_err(store_err_to_py)?;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let consumers = store
-                .xinfo_consumers(&key, &group)
-                .map_err(store_err_to_py)?;
-
-            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
-                let result_list = pyo3::types::PyList::empty(py);
-                for consumer_info in &consumers {
-                    let dict = pyo3::types::PyDict::new(py);
-                    // name -> bytes
-                    if let Some(name_val) = consumer_info.get("name") {
-                        dict.set_item(
-                            pyo3::types::PyString::new(py, "name"),
-                            pyo3::types::PyBytes::new(py, name_val.as_bytes()),
-                        )?;
-                    }
-                    // pending -> int
-                    if let Some(pending_val) = consumer_info.get("pending") {
-                        let count: i64 = pending_val.parse().unwrap_or(0);
-                        dict.set_item(
-                            pyo3::types::PyString::new(py, "pending"),
-                            count,
-                        )?;
-                    }
-                    // idle -> int
-                    if let Some(idle_val) = consumer_info.get("idle") {
-                        let idle: i64 = idle_val.parse().unwrap_or(0);
-                        dict.set_item(
-                            pyo3::types::PyString::new(py, "idle"),
-                            idle,
-                        )?;
-                    }
-                    result_list.append(dict)?;
-                }
-                Ok(result_list.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+        let result_list = pyo3::types::PyList::empty(py);
+        for consumer_info in &consumers {
+            let dict = pyo3::types::PyDict::new(py);
+            // name -> bytes
+            if let Some(name_val) = consumer_info.get("name") {
+                dict.set_item(
+                    pyo3::types::PyString::new(py, "name"),
+                    pyo3::types::PyBytes::new(py, name_val.as_bytes()),
+                )?;
+            }
+            // pending -> int
+            if let Some(pending_val) = consumer_info.get("pending") {
+                let count: i64 = pending_val.parse().unwrap_or(0);
+                dict.set_item(
+                    pyo3::types::PyString::new(py, "pending"),
+                    count,
+                )?;
+            }
+            // idle -> int
+            if let Some(idle_val) = consumer_info.get("idle") {
+                let idle: i64 = idle_val.parse().unwrap_or(0);
+                dict.set_item(
+                    pyo3::types::PyString::new(py, "idle"),
+                    idle,
+                )?;
+            }
+            result_list.append(dict)?;
+        }
+        resolved(py, result_list.into_any().unbind())
     }
 
     /// XPENDING RANGE command matching redis.asyncio.Redis.xpending_range() signature.
@@ -1565,7 +1442,6 @@ impl BurnerRedis {
         consumername: Option<&Bound<'py, PyAny>>,
         idle: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
         let consumer_filter = match consumername {
@@ -1597,61 +1473,51 @@ impl BurnerRedis {
             })?
         };
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let entries = store
-                .xpending_range(
-                    &key,
-                    &group,
-                    min_id,
-                    max_id,
-                    count,
-                    consumer_filter.as_ref(),
-                    idle,
-                )
-                .map_err(store_err_to_py)?;
+        let entries = self.store
+            .xpending_range(
+                &key,
+                &group,
+                min_id,
+                max_id,
+                count,
+                consumer_filter.as_ref(),
+                idle,
+            )
+            .map_err(store_err_to_py)?;
 
-            Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
-                let result_list = pyo3::types::PyList::empty(py);
-                for (entry_id, consumer_name, idle_ms, delivery_count) in &entries {
-                    let dict = pyo3::types::PyDict::new(py);
-                    // message_id -> bytes
-                    let id_str = format_stream_id(*entry_id).into_bytes();
-                    dict.set_item(
-                        pyo3::types::PyBytes::new(py, b"message_id"),
-                        pyo3::types::PyBytes::new(py, &id_str),
-                    )?;
-                    // consumer -> bytes
-                    dict.set_item(
-                        pyo3::types::PyBytes::new(py, b"consumer"),
-                        pyo3::types::PyBytes::new(py, consumer_name.as_ref()),
-                    )?;
-                    // time_since_delivered -> int (milliseconds)
-                    dict.set_item(
-                        pyo3::types::PyBytes::new(py, b"time_since_delivered"),
-                        *idle_ms as i64,
-                    )?;
-                    // times_delivered -> int
-                    dict.set_item(
-                        pyo3::types::PyBytes::new(py, b"times_delivered"),
-                        *delivery_count as i64,
-                    )?;
-                    result_list.append(dict)?;
-                }
-                Ok(result_list.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                    "failed to attach to Python interpreter",
-                )
-            })?
-        })
+        let result_list = pyo3::types::PyList::empty(py);
+        for (entry_id, consumer_name, idle_ms, delivery_count) in &entries {
+            let dict = pyo3::types::PyDict::new(py);
+            // message_id -> bytes
+            let id_str = format_stream_id(*entry_id).into_bytes();
+            dict.set_item(
+                pyo3::types::PyBytes::new(py, b"message_id"),
+                pyo3::types::PyBytes::new(py, &id_str),
+            )?;
+            // consumer -> bytes
+            dict.set_item(
+                pyo3::types::PyBytes::new(py, b"consumer"),
+                pyo3::types::PyBytes::new(py, consumer_name.as_ref()),
+            )?;
+            // time_since_delivered -> int (milliseconds)
+            dict.set_item(
+                pyo3::types::PyBytes::new(py, b"time_since_delivered"),
+                *idle_ms as i64,
+            )?;
+            // times_delivered -> int
+            dict.set_item(
+                pyo3::types::PyBytes::new(py, b"times_delivered"),
+                *delivery_count as i64,
+            )?;
+            result_list.append(dict)?;
+        }
+        resolved(py, result_list.into_any().unbind())
     }
 
-    // ── Scripting Commands ────────────────────────────────────────────
+    // -- Scripting Commands ----
 
     /// EVAL command matching redis.asyncio.Redis.eval() signature.
     /// Executes a Lua script with KEYS and ARGV arrays.
-    /// The first `numkeys` args after numkeys are KEYS, the rest are ARGV.
     #[pyo3(signature = (script, numkeys, *keys_and_args))]
     fn eval<'py>(
         &self,
@@ -1660,8 +1526,6 @@ impl BurnerRedis {
         numkeys: usize,
         keys_and_args: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-
         // Split keys_and_args: first numkeys are KEYS, rest are ARGV
         let mut keys: Vec<Bytes> = Vec::new();
         let mut args: Vec<Bytes> = Vec::new();
@@ -1674,25 +1538,18 @@ impl BurnerRedis {
             }
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = store.eval(&script, keys, args);
-            match result {
-                Ok(val) => {
-                    Python::try_attach(|py| redis_value_to_py(py, val))
-                        .ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                                "failed to attach to Python interpreter",
-                            )
-                        })?
-                }
-                Err(msg) => Err(make_response_error(msg)),
+        let result = self.store.eval(&script, keys, args);
+        match result {
+            Ok(val) => {
+                let py_val = redis_value_to_py(py, val)?;
+                resolved(py, py_val)
             }
-        })
+            Err(msg) => Err(make_response_error(msg)),
+        }
     }
 
     /// EVALSHA command matching redis.asyncio.Redis.evalsha() signature.
     /// Executes a cached Lua script by its SHA1 hash.
-    /// Returns NOSCRIPT error if the SHA is not in the cache.
     #[pyo3(signature = (sha, numkeys, *keys_and_args))]
     fn evalsha<'py>(
         &self,
@@ -1701,8 +1558,6 @@ impl BurnerRedis {
         numkeys: usize,
         keys_and_args: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-
         // Split keys_and_args: first numkeys are KEYS, rest are ARGV
         let mut keys: Vec<Bytes> = Vec::new();
         let mut args: Vec<Bytes> = Vec::new();
@@ -1715,20 +1570,14 @@ impl BurnerRedis {
             }
         }
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let result = store.evalsha(&sha, keys, args);
-            match result {
-                Ok(val) => {
-                    Python::try_attach(|py| redis_value_to_py(py, val))
-                        .ok_or_else(|| {
-                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
-                                "failed to attach to Python interpreter",
-                            )
-                        })?
-                }
-                Err(msg) => Err(make_response_error(msg)),
+        let result = self.store.evalsha(&sha, keys, args);
+        match result {
+            Ok(val) => {
+                let py_val = redis_value_to_py(py, val)?;
+                resolved(py, py_val)
             }
-        })
+            Err(msg) => Err(make_response_error(msg)),
+        }
     }
 
     /// SCRIPT LOAD command - caches a Lua script and returns its SHA1 hash.
@@ -1737,12 +1586,8 @@ impl BurnerRedis {
         py: Python<'py>,
         script: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let sha = store.script_load(&script);
-            Ok(sha)
-        })
+        let sha = self.store.script_load(&script);
+        resolved(py, sha.into_pyobject(py)?.into_any().unbind())
     }
 
     /// SCRIPT EXISTS command - checks if one or more scripts are cached by SHA1 hash.
@@ -1753,17 +1598,12 @@ impl BurnerRedis {
         py: Python<'py>,
         args: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-
         let shas: Vec<String> = args
             .iter()
             .map(|obj| obj.extract::<String>())
             .collect::<PyResult<Vec<_>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let results = store.script_exists(&shas);
-            Ok(results)
-        })
+        let results = self.store.script_exists(&shas);
+        resolved(py, results.into_pyobject(py)?.into_any().unbind())
     }
 
     // -- Pub/Sub Commands --
@@ -1772,35 +1612,28 @@ impl BurnerRedis {
     fn publish<'py>(&self, py: Python<'py>, channel: &Bound<'py, PyAny>, message: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let channel_bytes = extract_bytes(channel)?;
         let message_bytes = extract_bytes(message)?;
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let count = store.publish(
-                Bytes::from(channel_bytes),
-                Bytes::from(message_bytes),
-            );
-            Ok(count)
-        })
+        let count = self.store.publish(
+            Bytes::from(channel_bytes),
+            Bytes::from(message_bytes),
+        );
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
     /// Internal: Create a new subscriber ID. Used by Python PubSub class.
-    /// Returns the subscriber_id as an integer. The Python side manages the
-    /// broadcast receiver via a background Tokio task.
     fn _new_subscriber(&self) -> PyResult<u64> {
         let (id, _rx) = self.store.new_subscriber();
-        // Note: _rx is dropped here. The Python PubSub class will set up its own
-        // message consumption via _subscribe_listener.
         Ok(id)
     }
 
     /// Internal: Subscribe and start a background task that filters messages
     /// into a Python asyncio.Queue. Returns subscriber_id.
     /// Called once by Python PubSub on first subscribe.
+    /// NOTE: This remains async (future_into_py) because it spawns a long-running
+    /// background Tokio task that blocks on a broadcast channel.
     fn _subscribe_listener<'py>(&self, py: Python<'py>, subscriber_id: u64, queue: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let (_id, mut rx) = {
-                // Get a receiver from the broadcast channel
-                // NOTE: store.pubsub is pub(crate), set in Task 1 specifically for this access
                 let registry = store.pubsub.read();
                 (subscriber_id, registry.tx.subscribe())
             };
@@ -1810,8 +1643,6 @@ impl BurnerRedis {
                 loop {
                     match rx.recv().await {
                         Ok(msg) => {
-                            // Push message to Python asyncio.Queue
-                            // Use try_attach (PyO3 0.28.3) to acquire the GIL from a background task
                             let delivered = Python::try_attach(|py| -> Result<(), PyErr> {
                                 let dict = PyDict::new(py);
                                 dict.set_item("type", &msg.kind)?;
@@ -1826,25 +1657,18 @@ impl BurnerRedis {
                                 Ok(())
                             });
                             match delivered {
-                                Some(Ok(())) => {
-                                    // Message delivered successfully
-                                }
+                                Some(Ok(())) => {}
                                 Some(Err(e)) => {
-                                    // Python error (e.g. QueueFull) -- log and continue
                                     eprintln!("burner-redis pubsub: delivery error: {}", e);
                                 }
-                                None => {
-                                    // GIL not available -- transient, continue
-                                }
+                                None => {}
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            // Messages were lost due to slow consumer -- continue
                             eprintln!("burner-redis pubsub: subscriber lagged, {} messages dropped", n);
                             continue;
                         }
                         Err(broadcast::error::RecvError::Closed) => {
-                            // Broadcast channel closed (Store dropped) -- stop
                             break;
                         }
                     }
@@ -1856,95 +1680,71 @@ impl BurnerRedis {
     }
 
     /// SUBSCRIBE: Register channels for a subscriber.
-    /// Returns list of (channel_bytes, subscription_count) tuples.
     fn subscribe_channels<'py>(&self, py: Python<'py>, subscriber_id: u64, channels: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
-            let results = store.subscribe(subscriber_id, channel_bytes);
-            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
-                .map(|(ch, count)| (ch.to_vec(), count))
-                .collect();
-            Ok(tuples)
-        })
+        let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
+        let results = self.store.subscribe(subscriber_id, channel_bytes);
+        let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+            .map(|(ch, count)| (ch.to_vec(), count))
+            .collect();
+        resolved(py, tuples.into_pyobject(py)?.into_any().unbind())
     }
 
     /// UNSUBSCRIBE: Remove channels from a subscriber.
-    /// Returns list of (channel_bytes, remaining_subscription_count) tuples.
     fn unsubscribe_channels<'py>(&self, py: Python<'py>, subscriber_id: u64, channels: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
-            let results = store.unsubscribe(subscriber_id, channel_bytes);
-            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
-                .map(|(ch, count)| (ch.to_vec(), count))
-                .collect();
-            Ok(tuples)
-        })
+        let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
+        let results = self.store.unsubscribe(subscriber_id, channel_bytes);
+        let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+            .map(|(ch, count)| (ch.to_vec(), count))
+            .collect();
+        resolved(py, tuples.into_pyobject(py)?.into_any().unbind())
     }
 
     /// PSUBSCRIBE: Register glob patterns for a subscriber.
-    /// Returns list of (pattern_bytes, subscription_count) tuples.
     fn psubscribe_patterns<'py>(&self, py: Python<'py>, subscriber_id: u64, patterns: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let pattern_bytes: Vec<Bytes> = patterns.into_iter().map(Bytes::from).collect();
-            let results = store.psubscribe(subscriber_id, pattern_bytes);
-            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
-                .map(|(pat, count)| (pat.to_vec(), count))
-                .collect();
-            Ok(tuples)
-        })
+        let pattern_bytes: Vec<Bytes> = patterns.into_iter().map(Bytes::from).collect();
+        let results = self.store.psubscribe(subscriber_id, pattern_bytes);
+        let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+            .map(|(pat, count)| (pat.to_vec(), count))
+            .collect();
+        resolved(py, tuples.into_pyobject(py)?.into_any().unbind())
     }
 
     /// PUNSUBSCRIBE: Remove glob patterns from a subscriber.
-    /// Returns list of (pattern_bytes, remaining_subscription_count) tuples.
     fn punsubscribe_patterns<'py>(&self, py: Python<'py>, subscriber_id: u64, patterns: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let pattern_bytes: Vec<Bytes> = patterns.into_iter().map(Bytes::from).collect();
-            let results = store.punsubscribe(subscriber_id, pattern_bytes);
-            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
-                .map(|(pat, count)| (pat.to_vec(), count))
-                .collect();
-            Ok(tuples)
-        })
+        let pattern_bytes: Vec<Bytes> = patterns.into_iter().map(Bytes::from).collect();
+        let results = self.store.punsubscribe(subscriber_id, pattern_bytes);
+        let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+            .map(|(pat, count)| (pat.to_vec(), count))
+            .collect();
+        resolved(py, tuples.into_pyobject(py)?.into_any().unbind())
     }
 
     /// PUBSUB CHANNELS: Return active channels matching optional glob pattern.
     #[pyo3(signature = (pattern=None))]
     fn pubsub_channels<'py>(&self, py: Python<'py>, pattern: Option<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let pat_bytes = pattern.map(Bytes::from);
-            let channels = store.pubsub_channels(pat_bytes.as_ref());
-            let result: Vec<Vec<u8>> = channels.into_iter().map(|ch| ch.to_vec()).collect();
-            Ok(result)
-        })
+        let pat_bytes = pattern.map(Bytes::from);
+        let channels = self.store.pubsub_channels(pat_bytes.as_ref());
+        let result: Vec<Vec<u8>> = channels.into_iter().map(|ch| ch.to_vec()).collect();
+        resolved(py, result.into_pyobject(py)?.into_any().unbind())
     }
 
     /// PUBSUB NUMSUB: Return (channel, count) for requested channels.
     fn pubsub_numsub<'py>(&self, py: Python<'py>, channels: Vec<Vec<u8>>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
-            let results = store.pubsub_numsub(channel_bytes);
-            let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
-                .map(|(ch, count)| (ch.to_vec(), count))
-                .collect();
-            Ok(tuples)
-        })
+        let channel_bytes: Vec<Bytes> = channels.into_iter().map(Bytes::from).collect();
+        let results = self.store.pubsub_numsub(channel_bytes);
+        let tuples: Vec<(Vec<u8>, i64)> = results.into_iter()
+            .map(|(ch, count)| (ch.to_vec(), count))
+            .collect();
+        resolved(py, tuples.into_pyobject(py)?.into_any().unbind())
     }
 
     /// PUBSUB NUMPAT: Return total number of active pattern subscriptions.
     fn pubsub_numpat<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(store.pubsub_numpat())
-        })
+        let count = self.store.pubsub_numpat();
+        resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
-    // ── Key Enumeration & Multi-Key Commands ────────────────────────
+    // -- Key Enumeration & Multi-Key Commands ----
 
     /// KEYS command matching redis.asyncio.Redis.keys() signature.
     /// Returns list of keys matching the glob pattern.
@@ -1954,14 +1754,10 @@ impl BurnerRedis {
         py: Python<'py>,
         pattern: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let pat = Bytes::from(pattern.to_owned().into_bytes());
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let keys = store.keys(pat.as_ref());
-            let result: Vec<Vec<u8>> = keys.into_iter().map(|k| k.to_vec()).collect();
-            Ok(result)
-        })
+        let keys = self.store.keys(pat.as_ref());
+        let result: Vec<Vec<u8>> = keys.into_iter().map(|k| k.to_vec()).collect();
+        resolved(py, result.into_pyobject(py)?.into_any().unbind())
     }
 
     /// TTL command matching redis.asyncio.Redis.ttl() signature.
@@ -1971,12 +1767,9 @@ impl BurnerRedis {
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            Ok(store.ttl(&key))
-        })
+        let ttl_val = self.store.ttl(&key);
+        resolved(py, ttl_val.into_pyobject(py)?.into_any().unbind())
     }
 
     /// MGET command matching redis.asyncio.Redis.mget() signature.
@@ -1987,20 +1780,16 @@ impl BurnerRedis {
         py: Python<'py>,
         keys: &Bound<'py, PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key_list: Vec<Bytes> = keys
             .iter()
             .map(|k| extract_bytes(&k))
             .collect::<PyResult<Vec<Bytes>>>()?;
-
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let results = store.mget(&key_list);
-            let py_results: Vec<Option<Vec<u8>>> = results
-                .into_iter()
-                .map(|opt| opt.map(|b| b.to_vec()))
-                .collect();
-            Ok(py_results)
-        })
+        let results = self.store.mget(&key_list);
+        let py_results: Vec<Option<Vec<u8>>> = results
+            .into_iter()
+            .map(|opt| opt.map(|b| b.to_vec()))
+            .collect();
+        resolved(py, py_results.into_pyobject(py)?.into_any().unbind())
     }
 
     /// XPENDING summary command matching redis.asyncio.Redis.xpending() signature.
@@ -2011,16 +1800,724 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
         groupname: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let store = self.store.clone();
         let key = extract_bytes(name)?;
         let group = extract_bytes(groupname)?;
+        let (total, min_id, max_id, consumers) = self.store
+            .xpending_summary(&key, &group)
+            .map_err(store_err_to_py)?;
 
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (total, min_id, max_id, consumers) = store
-                .xpending_summary(&key, &group)
-                .map_err(store_err_to_py)?;
+        let dict = PyDict::new(py);
+        dict.set_item("pending", total)?;
+        match min_id {
+            Some(id) => dict.set_item("min", format_stream_id(id))?,
+            None => dict.set_item("min", py.None())?,
+        }
+        match max_id {
+            Some(id) => dict.set_item("max", format_stream_id(id))?,
+            None => dict.set_item("max", py.None())?,
+        }
+        let consumer_list = pyo3::types::PyList::empty(py);
+        for (cname, count) in consumers {
+            let cdict = PyDict::new(py);
+            cdict.set_item("name", PyBytes::new(py, &cname))?;
+            cdict.set_item("pending", count)?;
+            consumer_list.append(cdict)?;
+        }
+        dict.set_item("consumers", consumer_list)?;
+        resolved(py, dict.into_any().unbind())
+    }
 
-            Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+    /// Execute a batch of pipeline commands in a single Rust call.
+    /// Accepts a list of (method_name, args_tuple, kwargs_dict) tuples.
+    /// Returns a list of results (with errors as exception objects at the failed position).
+    fn execute_pipeline<'py>(&self, py: Python<'py>, commands: &Bound<'py, PyList>) -> PyResult<Bound<'py, PyAny>> {
+        let results = pyo3::types::PyList::empty(py);
+        for item in commands.iter() {
+            let tuple = item.downcast::<PyTuple>()?;
+            let method_name: String = tuple.get_item(0)?.extract()?;
+            let args = tuple.get_item(1)?.downcast::<PyTuple>()?.clone();
+            let kwargs = tuple.get_item(2)?.downcast::<PyDict>()?.clone();
+
+            let result = self.dispatch_pipeline_command(py, &method_name, &args, &kwargs);
+            match result {
+                Ok(val) => results.append(val)?,
+                Err(e) => results.append(e.value(py))?,
+            }
+        }
+        resolved(py, results.into_any().unbind())
+    }
+}
+
+impl BurnerRedis {
+    /// Dispatch a single pipeline command by name, executing the store operation
+    /// directly and returning a PyObject. This avoids ResolvedFuture wrapping overhead.
+    fn dispatch_pipeline_command<'py>(
+        &self,
+        py: Python<'py>,
+        method: &str,
+        args: &Bound<'py, PyTuple>,
+        kwargs: &Bound<'py, PyDict>,
+    ) -> PyResult<Py<PyAny>> {
+        match method {
+            "set" => {
+                let name = &args.get_item(0)?;
+                let value = &args.get_item(1)?;
+                let ex: Option<Bound<'py, PyAny>> = kwargs.get_item("ex")?.and_then(|v| if v.is_none() { None } else { Some(v) });
+                let px: Option<Bound<'py, PyAny>> = kwargs.get_item("px")?.and_then(|v| if v.is_none() { None } else { Some(v) });
+                let nx: bool = kwargs.get_item("nx")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let xx: bool = kwargs.get_item("xx")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let key = extract_bytes(name)?;
+                let val = extract_bytes(value)?;
+                let ttl = if let Some(ref px_val) = px {
+                    Some(extract_expiry(px_val, true)?)
+                } else if let Some(ref ex_val) = ex {
+                    Some(extract_expiry(ex_val, false)?)
+                } else {
+                    None
+                };
+                let success = self.store.set(key, val, ttl, nx, xx);
+                if success {
+                    Ok(pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
+                } else {
+                    Ok(py.None())
+                }
+            }
+            "get" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                match self.store.get(&key) {
+                    Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
+                    None => Ok(py.None()),
+                }
+            }
+            "delete" => {
+                let keys: Vec<Bytes> = args.iter().map(|obj| extract_bytes(&obj)).collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.delete(&keys);
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "exists" => {
+                let keys: Vec<Bytes> = args.iter().map(|obj| extract_bytes(&obj)).collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.exists(&keys);
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "hset" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let key_opt: Option<Bound<'py, PyAny>> = kwargs.get_item("key")?.and_then(|v| if v.is_none() { None } else { Some(v) });
+                let value_opt: Option<Bound<'py, PyAny>> = kwargs.get_item("value")?.and_then(|v| if v.is_none() { None } else { Some(v) });
+                let mapping: Option<Bound<'py, PyDict>> = kwargs.get_item("mapping")?.and_then(|v| if v.is_none() { None } else { v.downcast::<PyDict>().ok().map(|d| d.clone()) });
+                let mut fields: Vec<(Bytes, Bytes)> = Vec::new();
+                if let (Some(k), Some(v)) = (key_opt.as_ref(), value_opt.as_ref()) {
+                    fields.push((extract_bytes(k)?, extract_bytes(v)?));
+                }
+                if let Some(ref dict) = mapping {
+                    for (k, v) in dict.iter() {
+                        fields.push((extract_bytes(&k)?, extract_bytes(&v)?));
+                    }
+                }
+                let count = self.store.hset(name_bytes, fields).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "hget" => {
+                let name = &args.get_item(0)?;
+                let key = &args.get_item(1)?;
+                let name_bytes = extract_bytes(name)?;
+                let field_bytes = extract_bytes(key)?;
+                let result = self.store.hget(&name_bytes, &field_bytes).map_err(store_err_to_py)?;
+                match result {
+                    Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
+                    None => Ok(py.None()),
+                }
+            }
+            "hdel" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let fields: Vec<Bytes> = args.iter().skip(1).map(|obj| extract_bytes(&obj)).collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.hdel(&name_bytes, &fields).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "hvals" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let vals = self.store.hvals(&name_bytes).map_err(store_err_to_py)?;
+                let py_list: Vec<Vec<u8>> = vals.into_iter().map(|b| b.to_vec()).collect();
+                Ok(py_list.into_pyobject(py)?.into_any().unbind())
+            }
+            "hgetall" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let map = self.store.hgetall(&name_bytes).map_err(store_err_to_py)?;
+                let dict = PyDict::new(py);
+                for (k, v) in &map {
+                    dict.set_item(PyBytes::new(py, k.as_ref()), PyBytes::new(py, v.as_ref()))?;
+                }
+                Ok(dict.into_any().unbind())
+            }
+            "hexists" => {
+                let name = &args.get_item(0)?;
+                let key = &args.get_item(1)?;
+                let name_bytes = extract_bytes(name)?;
+                let field_bytes = extract_bytes(key)?;
+                let exists = self.store.hexists(&name_bytes, &field_bytes).map_err(store_err_to_py)?;
+                Ok(pyo3::types::PyBool::new(py, exists).to_owned().into_any().unbind())
+            }
+            "hincrby" => {
+                let name = &args.get_item(0)?;
+                let key = &args.get_item(1)?;
+                let name_bytes = extract_bytes(name)?;
+                let field_bytes = extract_bytes(key)?;
+                let amount: i64 = kwargs.get_item("amount")?.map(|v| v.extract()).transpose()?.unwrap_or(1);
+                let new_val = self.store.hincrby(name_bytes, field_bytes, amount).map_err(store_err_to_py)?;
+                Ok(new_val.into_pyobject(py)?.into_any().unbind())
+            }
+            "sadd" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let members: Vec<Bytes> = args.iter().skip(1).map(|obj| extract_bytes(&obj)).collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.sadd(name_bytes, members).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "smembers" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let members = self.store.smembers(&name_bytes).map_err(store_err_to_py)?;
+                let set: StdHashSet<Vec<u8>> = members.into_iter().map(|b| b.to_vec()).collect();
+                Ok(set.into_pyobject(py)?.into_any().unbind())
+            }
+            "sismember" => {
+                let name = &args.get_item(0)?;
+                let value = &args.get_item(1)?;
+                let name_bytes = extract_bytes(name)?;
+                let member_bytes = extract_bytes(value)?;
+                let is_member = self.store.sismember(&name_bytes, &member_bytes).map_err(store_err_to_py)?;
+                Ok(pyo3::types::PyBool::new(py, is_member).to_owned().into_any().unbind())
+            }
+            "srem" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let members: Vec<Bytes> = args.iter().skip(1).map(|obj| extract_bytes(&obj)).collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.srem(&name_bytes, &members).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "zadd" => {
+                let name = &args.get_item(0)?;
+                let mapping = args.get_item(1)?.downcast::<PyDict>()?.clone();
+                let name_bytes = extract_bytes(name)?;
+                let nx: bool = kwargs.get_item("nx")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let xx: bool = kwargs.get_item("xx")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let gt: bool = kwargs.get_item("gt")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let lt: bool = kwargs.get_item("lt")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let ch: bool = kwargs.get_item("ch")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let mut members: Vec<(f64, Bytes)> = Vec::new();
+                for (k, v) in mapping.iter() {
+                    let member = extract_bytes(&k)?;
+                    let score: f64 = v.extract::<f64>()?;
+                    members.push((score, member));
+                }
+                let count = self.store.zadd(name_bytes, members, nx, xx, gt, lt, ch).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "zrem" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let members: Vec<Bytes> = args.iter().skip(1).map(|obj| extract_bytes(&obj)).collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.zrem(&name_bytes, &members).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "zrange" => {
+                let name = &args.get_item(0)?;
+                let start: i64 = args.get_item(1)?.extract()?;
+                let end: i64 = args.get_item(2)?.extract()?;
+                let name_bytes = extract_bytes(name)?;
+                let withscores: bool = kwargs.get_item("withscores")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let results = self.store.zrange(&name_bytes, start, end, withscores).map_err(store_err_to_py)?;
+                if withscores {
+                    let list: Vec<(Vec<u8>, f64)> = results.into_iter().map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0))).collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                } else {
+                    let list: Vec<Vec<u8>> = results.into_iter().map(|(m, _)| m.to_vec()).collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                }
+            }
+            "zrangebyscore" => {
+                let name = &args.get_item(0)?;
+                let min = &args.get_item(1)?;
+                let max = &args.get_item(2)?;
+                let name_bytes = extract_bytes(name)?;
+                let min_f64 = parse_score_bound(min)?;
+                let max_f64 = parse_score_bound(max)?;
+                let withscores: bool = kwargs.get_item("withscores")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let results = self.store.zrangebyscore(&name_bytes, min_f64, max_f64, withscores).map_err(store_err_to_py)?;
+                if withscores {
+                    let list: Vec<(Vec<u8>, f64)> = results.into_iter().map(|(m, s)| (m.to_vec(), s.unwrap_or(0.0))).collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                } else {
+                    let list: Vec<Vec<u8>> = results.into_iter().map(|(m, _)| m.to_vec()).collect();
+                    Ok(list.into_pyobject(py)?.into_any().unbind())
+                }
+            }
+            "zrangestore" => {
+                let dest = &args.get_item(0)?;
+                let name = &args.get_item(1)?;
+                let start = &args.get_item(2)?;
+                let end = &args.get_item(3)?;
+                let dst_bytes = extract_bytes(dest)?;
+                let src_bytes = extract_bytes(name)?;
+                let min_f64 = parse_score_bound(start)?;
+                let max_f64 = parse_score_bound(end)?;
+                let count = self.store.zrangestore(dst_bytes, &src_bytes, min_f64, max_f64).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "zremrangebyscore" => {
+                let name = &args.get_item(0)?;
+                let min = &args.get_item(1)?;
+                let max = &args.get_item(2)?;
+                let name_bytes = extract_bytes(name)?;
+                let min_f64 = parse_score_bound(min)?;
+                let max_f64 = parse_score_bound(max)?;
+                let count = self.store.zremrangebyscore(&name_bytes, min_f64, max_f64).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "zcard" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let count = self.store.zcard(&name_bytes).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "zscore" => {
+                let name = &args.get_item(0)?;
+                let value = &args.get_item(1)?;
+                let name_bytes = extract_bytes(name)?;
+                let member_bytes = extract_bytes(value)?;
+                let score = self.store.zscore(&name_bytes, &member_bytes).map_err(store_err_to_py)?;
+                Ok(score.into_pyobject(py)?.into_any().unbind())
+            }
+            "zcount" => {
+                let name = &args.get_item(0)?;
+                let min = &args.get_item(1)?;
+                let max = &args.get_item(2)?;
+                let name_bytes = extract_bytes(name)?;
+                let min_f64 = parse_score_bound(min)?;
+                let max_f64 = parse_score_bound(max)?;
+                let count = self.store.zcount(&name_bytes, min_f64, max_f64).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "expire" => {
+                let name = &args.get_item(0)?;
+                let time = &args.get_item(1)?;
+                let name_bytes = extract_bytes(name)?;
+                let seconds: u64 = if let Ok(secs) = time.extract::<u64>() {
+                    secs
+                } else if let Ok(secs_f64) = time.call_method0("total_seconds")?.extract::<f64>() {
+                    secs_f64.max(0.0) as u64
+                } else {
+                    return Err(pyo3::exceptions::PyTypeError::new_err("expire time must be int (seconds) or timedelta"));
+                };
+                let result = self.store.expire(&name_bytes, seconds);
+                Ok(pyo3::types::PyBool::new(py, result).to_owned().into_any().unbind())
+            }
+            "xadd" => {
+                let name = &args.get_item(0)?;
+                let fields = args.get_item(1)?.downcast::<PyDict>()?.clone();
+                let key = extract_bytes(name)?;
+                let field_map = extract_stream_fields(&fields)?;
+                let id_str: String = kwargs.get_item("id")?.map(|v| v.extract()).transpose()?.unwrap_or_else(|| "*".to_string());
+                let id_opt: Option<StreamId> = if id_str == "*" {
+                    None
+                } else {
+                    Some(parse_stream_id(&id_str).ok_or_else(|| {
+                        pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", id_str))
+                    })?)
+                };
+                let stream_id = self.store.xadd(key, field_map, id_opt).map_err(store_err_to_py)?;
+                let result = format_stream_id(stream_id);
+                Ok(PyBytes::new(py, result.as_bytes()).into_any().unbind())
+            }
+            "xread" => {
+                let streams_dict = args.get_item(0)?.downcast::<PyDict>()?.clone();
+                let count: Option<usize> = kwargs.get_item("count")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let mut keys: Vec<Bytes> = Vec::new();
+                let mut ids: Vec<StreamId> = Vec::new();
+                for (k, v) in streams_dict.iter() {
+                    let key = extract_bytes(&k)?;
+                    let id_str: String = v.extract::<String>().or_else(|_| v.extract::<Vec<u8>>().map(|b| String::from_utf8_lossy(&b).into_owned()))?;
+                    let stream_id = if id_str == "0" || id_str == "0-0" { (0u64, 0u64) } else {
+                        parse_stream_id(&id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID: {}", id_str)))?
+                    };
+                    keys.push(key);
+                    ids.push(stream_id);
+                }
+                let results = self.store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
+                if results.is_empty() {
+                    return Ok(py.None());
+                }
+                let outer = pyo3::types::PyList::empty(py);
+                for (stream_name, entries) in &results {
+                    let entry_list = pyo3::types::PyList::empty(py);
+                    for (id, fields) in entries {
+                        let id_bytes = format_stream_id(*id).into_bytes();
+                        let field_dict = PyDict::new(py);
+                        for (fk, fv) in fields {
+                            field_dict.set_item(PyBytes::new(py, fk.as_ref()), PyBytes::new(py, fv.as_ref()))?;
+                        }
+                        let tuple = PyTuple::new(py, &[PyBytes::new(py, &id_bytes).into_any(), field_dict.into_any()])?;
+                        entry_list.append(tuple)?;
+                    }
+                    let stream_pair = pyo3::types::PyList::new(py, &[PyBytes::new(py, stream_name.as_ref()).into_any(), entry_list.into_any()])?;
+                    outer.append(stream_pair)?;
+                }
+                Ok(outer.into_any().unbind())
+            }
+            "xlen" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let len = self.store.xlen(&key).map_err(store_err_to_py)?;
+                Ok((len as i64).into_pyobject(py)?.into_any().unbind())
+            }
+            "xtrim" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let maxlen: Option<usize> = kwargs.get_item("maxlen")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let minid: Option<String> = kwargs.get_item("minid")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let minid_parsed: Option<StreamId> = match minid {
+                    Some(ref s) => Some(parse_stream_id(s).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID for minid: {}", s)))?),
+                    None => None,
+                };
+                let trimmed = self.store.xtrim(&key, maxlen, minid_parsed).map_err(store_err_to_py)?;
+                Ok((trimmed as i64).into_pyobject(py)?.into_any().unbind())
+            }
+            "xdel" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let mut stream_ids: Vec<StreamId> = Vec::new();
+                for id_obj in args.iter().skip(1) {
+                    let id_str: String = id_obj.extract::<String>().or_else(|_| id_obj.extract::<Vec<u8>>().map(|b| String::from_utf8_lossy(&b).into_owned()))?;
+                    let stream_id = parse_stream_id(&id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", id_str)))?;
+                    stream_ids.push(stream_id);
+                }
+                let count = self.store.xdel(&key, &stream_ids).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "xrange" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let min_str: String = kwargs.get_item("min")?.map(|v| v.extract()).transpose()?.unwrap_or_else(|| "-".to_string());
+                let max_str: String = kwargs.get_item("max")?.map(|v| v.extract()).transpose()?.unwrap_or_else(|| "+".to_string());
+                let count: Option<usize> = kwargs.get_item("count")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let min_id: StreamId = if min_str == "-" { (0, 0) } else {
+                    parse_stream_id(&min_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", min_str)))?
+                };
+                let max_id: StreamId = if max_str == "+" { (u64::MAX, u64::MAX) } else {
+                    parse_stream_id(&max_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", max_str)))?
+                };
+                let entries = self.store.xrange(&key, min_id, max_id, count).map_err(store_err_to_py)?;
+                let result_list = pyo3::types::PyList::empty(py);
+                for (id, fields) in &entries {
+                    let id_bytes = format_stream_id(*id).into_bytes();
+                    let field_dict = PyDict::new(py);
+                    for (fk, fv) in fields {
+                        field_dict.set_item(PyBytes::new(py, fk.as_ref()), PyBytes::new(py, fv.as_ref()))?;
+                    }
+                    let tuple = PyTuple::new(py, &[PyBytes::new(py, &id_bytes).into_any(), field_dict.into_any()])?;
+                    result_list.append(tuple)?;
+                }
+                Ok(result_list.into_any().unbind())
+            }
+            "xgroup_create" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let id_str: String = kwargs.get_item("id")?.map(|v| v.extract()).transpose()?.unwrap_or_else(|| "$".to_string());
+                let mkstream: bool = kwargs.get_item("mkstream")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let stream_id: StreamId = if id_str == "$" {
+                    (u64::MAX, u64::MAX)
+                } else if id_str == "0" || id_str == "0-0" {
+                    (0, 0)
+                } else {
+                    parse_stream_id(&id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", id_str)))?
+                };
+                self.store.xgroup_create(&key, group, stream_id, mkstream).map_err(store_err_to_py)?;
+                Ok(pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
+            }
+            "xgroup_destroy" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let destroyed = self.store.xgroup_destroy(&key, &group).map_err(store_err_to_py)?;
+                let val = if destroyed { 1i64 } else { 0i64 };
+                Ok(val.into_pyobject(py)?.into_any().unbind())
+            }
+            "xreadgroup" => {
+                let groupname = &args.get_item(0)?;
+                let consumername = &args.get_item(1)?;
+                let streams_dict = args.get_item(2)?.downcast::<PyDict>()?.clone();
+                let group = extract_bytes(groupname)?;
+                let consumer = extract_bytes(consumername)?;
+                let count: Option<usize> = kwargs.get_item("count")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let mut keys: Vec<Bytes> = Vec::new();
+                let mut id_strs: Vec<String> = Vec::new();
+                for (k, v) in streams_dict.iter() {
+                    let key = extract_bytes(&k)?;
+                    let id_str: String = v.extract::<String>().or_else(|_| v.extract::<Vec<u8>>().map(|b| String::from_utf8_lossy(&b).into_owned()))?;
+                    keys.push(key);
+                    id_strs.push(id_str);
+                }
+                let results = self.store.xreadgroup(&group, &consumer, &keys, &id_strs, count).map_err(store_err_to_py)?;
+                format_xreadgroup_result_with_py(py, results)
+            }
+            "xack" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let mut stream_ids: Vec<StreamId> = Vec::new();
+                for id_obj in args.iter().skip(2) {
+                    let id_str: String = id_obj.extract::<String>().or_else(|_| id_obj.extract::<Vec<u8>>().map(|b| String::from_utf8_lossy(&b).into_owned()))?;
+                    let stream_id = parse_stream_id(&id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", id_str)))?;
+                    stream_ids.push(stream_id);
+                }
+                let count = self.store.xack(&key, &group, &stream_ids).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "xautoclaim" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let consumername = &args.get_item(2)?;
+                let min_idle_time: u64 = args.get_item(3)?.extract()?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let consumer_bytes = extract_bytes(consumername)?;
+                let start_id_str: String = kwargs.get_item("start_id")?.map(|v| v.extract()).transpose()?.unwrap_or_else(|| "0-0".to_string());
+                let count: Option<usize> = kwargs.get_item("count")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let start: StreamId = if start_id_str == "0" || start_id_str == "0-0" { (0, 0) } else {
+                    parse_stream_id(&start_id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", start_id_str)))?
+                };
+                let (next_id, claimed, deleted) = self.store.xautoclaim(&key, &group, consumer_bytes, min_idle_time, start, count).map_err(store_err_to_py)?;
+                let next_id_bytes = pyo3::types::PyBytes::new(py, format_stream_id(next_id).as_bytes());
+                let claimed_list = pyo3::types::PyList::empty(py);
+                for (id, fields) in &claimed {
+                    let id_bytes = pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
+                    let field_dict = PyDict::new(py);
+                    for (fk, fv) in fields {
+                        field_dict.set_item(PyBytes::new(py, fk.as_ref()), PyBytes::new(py, fv.as_ref()))?;
+                    }
+                    let tuple = PyTuple::new(py, &[id_bytes.into_any(), field_dict.into_any()])?;
+                    claimed_list.append(tuple)?;
+                }
+                let deleted_list = pyo3::types::PyList::empty(py);
+                for id in &deleted {
+                    let id_bytes = pyo3::types::PyBytes::new(py, format_stream_id(*id).as_bytes());
+                    deleted_list.append(id_bytes)?;
+                }
+                let result = PyTuple::new(py, &[next_id_bytes.into_any(), claimed_list.into_any(), deleted_list.into_any()])?;
+                Ok(result.into_any().unbind())
+            }
+            "xclaim" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let consumername = &args.get_item(2)?;
+                let min_idle_time: u64 = args.get_item(3)?.extract()?;
+                let message_ids = &args.get_item(4)?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let consumer = extract_bytes(consumername)?;
+                let idle: Option<u64> = kwargs.get_item("idle")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let time: Option<u64> = kwargs.get_item("time")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let retrycount: Option<u64> = kwargs.get_item("retrycount")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let force: bool = kwargs.get_item("force")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let justid: bool = kwargs.get_item("justid")?.map(|v| v.extract()).transpose()?.unwrap_or(false);
+                let ids_list: Vec<Py<PyAny>> = message_ids.extract()?;
+                let mut ids: Vec<StreamId> = Vec::new();
+                for id_obj in &ids_list {
+                    let id_str: String = id_obj.bind(py).extract::<String>().or_else(|_| id_obj.bind(py).extract::<Vec<u8>>().map(|b| String::from_utf8_lossy(&b).into_owned()))?;
+                    ids.push(parse_stream_id(&id_str).ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid stream ID: {}", id_str)))?);
+                }
+                let results = self.store.xclaim(&key, &group, consumer, min_idle_time, &ids, idle, time, retrycount, force, justid).map_err(store_err_to_py)?;
+                let outer = pyo3::types::PyList::empty(py);
+                for (id, fields_opt) in &results {
+                    if justid {
+                        let id_bytes = format_stream_id(*id).into_bytes();
+                        outer.append(PyBytes::new(py, &id_bytes))?;
+                    } else if let Some(fields) = fields_opt {
+                        let id_bytes = format_stream_id(*id).into_bytes();
+                        let field_dict = PyDict::new(py);
+                        for (fk, fv) in fields {
+                            field_dict.set_item(PyBytes::new(py, fk.as_ref()), PyBytes::new(py, fv.as_ref()))?;
+                        }
+                        let tuple = PyTuple::new(py, &[PyBytes::new(py, &id_bytes).into_any(), field_dict.into_any()])?;
+                        outer.append(tuple)?;
+                    }
+                }
+                Ok(outer.into_any().unbind())
+            }
+            "xinfo_groups" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let groups = self.store.xinfo_groups(&key).map_err(store_err_to_py)?;
+                let result_list = pyo3::types::PyList::empty(py);
+                for group_info in &groups {
+                    let dict = PyDict::new(py);
+                    if let Some(name_val) = group_info.get("name") {
+                        dict.set_item(pyo3::types::PyString::new(py, "name"), PyBytes::new(py, name_val.as_bytes()))?;
+                    }
+                    if let Some(consumers_val) = group_info.get("consumers") {
+                        let count: i64 = consumers_val.parse().unwrap_or(0);
+                        dict.set_item(pyo3::types::PyString::new(py, "consumers"), count)?;
+                    }
+                    if let Some(pending_val) = group_info.get("pending") {
+                        let count: i64 = pending_val.parse().unwrap_or(0);
+                        dict.set_item(pyo3::types::PyString::new(py, "pending"), count)?;
+                    }
+                    if let Some(id_val) = group_info.get("last-delivered-id") {
+                        dict.set_item(pyo3::types::PyString::new(py, "last-delivered-id"), PyBytes::new(py, id_val.as_bytes()))?;
+                    }
+                    result_list.append(dict)?;
+                }
+                Ok(result_list.into_any().unbind())
+            }
+            "xinfo_consumers" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let consumers = self.store.xinfo_consumers(&key, &group).map_err(store_err_to_py)?;
+                let result_list = pyo3::types::PyList::empty(py);
+                for consumer_info in &consumers {
+                    let dict = PyDict::new(py);
+                    if let Some(name_val) = consumer_info.get("name") {
+                        dict.set_item(pyo3::types::PyString::new(py, "name"), PyBytes::new(py, name_val.as_bytes()))?;
+                    }
+                    if let Some(pending_val) = consumer_info.get("pending") {
+                        let count: i64 = pending_val.parse().unwrap_or(0);
+                        dict.set_item(pyo3::types::PyString::new(py, "pending"), count)?;
+                    }
+                    if let Some(idle_val) = consumer_info.get("idle") {
+                        let idle: i64 = idle_val.parse().unwrap_or(0);
+                        dict.set_item(pyo3::types::PyString::new(py, "idle"), idle)?;
+                    }
+                    result_list.append(dict)?;
+                }
+                Ok(result_list.into_any().unbind())
+            }
+            "xpending_range" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let min_str: String = args.get_item(2)?.extract()?;
+                let max_str: String = args.get_item(3)?.extract()?;
+                let count: usize = args.get_item(4)?.extract()?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let consumer_filter: Option<Bytes> = kwargs.get_item("consumername")?.and_then(|v| if v.is_none() { None } else { extract_bytes(&v).ok() });
+                let idle: Option<u64> = kwargs.get_item("idle")?.and_then(|v| if v.is_none() { None } else { v.extract().ok() });
+                let min_id: StreamId = if min_str == "-" { (0, 0) } else {
+                    parse_stream_id(&min_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", min_str)))?
+                };
+                let max_id: StreamId = if max_str == "+" { (u64::MAX, u64::MAX) } else {
+                    parse_stream_id(&max_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", max_str)))?
+                };
+                let entries = self.store.xpending_range(&key, &group, min_id, max_id, count, consumer_filter.as_ref(), idle).map_err(store_err_to_py)?;
+                let result_list = pyo3::types::PyList::empty(py);
+                for (entry_id, consumer_name, idle_ms, delivery_count) in &entries {
+                    let dict = PyDict::new(py);
+                    let id_str = format_stream_id(*entry_id).into_bytes();
+                    dict.set_item(PyBytes::new(py, b"message_id"), PyBytes::new(py, &id_str))?;
+                    dict.set_item(PyBytes::new(py, b"consumer"), PyBytes::new(py, consumer_name.as_ref()))?;
+                    dict.set_item(PyBytes::new(py, b"time_since_delivered"), *idle_ms as i64)?;
+                    dict.set_item(PyBytes::new(py, b"times_delivered"), *delivery_count as i64)?;
+                    result_list.append(dict)?;
+                }
+                Ok(result_list.into_any().unbind())
+            }
+            "eval" => {
+                let script: String = args.get_item(0)?.extract()?;
+                let numkeys: usize = args.get_item(1)?.extract()?;
+                let mut keys: Vec<Bytes> = Vec::new();
+                let mut eval_args: Vec<Bytes> = Vec::new();
+                for (i, obj) in args.iter().skip(2).enumerate() {
+                    let b = extract_bytes(&obj)?;
+                    if i < numkeys { keys.push(b); } else { eval_args.push(b); }
+                }
+                let result = self.store.eval(&script, keys, eval_args);
+                match result {
+                    Ok(val) => redis_value_to_py(py, val),
+                    Err(msg) => Err(make_response_error(msg)),
+                }
+            }
+            "evalsha" => {
+                let sha: String = args.get_item(0)?.extract()?;
+                let numkeys: usize = args.get_item(1)?.extract()?;
+                let mut keys: Vec<Bytes> = Vec::new();
+                let mut eval_args: Vec<Bytes> = Vec::new();
+                for (i, obj) in args.iter().skip(2).enumerate() {
+                    let b = extract_bytes(&obj)?;
+                    if i < numkeys { keys.push(b); } else { eval_args.push(b); }
+                }
+                let result = self.store.evalsha(&sha, keys, eval_args);
+                match result {
+                    Ok(val) => redis_value_to_py(py, val),
+                    Err(msg) => Err(make_response_error(msg)),
+                }
+            }
+            "script_load" => {
+                let script: String = args.get_item(0)?.extract()?;
+                let sha = self.store.script_load(&script);
+                Ok(sha.into_pyobject(py)?.into_any().unbind())
+            }
+            "script_exists" => {
+                let shas: Vec<String> = args.iter().map(|obj| obj.extract::<String>()).collect::<PyResult<Vec<_>>>()?;
+                let results = self.store.script_exists(&shas);
+                Ok(results.into_pyobject(py)?.into_any().unbind())
+            }
+            "publish" => {
+                let channel = &args.get_item(0)?;
+                let message = &args.get_item(1)?;
+                let channel_bytes = extract_bytes(channel)?;
+                let message_bytes = extract_bytes(message)?;
+                let count = self.store.publish(Bytes::from(channel_bytes), Bytes::from(message_bytes));
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "keys" => {
+                let pattern: String = args.get_item(0)?.extract()?;
+                let pat = Bytes::from(pattern.into_bytes());
+                let keys = self.store.keys(pat.as_ref());
+                let result: Vec<Vec<u8>> = keys.into_iter().map(|k| k.to_vec()).collect();
+                Ok(result.into_pyobject(py)?.into_any().unbind())
+            }
+            "ttl" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let ttl_val = self.store.ttl(&key);
+                Ok(ttl_val.into_pyobject(py)?.into_any().unbind())
+            }
+            "setex" => {
+                // setex(name, time, value) -> set(name, value, ex=time)
+                let name = &args.get_item(0)?;
+                let time = &args.get_item(1)?;
+                let value = &args.get_item(2)?;
+                let key = extract_bytes(name)?;
+                let val = extract_bytes(value)?;
+                let ttl = Some(extract_expiry(time, false)?);
+                let success = self.store.set(key, val, ttl, false, false);
+                if success {
+                    Ok(pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
+                } else {
+                    Ok(py.None())
+                }
+            }
+            "mget" => {
+                let key_list: Vec<Bytes> = args.iter().map(|k| extract_bytes(&k)).collect::<PyResult<Vec<Bytes>>>()?;
+                let results = self.store.mget(&key_list);
+                let py_results: Vec<Option<Vec<u8>>> = results.into_iter().map(|opt| opt.map(|b| b.to_vec())).collect();
+                Ok(py_results.into_pyobject(py)?.into_any().unbind())
+            }
+            "xpending" => {
+                let name = &args.get_item(0)?;
+                let groupname = &args.get_item(1)?;
+                let key = extract_bytes(name)?;
+                let group = extract_bytes(groupname)?;
+                let (total, min_id, max_id, consumers) = self.store.xpending_summary(&key, &group).map_err(store_err_to_py)?;
                 let dict = PyDict::new(py);
                 dict.set_item("pending", total)?;
                 match min_id {
@@ -2040,24 +2537,23 @@ impl BurnerRedis {
                 }
                 dict.set_item("consumers", consumer_list)?;
                 Ok(dict.into_any().unbind())
-            })
-            .ok_or_else(|| {
-                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("failed to attach to Python interpreter")
-            })?
-        })
+            }
+            _ => {
+                Err(pyo3::exceptions::PyException::new_err(format!("Unknown pipeline command: {}", method)))
+            }
+        }
     }
 }
 
 #[pymodule]
 fn _burner_redis(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Initialize Tokio multi-thread runtime for future_into_py compatibility.
-    // future_into_py spawns tasks on the Tokio runtime; a current-thread runtime
-    // has no background thread to drive spawned futures, causing deadlocks.
-    // The GIL is released before spawning, so multi-thread is safe here.
+    // Still needed for blocking xreadgroup and _subscribe_listener.
     let mut builder = tokio::runtime::Builder::new_multi_thread();
     builder.enable_all();
     pyo3_async_runtimes::tokio::init(builder);
 
     m.add_class::<BurnerRedis>()?;
+    m.add_class::<ResolvedFuture>()?;
     Ok(())
 }
