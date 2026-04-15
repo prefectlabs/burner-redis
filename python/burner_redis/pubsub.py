@@ -190,10 +190,19 @@ class PubSub:
                     except asyncio.QueueEmpty:
                         return None
                 else:
-                    # Wait with timeout
-                    try:
-                        raw = await asyncio.wait_for(self._queue.get(), timeout=timeout)
-                    except asyncio.TimeoutError:
+                    # Wait with timeout -- use asyncio.wait instead of
+                    # wait_for to avoid cpython#86296 where external
+                    # task.cancel() can be lost on Python < 3.12.
+                    get_task = asyncio.ensure_future(self._queue.get())
+                    done, _ = await asyncio.wait({get_task}, timeout=timeout)
+                    if done:
+                        raw = get_task.result()
+                    else:
+                        get_task.cancel()
+                        try:
+                            await get_task
+                        except asyncio.CancelledError:
+                            pass
                         return None
             except Exception:
                 return None
