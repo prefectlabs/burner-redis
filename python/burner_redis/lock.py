@@ -22,11 +22,21 @@ except (ImportError, AttributeError):
     pass
 
 
+RELEASE_SCRIPT = """
+if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+else
+    return 0
+end
+"""
+
+
 class Lock:
     """Distributed lock with token-based ownership.
 
     Created via client.lock(name, ...). Uses SET NX PX for atomic acquisition
-    and token verification for safe release.
+    and token verification for safe release. Release uses a Lua script for
+    atomic check-and-delete to prevent TOCTOU race conditions.
 
     Args:
         client: BurnerRedis instance
@@ -90,22 +100,20 @@ class Lock:
             await asyncio.sleep(self.sleep)
 
     async def release(self):
-        """Release the lock.
+        """Release the lock atomically using a Lua script.
 
-        Verifies token ownership before deleting. Raises LockError if
-        the lock is not owned by this instance (token mismatch or expired).
+        Uses EVAL with a Lua script to atomically check token ownership
+        and delete the key, preventing TOCTOU race conditions where the
+        lock could expire and be re-acquired between GET and DELETE.
+
+        Raises LockError if the lock is not owned by this instance.
         """
         if self.token is None:
             raise LockError("Cannot release an unlocked lock")
 
-        stored = await self._client.get(self.name)
-        if stored is None:
-            raise LockError("Cannot release an unlocked lock")
-
-        if stored != self.token.encode():
+        result = await self._client.eval(RELEASE_SCRIPT, 1, self.name, self.token)
+        if result != 1:
             raise LockError("Cannot release a lock that's no longer owned")
-
-        await self._client.delete(self.name)
         self.token = None
 
     async def __aenter__(self):
