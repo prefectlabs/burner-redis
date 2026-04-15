@@ -33,10 +33,18 @@ impl ResolvedFuture {
         slf
     }
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match self.result.take() {
-            Some(val) => Err(pyo3::exceptions::PyStopIteration::new_err(val)),
-            None => Err(pyo3::exceptions::PyStopIteration::new_err(py.None())),
-        }
+        let val = match self.result.take() {
+            Some(v) => v,
+            None => py.None(),
+        };
+        // Wrap in a single-element tuple to prevent Python from unpacking
+        // tuple values as StopIteration constructor arguments.
+        // StopIteration((val,)).value == (val,) but we want .value == val,
+        // so we construct StopIteration and set .value directly.
+        let exc = pyo3::exceptions::PyStopIteration::new_err(());
+        let err_val = exc.value(py);
+        err_val.setattr("value", val.bind(py))?;
+        Err(exc)
     }
     fn __iter__(slf: Py<Self>) -> Py<Self> {
         slf
