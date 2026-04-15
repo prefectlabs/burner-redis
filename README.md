@@ -75,12 +75,14 @@ db = BurnerRedis(persistence_path="burner-redis.dat")
 
 ## redis-py compatibility
 
-burner-redis aims to be a drop-in replacement for `redis.asyncio.Redis`. Exceptions subclass `redis.exceptions.ResponseError` and `redis.exceptions.NoScriptError` when the `redis` package is installed, so existing error handling works unchanged.
+burner-redis implements a subset of the `redis.asyncio.Redis` interface — enough to back [docket](https://github.com/chrisguidry/docket) and common Prefect server workflows, but not the full redis-py API. Commands not yet implemented will raise `NotImplementedError`.
+
+When the `redis` package is installed, exceptions subclass `redis.exceptions.ResponseError` and `redis.exceptions.NoScriptError` so existing error handling works unchanged.
 
 ## Development
 
 ```bash
-# Prerequisites: Rust 1.85+, Python 3.9+, uv
+# Prerequisites: Rust 1.85+, Python 3.10+, uv
 
 # Development build
 uv run maturin develop
