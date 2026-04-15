@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "burner-redis"
-version = "0.1.0"
 requires-python = ">=3.9"
 description = "An embedded, in-process Redis-compatible database"
 license = {text = "MIT"}
+dynamic = ["version"]
 readme = "README.md"
 classifiers = [
     "Programming Language :: Rust",
