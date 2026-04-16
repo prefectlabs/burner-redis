@@ -901,6 +901,138 @@ async def test_xpending_range_idle_filter(r):
     assert len(result2) == 1
 
 
+# --- XREAD Blocking ---
+
+
+async def test_xread_block_returns_new_entries(r):
+    """XREAD(block=N) waits for new entries added after the call."""
+    last_id = await r.xadd("mystream", {"f": "v1"})
+
+    async def add_later():
+        await asyncio.sleep(0.05)
+        await r.xadd("mystream", {"f": "v2"})
+
+    task = asyncio.create_task(add_later())
+    start = time.monotonic()
+    result = await r.xread({"mystream": last_id.decode()}, count=10, block=2000)
+    elapsed = time.monotonic() - start
+    await task
+
+    assert elapsed < 1.0, f"xread took {elapsed:.3f}s (expected < 1s)"
+    assert result is not None
+    stream_name, entries = result[0]
+    assert stream_name == b"mystream"
+    assert entries[0][1][b"f"] == b"v2"
+
+
+async def test_xread_block_timeout_returns_empty(r):
+    """XREAD(block=N) returns None after timeout when no new data arrives."""
+    last_id = await r.xadd("mystream", {"f": "v1"})
+
+    start = time.monotonic()
+    result = await r.xread({"mystream": last_id.decode()}, count=10, block=50)
+    elapsed = time.monotonic() - start
+
+    assert result is None
+    assert elapsed >= 0.03
+
+
+async def test_xread_block_none_is_non_blocking(r):
+    """XREAD with block=None (default) is non-blocking -- fast-path preserved."""
+    last_id = await r.xadd("mystream", {"f": "v1"})
+
+    start = time.monotonic()
+    result = await r.xread({"mystream": last_id.decode()}, count=10)
+    elapsed = time.monotonic() - start
+
+    assert result is None
+    assert elapsed < 0.05
+
+
+async def test_xread_block_yields_to_event_loop(r):
+    """XREAD(block=N) must cooperate with the asyncio event loop."""
+    last_id = await r.xadd("mystream", {"f": "v1"})
+
+    counter = {"n": 0}
+
+    async def tick():
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+            counter["n"] += 1
+
+    async def xadd_after_delay():
+        await asyncio.sleep(0.05)
+        await r.xadd("mystream", {"f": "v2"})
+
+    tick_task = asyncio.create_task(tick())
+    xadd_task = asyncio.create_task(xadd_after_delay())
+
+    start = time.monotonic()
+    result = await r.xread({"mystream": last_id.decode()}, count=10, block=5000)
+    elapsed = time.monotonic() - start
+
+    await tick_task
+    await xadd_task
+
+    assert elapsed < 1.0, f"xread took {elapsed:.3f}s (expected < 1s)"
+    assert counter["n"] >= 5, (
+        f"tick counter advanced only {counter['n']} times during block; "
+        "asyncio event loop is being starved"
+    )
+    assert result is not None
+    stream_name, entries = result[0]
+    assert entries[0][1][b"f"] == b"v2"
+
+
+async def test_xread_block_zero_blocks_until_data(r):
+    """XREAD(block=0) blocks indefinitely until new data arrives."""
+    last_id = await r.xadd("mystream", {"f": "v1"})
+
+    async def add_later():
+        await asyncio.sleep(0.1)
+        await r.xadd("mystream", {"f": "v2"})
+
+    task = asyncio.create_task(add_later())
+    # Wrap with wait_for to avoid the test hanging if block=0 is broken.
+    result = await asyncio.wait_for(
+        r.xread({"mystream": last_id.decode()}, count=10, block=0),
+        timeout=2.0,
+    )
+    await task
+
+    assert result is not None
+    stream_name, entries = result[0]
+    assert entries[0][1][b"f"] == b"v2"
+
+
+async def test_xread_block_multiple_streams(r):
+    """XREAD(block=N) wakes up when any of the watched streams gets new data."""
+    id_s1 = await r.xadd("s1", {"f": "v1"})
+    id_s2 = await r.xadd("s2", {"f": "v1"})
+
+    async def add_later():
+        await asyncio.sleep(0.05)
+        await r.xadd("s2", {"f": "v2"})
+
+    task = asyncio.create_task(add_later())
+    start = time.monotonic()
+    result = await r.xread(
+        {"s1": id_s1.decode(), "s2": id_s2.decode()},
+        count=10,
+        block=2000,
+    )
+    elapsed = time.monotonic() - start
+    await task
+
+    assert elapsed < 1.0
+    assert result is not None
+    # Exactly s2 should have the new entry
+    stream_name, entries = result[0]
+    assert stream_name == b"s2"
+    assert entries[0][1][b"f"] == b"v2"
+
+
 # --- XREADGROUP Blocking ---
 
 
