@@ -3,6 +3,7 @@
 Covers requirements: PIPE-01, PIPE-02, PIPE-03.
 """
 import pytest
+import redis.exceptions
 from burner_redis import BurnerRedis
 from burner_redis.pipeline import Pipeline
 
@@ -210,6 +211,50 @@ async def test_pipeline_wrongtype_error(r):
     assert isinstance(results[1], Exception)  # WRONGTYPE returned as exception object
     assert "WRONGTYPE" in str(results[1])
     assert results[2] == b"good_value"  # get after error still executes
+
+
+async def test_pipeline_raises_on_error_by_default(r):
+    """Pipeline.execute() with no args raises the first Exception in results (redis-py default)."""
+    pipe = r.pipeline()
+    pipe.xlen("nonexistent")
+    pipe.xpending_range("nonexistent", "nonexistent-group", "-", "+", count=10)
+    with pytest.raises(redis.exceptions.ResponseError, match="NOGROUP"):
+        await pipe.execute()
+
+
+async def test_pipeline_returns_errors_when_raise_on_error_false(r):
+    """Pipeline.execute(raise_on_error=False) returns Exception objects inline at the failed command's index."""
+    pipe = r.pipeline()
+    pipe.xlen("nonexistent")
+    pipe.xpending_range("nonexistent", "nonexistent-group", "-", "+", count=10)
+    results = await pipe.execute(raise_on_error=False)
+    assert results[0] == 0  # xlen on nonexistent stream returns 0
+    assert isinstance(results[1], redis.exceptions.ResponseError)
+    assert "NOGROUP" in str(results[1])
+
+
+async def test_pipeline_raises_on_error_true_explicit(r):
+    """Pipeline.execute(raise_on_error=True) behaves identically to the default."""
+    pipe = r.pipeline()
+    pipe.xlen("nonexistent")
+    pipe.xpending_range("nonexistent", "nonexistent-group", "-", "+", count=10)
+    with pytest.raises(redis.exceptions.ResponseError, match="NOGROUP"):
+        await pipe.execute(raise_on_error=True)
+
+
+async def test_pipeline_success_unaffected_by_raise_on_error(r):
+    """Successful pipelines return the full results list regardless of raise_on_error value."""
+    pipe1 = r.pipeline()
+    pipe1.set("k1", "v1")
+    pipe1.get("k1")
+    results_default = await pipe1.execute()
+    assert results_default == [True, b"v1"]
+
+    pipe2 = r.pipeline()
+    pipe2.set("k1", "v1")
+    pipe2.get("k1")
+    results_false = await pipe2.execute(raise_on_error=False)
+    assert results_false == [True, b"v1"]
 
 
 # ---- Pipeline Stubs for Phase 12 Commands (D-09) ----
