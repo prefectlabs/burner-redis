@@ -1,0 +1,50 @@
+name: pydocket compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  pydocket-compat:
+    runs-on: ubuntu-latest
+    env:
+      REDIS_VERSION: memory
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Create virtualenv
+        run: uv venv .venv
+
+      - name: Build burner-redis from source
+        run: |
+          source .venv/bin/activate
+          maturin develop --release
+
+      - name: Checkout pydocket
+        uses: actions/checkout@v4
+        with:
+          repository: chrisguidry/docket
+          ref: replace-fakeredis-with-burner-redis
+          path: pydocket
+
+      - name: Install pydocket dependencies
+        run: uv pip install --python .venv/bin/python -e "./pydocket[metrics]" --group dev
+
+      - name: Run pydocket tests
+        run: |
+          source .venv/bin/activate
+          cd pydocket
+          pytest tests/ -x --timeout=30 --numprocesses=logical --maxprocesses=4 -o "addopts="
