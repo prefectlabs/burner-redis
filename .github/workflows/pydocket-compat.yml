@@ -54,4 +54,4 @@ jobs:
         run: |
           source .venv/bin/activate
           cd pydocket
-          pytest tests/ -x --timeout=30 --numprocesses=logical --maxprocesses=4 -o "addopts="
+          pytest tests/ -x --timeout=30 --numprocesses=logical --maxprocesses=4 --import-mode=importlib -o "addopts="
