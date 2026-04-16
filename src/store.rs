@@ -1276,6 +1276,26 @@ impl Store {
         }
     }
 
+    /// Returns the current last-generated-id of a stream, or None if the key
+    /// doesn't exist, has expired, or holds a non-stream value. Used by the
+    /// XREAD Python binding to resolve "$" at call time.
+    pub fn stream_last_id(&self, key: &Bytes) -> Option<StreamId> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return None;
+            }
+        }
+
+        match data.get(key)?.data {
+            ValueData::Stream(ref s) => Some(s.last_id),
+            _ => None,
+        }
+    }
+
     /// XTRIM: Trims a stream by maxlen or minid strategy.
     /// Returns the number of entries removed.
     /// Returns 0 if the key doesn't exist.

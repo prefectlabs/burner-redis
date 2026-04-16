@@ -183,6 +183,63 @@ fn format_xreadgroup_result(
     })?
 }
 
+/// Build the nested Python list structure for an XREAD result (GIL-holding version).
+/// Shape: [[stream_name_bytes, [(id_bytes, {field_bytes: value_bytes}), ...]], ...]
+fn build_xread_pylist<'py>(
+    py: Python<'py>,
+    results: &[(Bytes, Vec<(commands::streams::StreamId, std::collections::HashMap<Bytes, Bytes>)>)],
+) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+    let outer = pyo3::types::PyList::empty(py);
+    for (stream_name, entries) in results {
+        let entry_list = pyo3::types::PyList::empty(py);
+        for (id, fields) in entries {
+            let id_bytes = format_stream_id(*id).into_bytes();
+            let field_dict = pyo3::types::PyDict::new(py);
+            for (fk, fv) in fields {
+                field_dict.set_item(
+                    pyo3::types::PyBytes::new(py, fk.as_ref()),
+                    pyo3::types::PyBytes::new(py, fv.as_ref()),
+                )?;
+            }
+            let tuple = pyo3::types::PyTuple::new(
+                py,
+                &[
+                    pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
+                    field_dict.into_any(),
+                ],
+            )?;
+            entry_list.append(tuple)?;
+        }
+        let stream_pair = pyo3::types::PyList::new(
+            py,
+            &[
+                pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
+                entry_list.into_any(),
+            ],
+        )?;
+        outer.append(stream_pair)?;
+    }
+    Ok(outer)
+}
+
+/// Format XREAD results for the async blocking path. Empty results -> None
+/// (matching the sync xread fast path), non-empty -> the nested list shape.
+fn format_xread_result(
+    results: Vec<(Bytes, Vec<(commands::streams::StreamId, std::collections::HashMap<Bytes, Bytes>)>)>,
+) -> PyResult<pyo3::Py<pyo3::PyAny>> {
+    Python::try_attach(|py| -> PyResult<pyo3::Py<pyo3::PyAny>> {
+        if results.is_empty() {
+            return Ok(py.None());
+        }
+        Ok(build_xread_pylist(py, &results)?.into_any().unbind())
+    })
+    .ok_or_else(|| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+            "failed to attach to Python interpreter",
+        )
+    })?
+}
+
 #[pyclass]
 pub struct BurnerRedis {
     store: Arc<Store>,
@@ -813,16 +870,19 @@ impl BurnerRedis {
     /// XREAD command matching redis.asyncio.Redis.xread() signature.
     /// Reads entries from one or more streams after given IDs.
     /// Returns list of [stream_name, [(id, {field: value}), ...]] or None if empty.
+    /// When block is specified, waits for new entries up to the given timeout in milliseconds
+    /// (block=0 means block indefinitely).
     #[pyo3(signature = (streams, count=None, block=None))]
     fn xread<'py>(
         &self,
         py: Python<'py>,
         streams: &Bound<'py, PyDict>,
         count: Option<usize>,
-        #[allow(unused_variables)]
-        block: Option<u64>,  // Accepted for API compatibility, ignored (in-process DB)
+        block: Option<u64>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        // Extract stream names and IDs from the dict
+        // Extract stream names and IDs from the dict. "$" resolves to the
+        // stream's current last_id at CALL TIME (not wakeup time) so that
+        // any xadd after the call began shows up as "new".
         let mut keys: Vec<Bytes> = Vec::new();
         let mut ids: Vec<StreamId> = Vec::new();
 
@@ -835,6 +895,11 @@ impl BurnerRedis {
 
             let stream_id = if id_str == "0" || id_str == "0-0" {
                 (0u64, 0u64)
+            } else if id_str == "$" {
+                // Resolve "$" to the stream's current last_id at call time.
+                // Missing stream or wrong type -> (0, 0); xread itself will
+                // surface WrongType via the store call below if applicable.
+                self.store.stream_last_id(&key).unwrap_or((0, 0))
             } else {
                 parse_stream_id(&id_str).ok_or_else(|| {
                     pyo3::exceptions::PyValueError::new_err(format!(
@@ -848,45 +913,77 @@ impl BurnerRedis {
             ids.push(stream_id);
         }
 
-        let results = self.store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
+        // Non-blocking fast path
+        if block.is_none() {
+            let results = self.store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
 
-        if results.is_empty() {
-            return resolved(py, py.None());
-        }
-
-        // Build the nested Python structure:
-        // [[stream_name_bytes, [(id_bytes, {field_bytes: value_bytes}), ...]], ...]
-        let outer = pyo3::types::PyList::empty(py);
-        for (stream_name, entries) in &results {
-            let entry_list = pyo3::types::PyList::empty(py);
-            for (id, fields) in entries {
-                let id_bytes = format_stream_id(*id).into_bytes();
-                let field_dict = pyo3::types::PyDict::new(py);
-                for (fk, fv) in fields {
-                    field_dict.set_item(
-                        pyo3::types::PyBytes::new(py, fk.as_ref()),
-                        pyo3::types::PyBytes::new(py, fv.as_ref()),
-                    )?;
-                }
-                let tuple = pyo3::types::PyTuple::new(
-                    py,
-                    &[
-                        pyo3::types::PyBytes::new(py, &id_bytes).into_any(),
-                        field_dict.into_any(),
-                    ],
-                )?;
-                entry_list.append(tuple)?;
+            if results.is_empty() {
+                return resolved(py, py.None());
             }
-            let stream_pair = pyo3::types::PyList::new(
-                py,
-                &[
-                    pyo3::types::PyBytes::new(py, stream_name.as_ref()).into_any(),
-                    entry_list.into_any(),
-                ],
-            )?;
-            outer.append(stream_pair)?;
+
+            let outer = build_xread_pylist(py, &results)?;
+            return resolved(py, outer.into_any().unbind());
         }
-        resolved(py, outer.into_any().unbind())
+
+        // Blocking path: mirrors xreadgroup blocking loop (see lib.rs ~1129).
+        // NOTE: Keep in sync with the xreadgroup blocking loop. DRY-via-helper
+        // was evaluated and rejected: the two closures return different shapes
+        // (xread -> Option<PyAny> with None-on-empty; xreadgroup -> list-on-empty)
+        // and the Store methods have different signatures, so a generic helper
+        // would add trait gymnastics without reducing real complexity.
+        let store = self.store.clone();
+        let block_ms = block.unwrap();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.stream_notify();
+            let mut waiter = Box::pin(notify.notified());
+            waiter.as_mut().enable();
+
+            // First non-blocking attempt
+            let results = store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
+            if !results.is_empty() {
+                return format_xread_result(results);
+            }
+
+            // block=0 means block forever; otherwise enforce a deadline.
+            let deadline_opt = if block_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_ms))
+            };
+
+            loop {
+                let remaining = match deadline_opt {
+                    Some(d) => {
+                        let r = d.saturating_duration_since(tokio::time::Instant::now());
+                        if r.is_zero() {
+                            break format_xread_result(Vec::new());
+                        }
+                        r
+                    }
+                    // block=0: long slice; re-armed on wakeup. Loop forever.
+                    None => Duration::from_secs(3600),
+                };
+
+                tokio::select! {
+                    _ = waiter.as_mut() => {
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
+                        let results = store.xread(&keys, &ids, count).map_err(store_err_to_py)?;
+                        if !results.is_empty() {
+                            break format_xread_result(results);
+                        }
+                        // Otherwise: notification was for unrelated stream; loop.
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        if deadline_opt.is_some() {
+                            break format_xread_result(Vec::new());
+                        }
+                        // block=0: sleep completed without wakeup; keep looping.
+                    }
+                }
+            }
+        })
     }
 
     /// XLEN command matching redis.asyncio.Redis.xlen() signature.
