@@ -1203,6 +1203,13 @@ impl BurnerRedis {
                 v.extract::<Vec<u8>>()
                     .map(|b| String::from_utf8_lossy(&b).into_owned())
             })?;
+            // XREADGROUP uses '>' for "new entries for this consumer"; '$' is
+            // an XREAD-only concept and must be rejected here to match Redis.
+            if id_str == "$" {
+                return Err(make_response_error(
+                    "ERR the $ ID meaning is only valid within XREAD".to_string(),
+                ));
+            }
             keys.push(key);
             id_strs.push(id_str);
         }
@@ -2278,7 +2285,13 @@ impl BurnerRedis {
                 for (k, v) in streams_dict.iter() {
                     let key = extract_bytes(&k)?;
                     let id_str: String = v.extract::<String>().or_else(|_| v.extract::<Vec<u8>>().map(|b| String::from_utf8_lossy(&b).into_owned()))?;
-                    let stream_id = if id_str == "0" || id_str == "0-0" { (0u64, 0u64) } else {
+                    let stream_id = if id_str == "0" || id_str == "0-0" {
+                        (0u64, 0u64)
+                    } else if id_str == "$" {
+                        // Resolve '$' to the stream's current last_id at pipeline
+                        // execution time; missing stream -> (0, 0).
+                        self.store.stream_last_id(&key).unwrap_or((0, 0))
+                    } else {
                         parse_stream_id(&id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID: {}", id_str)))?
                     };
                     keys.push(key);
