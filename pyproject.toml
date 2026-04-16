@@ -26,7 +26,7 @@ Repository = "https://github.com/PrefectHQ/burner-redis"
 Issues = "https://github.com/PrefectHQ/burner-redis/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "maturin"]
+dev = ["pytest", "pytest-asyncio", "maturin", "redis"]
 
 [tool.maturin]
 features = ["pyo3/extension-module", "pyo3/abi3-py310"]
