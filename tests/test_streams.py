@@ -731,6 +731,85 @@ async def test_xinfo_consumers_nogroup_error(r):
         await r.xinfo_consumers("mystream", "nogroup")
 
 
+# --- XINFO STREAM ---
+
+
+async def test_xinfo_stream_basic(r):
+    """xinfo_stream returns str-keyed dict with stream metadata."""
+    last_id = await r.xadd("s", {"f": "v1"})
+    info = await r.xinfo_stream("s")
+
+    # All keys are str, not bytes (matches redis-py convention).
+    assert all(isinstance(k, str) for k in info.keys())
+    assert info["length"] == 1
+    assert info["last-generated-id"] == last_id
+    assert info["groups"] == 0
+
+    first = info["first-entry"]
+    assert first is not None
+    assert first[0] == last_id
+    assert first[1] == {b"f": b"v1"}
+
+    # first-entry == last-entry for single-entry streams
+    assert info["last-entry"] == first
+
+    # Stubbed but present keys for radix-tree stats
+    assert "radix-tree-keys" in info
+    assert "radix-tree-nodes" in info
+    assert isinstance(info["radix-tree-keys"], int)
+    assert isinstance(info["radix-tree-nodes"], int)
+
+
+async def test_xinfo_stream_multiple_entries(r):
+    """xinfo_stream reflects length and first/last entries accurately."""
+    id1 = await r.xadd("s", {"f": "v1"})
+    id2 = await r.xadd("s", {"f": "v2"})
+    id3 = await r.xadd("s", {"f": "v3"})
+
+    info = await r.xinfo_stream("s")
+    assert info["length"] == 3
+    assert info["last-generated-id"] == id3
+    assert info["first-entry"][0] == id1
+    assert info["last-entry"][0] == id3
+    assert info["first-entry"] != info["last-entry"]
+    # Silence lint about unused var
+    _ = id2
+
+
+async def test_xinfo_stream_with_groups(r):
+    """xinfo_stream reports the number of consumer groups on the stream."""
+    await r.xadd("s", {"f": "v1"})
+    await r.xgroup_create("s", "g1", id="0")
+    await r.xgroup_create("s", "g2", id="0")
+
+    info = await r.xinfo_stream("s")
+    assert info["groups"] == 2
+
+
+async def test_xinfo_stream_empty_stream(r):
+    """xinfo_stream on a stream created via mkstream reports 0 length and None entries."""
+    await r.xgroup_create("s", "g", id="0", mkstream=True)
+    info = await r.xinfo_stream("s")
+
+    assert info["length"] == 0
+    assert info["first-entry"] is None
+    assert info["last-entry"] is None
+    assert info["groups"] == 1
+
+
+async def test_xinfo_stream_missing_key_raises(r):
+    """xinfo_stream on a non-existent key raises ResponseError with 'no such key'."""
+    with pytest.raises(redis.exceptions.ResponseError, match="no such key"):
+        await r.xinfo_stream("nonexistent")
+
+
+async def test_xinfo_stream_wrong_type_raises(r):
+    """xinfo_stream on a non-stream key raises WRONGTYPE."""
+    await r.set("s", "value")
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        await r.xinfo_stream("s")
+
+
 # --- XPENDING_RANGE ---
 
 
