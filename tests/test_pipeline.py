@@ -199,13 +199,13 @@ async def test_pipeline_method_chaining(r):
 
 
 async def test_pipeline_wrongtype_error(r):
-    """Pipeline returns WRONGTYPE errors inline matching redis-py behavior."""
+    """Pipeline returns WRONGTYPE errors inline when raise_on_error=False (opt-out of redis-py default raising behavior)."""
     await r.set("str_key", "value")
     pipe = r.pipeline()
     pipe.set("good_key", "good_value")
     pipe.hset("str_key", key="field", value="val")  # WRONGTYPE error
     pipe.get("good_key")
-    results = await pipe.execute()
+    results = await pipe.execute(raise_on_error=False)
     # All three commands should execute; error is inline at index 1
     assert results[0] is True  # set succeeded
     assert isinstance(results[1], Exception)  # WRONGTYPE returned as exception object

@@ -17,7 +17,7 @@ class Pipeline:
         self._client = client
         self._commands = []
 
-    async def execute(self):
+    async def execute(self, raise_on_error: bool = True) -> list:
         """Execute all queued commands and return results in order.
 
         Uses native Rust pipeline execution: a single Python-to-Rust
@@ -25,14 +25,22 @@ class Pipeline:
         loop, eliminating per-command async overhead.
 
         Matches redis-py behavior: all commands execute regardless of
-        individual failures. Errors are returned inline as exception
-        objects in the results list at the position of the failed command.
+        individual failures. When raise_on_error is True (default, matching
+        redis-py), the first Exception in the results list is raised after
+        execution completes. When False, Exception objects are returned
+        inline at the position of the failed command, preserving per-command
+        error inspection.
         """
         if not self._commands:
             return []
         results = await self._client.execute_pipeline(self._commands)
         self._commands = []
-        return list(results)
+        results = list(results)
+        if raise_on_error:
+            for r in results:
+                if isinstance(r, Exception):
+                    raise r
+        return results
 
     async def __aenter__(self):
         return self
