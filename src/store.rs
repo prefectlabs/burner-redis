@@ -64,6 +64,17 @@ impl SortedSet {
     }
 }
 
+/// Snapshot of a stream's metadata returned by XINFO STREAM.
+/// Used by the Python binding to build a dict matching redis-py's keys.
+#[derive(Clone, Debug)]
+pub struct XInfoStreamSnapshot {
+    pub length: usize,
+    pub last_id: StreamId,
+    pub groups_count: usize,
+    pub first_entry: Option<(StreamId, HashMap<Bytes, Bytes>)>,
+    pub last_entry: Option<(StreamId, HashMap<Bytes, Bytes>)>,
+}
+
 /// Redis stream data structure: ordered log of field-value entries keyed by StreamId.
 #[derive(Clone, Debug)]
 pub struct Stream {
@@ -2021,6 +2032,51 @@ impl Store {
         }
 
         Ok(result)
+    }
+
+    /// XINFO STREAM: Returns a snapshot of stream-level metadata: length,
+    /// last-generated-id, group count, and the first/last entries.
+    /// Returns Ok(None) if the key does not exist (or is expired).
+    /// Returns Err(WrongType) if the key holds a non-stream value.
+    pub fn xinfo_stream(&self, key: &Bytes) -> Result<Option<XInfoStreamSnapshot>, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(None);
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => return Ok(None),
+            Some(e) => e,
+        };
+
+        let stream = match &entry.data {
+            ValueData::Stream(s) => s,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let first = stream
+            .entries
+            .iter()
+            .next()
+            .map(|(id, fields)| (*id, fields.clone()));
+        let last = stream
+            .entries
+            .iter()
+            .next_back()
+            .map(|(id, fields)| (*id, fields.clone()));
+
+        Ok(Some(XInfoStreamSnapshot {
+            length: stream.entries.len(),
+            last_id: stream.last_id,
+            groups_count: stream.groups.len(),
+            first_entry: first,
+            last_entry: last,
+        }))
     }
 
     /// XINFO CONSUMERS: Returns metadata about all consumers in a specific consumer group.

@@ -15,7 +15,7 @@ use commands::strings::{extract_bytes, extract_expiry};
 use commands::sorted_sets::parse_score_bound;
 use commands::streams::{format_stream_id, parse_stream_id, extract_stream_fields, StreamId};
 use scripting::RedisValue;
-use store::{Store, StoreError};
+use store::{Store, StoreError, XInfoStreamSnapshot};
 
 /// A pre-resolved Python awaitable. Returns the stored value immediately
 /// on the first `__next__` call via `StopIteration(value)`.
@@ -238,6 +238,50 @@ fn format_xread_result(
             "failed to attach to Python interpreter",
         )
     })?
+}
+
+/// Build the redis-py-shaped dict for XINFO STREAM. Uses str keys (not bytes)
+/// to match the xinfo_groups convention. first-entry / last-entry are either
+/// None or (id_bytes, {field_bytes: value_bytes}) tuples.
+fn build_xinfo_stream_dict<'py>(
+    py: Python<'py>,
+    snapshot: &XInfoStreamSnapshot,
+) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+    let dict = pyo3::types::PyDict::new(py);
+    dict.set_item("length", snapshot.length as i64)?;
+    // We don't use a radix tree under the hood; expose plausible integers so
+    // downstream code that reads these keys doesn't KeyError.
+    dict.set_item("radix-tree-keys", snapshot.length as i64)?;
+    dict.set_item("radix-tree-nodes", (snapshot.length as i64) + 1)?;
+    dict.set_item(
+        "last-generated-id",
+        PyBytes::new(py, format_stream_id(snapshot.last_id).as_bytes()),
+    )?;
+    dict.set_item("groups", snapshot.groups_count as i64)?;
+
+    let format_entry = |entry: &(commands::streams::StreamId, std::collections::HashMap<Bytes, Bytes>)| -> PyResult<Bound<'py, PyAny>> {
+        let (id, fields) = entry;
+        let id_bytes = PyBytes::new(py, format_stream_id(*id).as_bytes());
+        let field_dict = pyo3::types::PyDict::new(py);
+        for (fk, fv) in fields {
+            field_dict.set_item(
+                PyBytes::new(py, fk.as_ref()),
+                PyBytes::new(py, fv.as_ref()),
+            )?;
+        }
+        let tuple = PyTuple::new(py, &[id_bytes.into_any(), field_dict.into_any()])?;
+        Ok(tuple.into_any())
+    };
+
+    match &snapshot.first_entry {
+        Some(e) => dict.set_item("first-entry", format_entry(e)?)?,
+        None => dict.set_item("first-entry", py.None())?,
+    }
+    match &snapshot.last_entry {
+        Some(e) => dict.set_item("last-entry", format_entry(e)?)?,
+        None => dict.set_item("last-entry", py.None())?,
+    }
+    Ok(dict)
 }
 
 #[pyclass]
@@ -1475,6 +1519,31 @@ impl BurnerRedis {
             }
         }
         resolved(py, outer.into_any().unbind())
+    }
+
+    /// XINFO STREAM command matching redis.asyncio.Redis.xinfo_stream() signature.
+    /// Returns a dict with stream metadata using str keys (matches xinfo_groups
+    /// convention). Keys: length, radix-tree-keys, radix-tree-nodes,
+    /// last-generated-id (bytes), groups (int), first-entry, last-entry.
+    /// Missing key raises ResponseError("ERR no such key ..."); wrong type
+    /// raises WRONGTYPE.
+    fn xinfo_stream<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let snapshot = match self.store.xinfo_stream(&key).map_err(store_err_to_py)? {
+            Some(s) => s,
+            None => {
+                return Err(make_response_error(format!(
+                    "ERR no such key '{}'",
+                    String::from_utf8_lossy(&key)
+                )));
+            }
+        };
+        let dict = build_xinfo_stream_dict(py, &snapshot)?;
+        resolved(py, dict.into_any().unbind())
     }
 
     /// XINFO GROUPS command matching redis.asyncio.Redis.xinfo_groups() signature.
