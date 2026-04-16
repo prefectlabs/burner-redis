@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 12
 Plan: Not started
 Status: Executing Phase 12
-Last activity: 2026-04-16 - Completed quick task 260416-axy: Pipeline.execute() raise_on_error=True by default (redis-py compat)
+Last activity: 2026-04-16 - Completed quick task 260416-cea: Fix three redis-py stream compat gaps: xread blocking, $ stream ID, xinfo_stream method
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -168,6 +168,7 @@ None yet.
 | 260415-us1 | Add Python version matrix to pydocket and unit test CI workflows | 2026-04-16 | 21ab7f5 | [260415-us1-add-python-version-matrix-to-pydocket-an](./quick/260415-us1-add-python-version-matrix-to-pydocket-an/) |
 | 260415-vor | Fix three redis-py compat issues: xreadgroup blocking, xpending_range NOGROUP, PubSub cancellation test | 2026-04-16 | 505d106 | [260415-vor-fix-three-redis-py-compat-issues-xreadgr](./quick/260415-vor-fix-three-redis-py-compat-issues-xreadgr/) |
 | 260416-axy | Pipeline.execute() raise_on_error=True by default (redis-py compat) | 2026-04-16 | a15cfad | [260416-axy-pipeline-execute-raise-on-error-true-by-](./quick/260416-axy-pipeline-execute-raise-on-error-true-by-/) |
+| 260416-cea | Fix three redis-py stream compat gaps: xread blocking, $ stream ID, xinfo_stream method | 2026-04-16 | f3fbb84 | [260416-cea-fix-three-redis-py-stream-compat-gaps-xr](./quick/260416-cea-fix-three-redis-py-stream-compat-gaps-xr/) |
 
 ## Session Continuity
 
