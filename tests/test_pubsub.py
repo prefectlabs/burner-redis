@@ -509,3 +509,83 @@ async def test_get_message_cancellation_propagates(r):
         await task
 
     await ps.aclose()
+
+
+async def test_pubsub_get_message_task_cancellation(r):
+    """Regression: external task.cancel() must propagate through
+    PubSub.get_message on Python 3.10/3.11 (cpython#86296).
+
+    Pinned by the asyncio.wait-based implementation in pubsub.py --
+    if someone reverts to asyncio.wait_for, 3.10/3.11 users hit
+    task hangs because wait_for swallows external cancel signals.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.subscribe("regression-channel")
+
+    async def poll_forever():
+        while True:
+            msg = await ps.get_message(timeout=0.1)
+            if msg is not None:
+                return msg
+
+    task = asyncio.create_task(poll_forever())
+
+    # Let the poller spin a few iterations to be mid-await.
+    await asyncio.sleep(0.5)
+
+    task.cancel()
+
+    # Must finish within 2.0s. Without the fix, this hangs forever on 3.10/3.11.
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except asyncio.CancelledError:
+        pass  # expected -- the cancelled task's exception surfaces here
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "PubSub.get_message swallowed task.cancel() -- regression of "
+            "cpython#86296 fix (pubsub.py must use asyncio.wait, not wait_for)"
+        )
+
+    try:
+        await ps.aclose()
+    except Exception:
+        # Best-effort cleanup; cancelled task may have left state in an
+        # unusual position. Not a test failure condition.
+        pass
+
+
+async def test_pubsub_get_message_task_cancellation_pattern(r):
+    """Regression: task.cancel() must also propagate when the PubSub
+    is using psubscribe (pattern subscribe) rather than subscribe. The
+    get_message code path is shared but pin the pattern branch
+    explicitly to guard against future divergence.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.psubscribe("regression-*")
+
+    async def poll_forever():
+        while True:
+            msg = await ps.get_message(timeout=0.1)
+            if msg is not None:
+                return msg
+
+    task = asyncio.create_task(poll_forever())
+
+    await asyncio.sleep(0.5)
+
+    task.cancel()
+
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "PubSub.get_message (pattern path) swallowed task.cancel() -- "
+            "regression of cpython#86296 fix"
+        )
+
+    try:
+        await ps.aclose()
+    except Exception:
+        pass
