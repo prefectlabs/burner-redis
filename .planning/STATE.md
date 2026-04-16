@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 12
 Plan: Not started
 Status: Executing Phase 12
-Last activity: 2026-04-16 - Completed quick task 260415-tc2: Add pydocket test suite CI workflow on merge and PR to main
+Last activity: 2026-04-16 - Completed quick task 260415-u8k: Run the pydocket tests against all supported Python versions
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -164,6 +164,7 @@ None yet.
 | 260415-hb8 | Update PyPI publishing to use trusted publishers OIDC | 2026-04-15 | 3cfe3b6 | [260415-hb8-update-pypi-publishing-to-use-trusted-pu](./quick/260415-hb8-update-pypi-publishing-to-use-trusted-pu/) |
 | 260415-mn4 | Fix asyncio.wait_for cancellation bug in pubsub get_message | 2026-04-15 | a8161ab | [260415-mn4-fix-asyncio-wait-for-cancellation-bug-in](./quick/260415-mn4-fix-asyncio-wait-for-cancellation-bug-in/) |
 | 260415-tc2 | Add pydocket test suite CI workflow on merge and PR to main | 2026-04-16 | b4739d7 | [260415-tc2-add-pydocket-test-suite-ci-workflow-on-m](./quick/260415-tc2-add-pydocket-test-suite-ci-workflow-on-m/) |
+| 260415-u8k | Run pydocket tests against all supported Python versions (3.10-3.14) | 2026-04-16 | n/a | [260415-u8k-run-the-pydocket-tests-against-all-suppo](./quick/260415-u8k-run-the-pydocket-tests-against-all-suppo/) |
 
 ## Session Continuity
 
