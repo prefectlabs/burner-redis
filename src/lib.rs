@@ -99,6 +99,20 @@ fn store_err_to_py(e: StoreError) -> PyErr {
     make_response_error(e.to_string())
 }
 
+/// Convert a StoreError from a stream-group command into a Python exception
+/// with the per-command NOGROUP suffix, matching Redis canonical error text.
+///
+/// For `StoreError::NoGroup` the suffix " in <CMD>" is appended (e.g.
+/// "NOGROUP No such key 'x' or consumer group 'g' in XPENDING"). All other
+/// StoreError variants pass through unchanged.
+fn store_err_to_py_for_cmd(e: StoreError, cmd: &str) -> PyErr {
+    let msg = match &e {
+        StoreError::NoGroup(_, _) => format!("{} in {}", e, cmd),
+        _ => e.to_string(),
+    };
+    make_response_error(msg)
+}
+
 /// Format XREADGROUP results into a Python list structure (GIL-holding version).
 /// Used by the synchronous non-blocking xreadgroup path and execute_pipeline.
 fn format_xreadgroup_result_with_py(
@@ -1043,7 +1057,7 @@ impl BurnerRedis {
 
         self.store
             .xgroup_create(&key, group, stream_id, mkstream)
-            .map_err(store_err_to_py)?;
+            .map_err(|e| store_err_to_py_for_cmd(e, "XGROUP CREATE"))?;
         resolved(py, pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
     }
 
@@ -1100,18 +1114,29 @@ impl BurnerRedis {
         if block.is_none() {
             let results = self.store
                 .xreadgroup(&group, &consumer, &keys, &id_strs, count)
-                .map_err(store_err_to_py)?;
+                .map_err(|e| store_err_to_py_for_cmd(e, "XREADGROUP"))?;
             let py_result = format_xreadgroup_result_with_py(py, results)?;
             return resolved(py, py_result);
         }
 
-        // Blocking path: use future_into_py with Tokio for sleep/select
+        // Blocking path: use future_into_py with Tokio for sleep/select.
+        //
+        // Register interest on stream_notify BEFORE the first poll so a
+        // notification fired between the first read and the select! await
+        // is not lost (Notify::notified registers a permit; notify_waiters
+        // called after notified() has been awaited will wake it).
         let store = self.store.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.stream_notify();
+            let mut waiter = Box::pin(notify.notified());
+            // Enable the waiter (arms its permit) so a notify that fires
+            // before we reach the select! is remembered.
+            waiter.as_mut().enable();
+
             // First non-blocking attempt
             let results = store
                 .xreadgroup(&group, &consumer, &keys, &id_strs, count)
-                .map_err(store_err_to_py)?;
+                .map_err(|e| store_err_to_py_for_cmd(e, "XREADGROUP"))?;
 
             if !results.is_empty() {
                 return format_xreadgroup_result(results);
@@ -1122,7 +1147,6 @@ impl BurnerRedis {
             // because a different stream received data, or another consumer claimed
             // the entry first, so we loop until we get results or time out.
             let block_ms = block.unwrap();
-            let notify = store.stream_notify();
             let timeout_duration = Duration::from_millis(block_ms);
             let deadline = tokio::time::Instant::now() + timeout_duration;
 
@@ -1132,11 +1156,15 @@ impl BurnerRedis {
                     break format_xreadgroup_result(Vec::new());
                 }
                 tokio::select! {
-                    _ = notify.notified() => {
+                    _ = waiter.as_mut() => {
+                        // Re-arm the waiter for the next iteration so we don't
+                        // miss a notification that fires while we're re-polling.
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
                         // New data arrived, retry read
                         let results = store
                             .xreadgroup(&group, &consumer, &keys, &id_strs, count)
-                            .map_err(store_err_to_py)?;
+                            .map_err(|e| store_err_to_py_for_cmd(e, "XREADGROUP"))?;
                         if !results.is_empty() {
                             break format_xreadgroup_result(results);
                         }
@@ -1181,7 +1209,9 @@ impl BurnerRedis {
             stream_ids.push(stream_id);
         }
 
-        let count = self.store.xack(&key, &group, &stream_ids).map_err(store_err_to_py)?;
+        let count = self.store
+            .xack(&key, &group, &stream_ids)
+            .map_err(|e| store_err_to_py_for_cmd(e, "XACK"))?;
         resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
@@ -1217,7 +1247,7 @@ impl BurnerRedis {
 
         let (next_id, claimed, deleted) = self.store
             .xautoclaim(&key, &group, consumer_bytes, min_idle_time, start, count)
-            .map_err(store_err_to_py)?;
+            .map_err(|e| store_err_to_py_for_cmd(e, "XAUTOCLAIM"))?;
 
         // Build next_start_id as bytes
         let next_id_bytes =
@@ -1314,7 +1344,7 @@ impl BurnerRedis {
                 force,
                 justid,
             )
-            .map_err(store_err_to_py)?;
+            .map_err(|e| store_err_to_py_for_cmd(e, "XCLAIM"))?;
 
         let outer = pyo3::types::PyList::empty(py);
         for (id, fields_opt) in &results {
@@ -1351,7 +1381,9 @@ impl BurnerRedis {
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let key = extract_bytes(name)?;
-        let groups = self.store.xinfo_groups(&key).map_err(store_err_to_py)?;
+        let groups = self.store
+            .xinfo_groups(&key)
+            .map_err(|e| store_err_to_py_for_cmd(e, "XINFO GROUPS"))?;
 
         let result_list = pyo3::types::PyList::empty(py);
         for group_info in &groups {
@@ -1403,7 +1435,7 @@ impl BurnerRedis {
         let group = extract_bytes(groupname)?;
         let consumers = self.store
             .xinfo_consumers(&key, &group)
-            .map_err(store_err_to_py)?;
+            .map_err(|e| store_err_to_py_for_cmd(e, "XINFO CONSUMERS"))?;
 
         let result_list = pyo3::types::PyList::empty(py);
         for consumer_info in &consumers {
@@ -1491,7 +1523,7 @@ impl BurnerRedis {
                 consumer_filter.as_ref(),
                 idle,
             )
-            .map_err(store_err_to_py)?;
+            .map_err(|e| store_err_to_py_for_cmd(e, "XPENDING"))?;
 
         let result_list = pyo3::types::PyList::empty(py);
         for (entry_id, consumer_name, idle_ms, delivery_count) in &entries {
@@ -1812,7 +1844,7 @@ impl BurnerRedis {
         let group = extract_bytes(groupname)?;
         let (total, min_id, max_id, consumers) = self.store
             .xpending_summary(&key, &group)
-            .map_err(store_err_to_py)?;
+            .map_err(|e| store_err_to_py_for_cmd(e, "XPENDING"))?;
 
         let dict = PyDict::new(py);
         dict.set_item("pending", total)?;
@@ -2245,7 +2277,8 @@ impl BurnerRedis {
                 } else {
                     parse_stream_id(&id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", id_str)))?
                 };
-                self.store.xgroup_create(&key, group, stream_id, mkstream).map_err(store_err_to_py)?;
+                self.store.xgroup_create(&key, group, stream_id, mkstream)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XGROUP CREATE"))?;
                 Ok(pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
             }
             "xgroup_destroy" => {
@@ -2272,7 +2305,8 @@ impl BurnerRedis {
                     keys.push(key);
                     id_strs.push(id_str);
                 }
-                let results = self.store.xreadgroup(&group, &consumer, &keys, &id_strs, count).map_err(store_err_to_py)?;
+                let results = self.store.xreadgroup(&group, &consumer, &keys, &id_strs, count)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XREADGROUP"))?;
                 format_xreadgroup_result_with_py(py, results)
             }
             "xack" => {
@@ -2286,7 +2320,8 @@ impl BurnerRedis {
                     let stream_id = parse_stream_id(&id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", id_str)))?;
                     stream_ids.push(stream_id);
                 }
-                let count = self.store.xack(&key, &group, &stream_ids).map_err(store_err_to_py)?;
+                let count = self.store.xack(&key, &group, &stream_ids)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XACK"))?;
                 Ok(count.into_pyobject(py)?.into_any().unbind())
             }
             "xautoclaim" => {
@@ -2302,7 +2337,8 @@ impl BurnerRedis {
                 let start: StreamId = if start_id_str == "0" || start_id_str == "0-0" { (0, 0) } else {
                     parse_stream_id(&start_id_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", start_id_str)))?
                 };
-                let (next_id, claimed, deleted) = self.store.xautoclaim(&key, &group, consumer_bytes, min_idle_time, start, count).map_err(store_err_to_py)?;
+                let (next_id, claimed, deleted) = self.store.xautoclaim(&key, &group, consumer_bytes, min_idle_time, start, count)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XAUTOCLAIM"))?;
                 let next_id_bytes = pyo3::types::PyBytes::new(py, format_stream_id(next_id).as_bytes());
                 let claimed_list = pyo3::types::PyList::empty(py);
                 for (id, fields) in &claimed {
@@ -2342,7 +2378,8 @@ impl BurnerRedis {
                     let id_str: String = id_obj.bind(py).extract::<String>().or_else(|_| id_obj.bind(py).extract::<Vec<u8>>().map(|b| String::from_utf8_lossy(&b).into_owned()))?;
                     ids.push(parse_stream_id(&id_str).ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid stream ID: {}", id_str)))?);
                 }
-                let results = self.store.xclaim(&key, &group, consumer, min_idle_time, &ids, idle, time, retrycount, force, justid).map_err(store_err_to_py)?;
+                let results = self.store.xclaim(&key, &group, consumer, min_idle_time, &ids, idle, time, retrycount, force, justid)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XCLAIM"))?;
                 let outer = pyo3::types::PyList::empty(py);
                 for (id, fields_opt) in &results {
                     if justid {
@@ -2363,7 +2400,8 @@ impl BurnerRedis {
             "xinfo_groups" => {
                 let name = &args.get_item(0)?;
                 let key = extract_bytes(name)?;
-                let groups = self.store.xinfo_groups(&key).map_err(store_err_to_py)?;
+                let groups = self.store.xinfo_groups(&key)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XINFO GROUPS"))?;
                 let result_list = pyo3::types::PyList::empty(py);
                 for group_info in &groups {
                     let dict = PyDict::new(py);
@@ -2390,7 +2428,8 @@ impl BurnerRedis {
                 let groupname = &args.get_item(1)?;
                 let key = extract_bytes(name)?;
                 let group = extract_bytes(groupname)?;
-                let consumers = self.store.xinfo_consumers(&key, &group).map_err(store_err_to_py)?;
+                let consumers = self.store.xinfo_consumers(&key, &group)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XINFO CONSUMERS"))?;
                 let result_list = pyo3::types::PyList::empty(py);
                 for consumer_info in &consumers {
                     let dict = PyDict::new(py);
@@ -2425,7 +2464,8 @@ impl BurnerRedis {
                 let max_id: StreamId = if max_str == "+" { (u64::MAX, u64::MAX) } else {
                     parse_stream_id(&max_str).ok_or_else(|| pyo3::exceptions::PyValueError::new_err(format!("Invalid stream ID format: {}", max_str)))?
                 };
-                let entries = self.store.xpending_range(&key, &group, min_id, max_id, count, consumer_filter.as_ref(), idle).map_err(store_err_to_py)?;
+                let entries = self.store.xpending_range(&key, &group, min_id, max_id, count, consumer_filter.as_ref(), idle)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XPENDING"))?;
                 let result_list = pyo3::types::PyList::empty(py);
                 for (entry_id, consumer_name, idle_ms, delivery_count) in &entries {
                     let dict = PyDict::new(py);
@@ -2525,7 +2565,8 @@ impl BurnerRedis {
                 let groupname = &args.get_item(1)?;
                 let key = extract_bytes(name)?;
                 let group = extract_bytes(groupname)?;
-                let (total, min_id, max_id, consumers) = self.store.xpending_summary(&key, &group).map_err(store_err_to_py)?;
+                let (total, min_id, max_id, consumers) = self.store.xpending_summary(&key, &group)
+                    .map_err(|e| store_err_to_py_for_cmd(e, "XPENDING"))?;
                 let dict = PyDict::new(py);
                 dict.set_item("pending", total)?;
                 match min_id {

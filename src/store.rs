@@ -178,7 +178,13 @@ impl ValueEntry {
 pub enum StoreError {
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
-    #[error("NOGROUP No such consumer group '{0}' for key name '{1}'")]
+    /// NOGROUP error for missing key or consumer group.
+    /// Parameters are `(group, key)` to preserve call-site order; the Display
+    /// format reorders them to match Redis canonical phrasing
+    /// "No such key '<key>' or consumer group '<group>'". The per-command
+    /// suffix (" in XPENDING" / " in XREADGROUP" / etc.) is appended by the
+    /// binding layer; the store stays command-agnostic.
+    #[error("NOGROUP No such key '{1}' or consumer group '{0}'")]
     NoGroup(String, String),
     #[error("BUSYGROUP Consumer Group name already exists")]
     BusyGroup,
