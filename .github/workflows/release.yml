@@ -6,6 +6,54 @@ on:
       - "v*"
 
 jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Wait for required workflows to succeed on ${{ github.sha }}
+        run: |
+          set -u
+          required_workflows=(ci.yml pydocket-compat.yml)
+          for wf in "${required_workflows[@]}"; do
+            echo "::group::Checking $wf on $GITHUB_SHA"
+            status=""
+            conclusion=""
+            url=""
+            for i in $(seq 1 40); do
+              run=$(gh run list \
+                --workflow="$wf" \
+                --commit="$GITHUB_SHA" \
+                --limit=1 \
+                --json status,conclusion,url \
+                -q '.[0]')
+              if [ -z "$run" ] || [ "$run" = "null" ]; then
+                echo "ERROR: no $wf run found for $GITHUB_SHA"
+                echo "       was this commit pushed to main before tagging?"
+                exit 1
+              fi
+              status=$(echo "$run" | jq -r .status)
+              conclusion=$(echo "$run" | jq -r .conclusion)
+              url=$(echo "$run" | jq -r .url)
+              if [ "$status" = "completed" ]; then
+                if [ "$conclusion" = "success" ]; then
+                  echo "OK: $wf succeeded on $GITHUB_SHA ($url)"
+                  break
+                fi
+                echo "ERROR: $wf did not succeed on $GITHUB_SHA: conclusion=$conclusion (see $url)"
+                exit 1
+              fi
+              echo "  $wf status=$status — waiting 15s... ($i/40)"
+              sleep 15
+            done
+            if [ "$status" != "completed" ]; then
+              echo "ERROR: $wf did not complete within 10 minutes on $GITHUB_SHA (last status=$status, see $url)"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done
+          echo "All required workflows green on $GITHUB_SHA."
+
   build:
     strategy:
       matrix:
@@ -58,7 +106,7 @@ jobs:
           path: dist/
 
   release:
-    needs: [build, sdist]
+    needs: [gate, build, sdist]
     runs-on: ubuntu-latest
     environment:
       name: pypi
