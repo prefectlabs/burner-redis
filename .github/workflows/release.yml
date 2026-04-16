@@ -22,6 +22,7 @@ jobs:
             url=""
             for i in $(seq 1 40); do
               run=$(gh run list \
+                -R "$GITHUB_REPOSITORY" \
                 --workflow="$wf" \
                 --commit="$GITHUB_SHA" \
                 --limit=1 \
