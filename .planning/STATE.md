@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 12
 Plan: Not started
 Status: Executing Phase 12
-Last activity: 2026-04-16 - Completed quick task 260415-vor: Fix three redis-py compat issues (xreadgroup blocking, NOGROUP errors, PubSub cancellation test)
+Last activity: 2026-04-16 - Completed quick task 260416-axy: Pipeline.execute() raise_on_error=True by default (redis-py compat)
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -167,6 +167,7 @@ None yet.
 | 260415-u8k | Run pydocket tests against all supported Python versions (3.10-3.14) | 2026-04-16 | n/a | [260415-u8k-run-the-pydocket-tests-against-all-suppo](./quick/260415-u8k-run-the-pydocket-tests-against-all-suppo/) |
 | 260415-us1 | Add Python version matrix to pydocket and unit test CI workflows | 2026-04-16 | 21ab7f5 | [260415-us1-add-python-version-matrix-to-pydocket-an](./quick/260415-us1-add-python-version-matrix-to-pydocket-an/) |
 | 260415-vor | Fix three redis-py compat issues: xreadgroup blocking, xpending_range NOGROUP, PubSub cancellation test | 2026-04-16 | 505d106 | [260415-vor-fix-three-redis-py-compat-issues-xreadgr](./quick/260415-vor-fix-three-redis-py-compat-issues-xreadgr/) |
+| 260416-axy | Pipeline.execute() raise_on_error=True by default (redis-py compat) | 2026-04-16 | a15cfad | [260416-axy-pipeline-execute-raise-on-error-true-by-](./quick/260416-axy-pipeline-execute-raise-on-error-true-by-/) |
 
 ## Session Continuity
 
