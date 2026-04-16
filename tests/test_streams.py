@@ -901,6 +901,87 @@ async def test_xpending_range_idle_filter(r):
     assert len(result2) == 1
 
 
+# --- XREAD '$' ID ---
+
+
+async def test_xread_dollar_id_returns_only_new_entries(r):
+    """XREAD with '$' returns only entries strictly after current end of stream."""
+    await r.xadd("s", {"initial": "1"})
+
+    async def adder():
+        await asyncio.sleep(0.05)
+        await r.xadd("s", {"after-dollar": "1"})
+
+    task = asyncio.create_task(adder())
+    result = await r.xread({"s": "$"}, count=10, block=1000)
+    await task
+
+    assert result is not None
+    stream_name, entries = result[0]
+    assert stream_name == b"s"
+    assert len(entries) == 1
+    assert entries[0][1] == {b"after-dollar": b"1"}
+
+
+async def test_xread_dollar_id_as_bytes(r):
+    """XREAD accepts b'$' identically to '$'."""
+    await r.xadd("s", {"initial": "1"})
+
+    async def adder():
+        await asyncio.sleep(0.05)
+        await r.xadd("s", {"after-dollar": "1"})
+
+    task = asyncio.create_task(adder())
+    result = await r.xread({b"s": b"$"}, count=10, block=1000)
+    await task
+
+    assert result is not None
+    stream_name, entries = result[0]
+    assert entries[0][1] == {b"after-dollar": b"1"}
+
+
+async def test_xread_dollar_id_non_blocking_returns_none(r):
+    """XREAD({'s': '$'}) with no block and no new data returns None."""
+    await r.xadd("s", {"initial": "1"})
+    result = await r.xread({"s": "$"})
+    assert result is None
+
+
+async def test_xread_dollar_id_on_missing_stream(r):
+    """XREAD({'nostream': '$'}) on a non-existent stream resolves '$' to (0,0)
+    and returns None without raising."""
+    result = await r.xread({"nostream": "$"})
+    assert result is None
+
+
+async def test_xread_dollar_id_resolved_at_call_time(r):
+    """'$' must be resolved at call time, not re-resolved on each wakeup."""
+    await r.xadd("s", {"v": "1"})
+    await r.xadd("s", {"v": "2"})
+    await r.xadd("s", {"v": "3"})
+
+    async def adder():
+        await asyncio.sleep(0.1)
+        await r.xadd("s", {"v": "4"})
+
+    task = asyncio.create_task(adder())
+    result = await r.xread({"s": "$"}, count=10, block=1000)
+    await task
+
+    assert result is not None
+    stream_name, entries = result[0]
+    assert len(entries) == 1
+    assert entries[0][1] == {b"v": b"4"}
+
+
+async def test_xreadgroup_dollar_id_still_rejected(r):
+    """XREADGROUP must reject '$' (uses '>' instead); '$' is xread-only."""
+    await r.xgroup_create("s", "g", id="0", mkstream=True)
+
+    with pytest.raises(Exception, match=r"\$|Invalid stream ID|only valid"):
+        await r.xreadgroup("g", "c", {"s": "$"})
+
+
 # --- XREAD Blocking ---
 
 
