@@ -965,6 +965,93 @@ async def test_xreadgroup_block_lua_xadd_wakes_reader(r):
     assert entries[0][1][b"f"] == b"from_lua"
 
 
+async def test_xreadgroup_block_yields_to_event_loop(r):
+    """XREADGROUP(block=N) must cooperate with the asyncio event loop.
+
+    While the blocking call is waiting for data, other coroutines scheduled
+    on the same loop MUST keep running. If the Rust bridge holds the GIL or
+    otherwise starves the loop, a concurrent tick-counter coroutine would
+    never advance and a concurrent xadd could not wake the reader.
+    """
+    await r.xadd("mystream", {"f": "v1"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    # Drain the seed entry
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"})
+
+    counter = {"n": 0}
+
+    async def tick():
+        # Tick every 5ms for ~200ms -- if the event loop runs this
+        # coroutine should advance many times during the block.
+        deadline = time.monotonic() + 0.2
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.005)
+            counter["n"] += 1
+
+    async def xadd_after_delay():
+        await asyncio.sleep(0.05)
+        await r.xadd("mystream", {"f": "v2"})
+
+    tick_task = asyncio.create_task(tick())
+    xadd_task = asyncio.create_task(xadd_after_delay())
+
+    start = time.monotonic()
+    result = await r.xreadgroup(
+        "mygroup", "consumer1", {"mystream": ">"}, block=5000
+    )
+    elapsed = time.monotonic() - start
+
+    await tick_task
+    await xadd_task
+
+    # Must return WELL before the 5000ms timeout -- the concurrent xadd
+    # should wake the reader promptly.
+    assert elapsed < 1.0, f"xreadgroup took {elapsed:.3f}s (expected < 1s)"
+
+    # Proves the event loop kept scheduling the tick coroutine while
+    # xreadgroup was waiting. Without cooperative yielding, counter would
+    # be 0 or 1. 5 is a generous floor given 50ms of real wait at 5ms tick.
+    assert counter["n"] >= 5, (
+        f"tick counter advanced only {counter['n']} times during block; "
+        "asyncio event loop is being starved"
+    )
+
+    # Verify we got the v2 entry
+    assert len(result) > 0
+    stream_name, entries = result[0]
+    assert entries[0][1][b"f"] == b"v2"
+
+
+async def test_xreadgroup_block_concurrent_consumers_event_loop_progress(r):
+    """Two concurrent blocked consumers in the same group both wake up
+    when xadd delivers new entries via notify_waiters.
+    """
+    await r.xgroup_create("mystream", "mygroup", id="0", mkstream=True)
+
+    async def produce():
+        await asyncio.sleep(0.05)
+        await r.xadd("mystream", {"f": "v1"})
+        await asyncio.sleep(0.05)
+        await r.xadd("mystream", {"f": "v2"})
+
+    producer_task = asyncio.create_task(produce())
+
+    start = time.monotonic()
+    results = await asyncio.gather(
+        r.xreadgroup("mygroup", "c1", {"mystream": ">"}, block=2000),
+        r.xreadgroup("mygroup", "c2", {"mystream": ">"}, block=2000),
+    )
+    elapsed = time.monotonic() - start
+    await producer_task
+
+    # Both consumers returned well under the 2000ms timeout.
+    assert elapsed < 1.0, f"concurrent consumers took {elapsed:.3f}s"
+
+    # At least one consumer received at least one entry.
+    received_any = any(len(r) > 0 for r in results)
+    assert received_any, "neither consumer received any stream entry"
+
+
 # --- XCLAIM ---
 
 
