@@ -41,7 +41,11 @@ jobs:
           path: pydocket
 
       - name: Install pydocket dependencies
-        run: uv pip install --python .venv/bin/python -e "./pydocket[metrics]" --group dev
+        run: |
+          source .venv/bin/activate
+          uv pip install -e "./pydocket[metrics]"
+          cd pydocket
+          uv pip install --group dev
 
       - name: Run pydocket tests
         run: |
