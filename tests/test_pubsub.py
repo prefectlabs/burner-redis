@@ -589,3 +589,79 @@ async def test_pubsub_get_message_task_cancellation_pattern(r):
         await ps.aclose()
     except Exception:
         pass
+
+
+async def test_pubsub_delivers_message_while_xread_blocks(r):
+    """Regression: pubsub delivery must not stall while an asyncio task is parked
+    in a long-lived pyo3 future (e.g. xread(block=N)).
+
+    The bug: the Rust pubsub listener called ``queue.put_nowait(msg)`` directly
+    from a Tokio worker thread. That appends to the asyncio loop's ``_ready``
+    queue but does NOT wake its selector, so if nothing else on the loop is
+    scheduled soon, delivery is delayed until the next spontaneous wakeup
+    (often the test's own timeout). Fixed by scheduling via
+    ``loop.call_soon_threadsafe(queue.put_nowait, msg)``, which writes the
+    self-pipe and wakes the selector immediately.
+
+    Concretely reproduced as pydocket pub/sub timeouts on Python 3.12+ once
+    xread(block=N) actually blocked (prior to that, xread returned instantly
+    so nothing ever parked the asyncio loop). Keep this test to prevent
+    regressions in the low-level pubsub delivery path.
+    """
+    import asyncio
+    import time
+
+    # Seed a stream so '$' resolves cleanly, then park a task in xread(block=60s).
+    # This drives the asyncio loop into "no timers, nothing to do" mode, which
+    # is what triggers the delivery stall if the listener isn't thread-safe.
+    await r.xadd("regression-stream", {"init": "1"})
+    async def block_xread():
+        return await r.xread({"regression-stream": "$"}, count=10, block=60_000)
+
+    blocked_xread = asyncio.create_task(block_xread())
+    try:
+        await asyncio.sleep(0.1)  # let the blocking xread actually park
+
+        ps = r.pubsub()
+        await ps.subscribe("regression-channel")
+        # Drain the subscribe confirmation so the next get_message waits for
+        # a real publish.
+        confirm = await asyncio.wait_for(ps.get_message(timeout=1.0), timeout=2.0)
+        assert confirm is not None and confirm["type"] == "subscribe"
+
+        async def wait_for_message():
+            while True:
+                m = await ps.get_message(timeout=None)
+                if m is not None and m.get("type") == "message":
+                    return m
+
+        waiter = asyncio.create_task(wait_for_message())
+        await asyncio.sleep(0.05)  # ensure waiter is parked on queue.get()
+
+        t0 = time.monotonic()
+        await r.publish("regression-channel", "hi")
+        # With the bug, delivery only happens when the wait_for timeout fires
+        # ~2s later. With the fix, it arrives essentially immediately.
+        result = await asyncio.wait_for(waiter, timeout=0.5)
+        latency = time.monotonic() - t0
+
+        assert result["type"] == "message"
+        assert result["channel"] == b"regression-channel"
+        assert result["data"] == b"hi"
+        # Delivery should be fast (< 100ms) with call_soon_threadsafe. The
+        # pre-fix behaviour was ~2000ms (matched the outer wait_for timeout).
+        assert latency < 0.3, (
+            f"pubsub delivery latency {latency*1000:.0f}ms while xread blocked -- "
+            "regression of listener call_soon_threadsafe fix"
+        )
+
+        try:
+            await ps.aclose()
+        except Exception:
+            pass
+    finally:
+        blocked_xread.cancel()
+        try:
+            await blocked_xread
+        except (asyncio.CancelledError, Exception):
+            pass

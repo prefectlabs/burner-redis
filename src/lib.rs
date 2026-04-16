@@ -1845,6 +1845,20 @@ impl BurnerRedis {
     /// background Tokio task that blocks on a broadcast channel.
     fn _subscribe_listener<'py>(&self, py: Python<'py>, subscriber_id: u64, queue: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
+        // Capture the running asyncio event loop here (inside the Python caller's
+        // coroutine) so the background Tokio task can schedule callbacks on it
+        // from another thread. Raw `queue.put_nowait(...)` from a non-loop thread
+        // appends to the loop's _ready queue but does NOT wake its selector, so
+        // if the asyncio loop is asleep (e.g. no timers pending, all tasks
+        // parked in pyo3_async_runtimes futures like our xread/xreadgroup block
+        // paths), the message only gets processed the next time something else
+        // wakes the loop. Using `loop.call_soon_threadsafe(...)` writes to the
+        // loop's self-pipe, so the selector wakes immediately.
+        let asyncio = py.import("asyncio")?;
+        let event_loop: Py<PyAny> = asyncio
+            .getattr("get_running_loop")?
+            .call0()?
+            .into();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let (_id, mut rx) = {
                 let registry = store.pubsub.read();
@@ -1865,8 +1879,12 @@ impl BurnerRedis {
                                 };
                                 dict.set_item("channel", PyBytes::new(py, &msg.channel))?;
                                 dict.set_item("data", PyBytes::new(py, &msg.data))?;
+                                // Schedule put_nowait via call_soon_threadsafe so the
+                                // asyncio loop's selector wakes up to process it.
                                 let put_nowait = queue.getattr(py, "put_nowait")?;
-                                put_nowait.call1(py, (dict,))?;
+                                event_loop
+                                    .getattr(py, "call_soon_threadsafe")?
+                                    .call1(py, (put_nowait, dict))?;
                                 Ok(())
                             });
                             match delivered {
