@@ -6,6 +6,7 @@ import asyncio
 import time
 
 import pytest
+import redis.exceptions
 from burner_redis import BurnerRedis
 
 
@@ -246,6 +247,20 @@ async def test_xgroup_create_no_mkstream(r):
         await r.xgroup_create("nonexistent", "mygroup", id="0")
 
 
+async def test_xgroup_create_missing_key_raises_response_error(r):
+    """XGROUP CREATE without mkstream must raise redis.exceptions.ResponseError.
+
+    Message must begin with 'ERR' and match Redis canonical phrasing
+    'requires the key to exist' so downstream redis-py consumers can
+    catch ResponseError cleanly.
+    """
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"ERR.*requires the key to exist",
+    ):
+        await r.xgroup_create("nostream-missing", "g", id="0", mkstream=False)
+
+
 async def test_xgroup_create_duplicate(r):
     """STRM-05: Creating same group twice raises BUSYGROUP error."""
     await r.xadd("mystream", {"f": "v"})
@@ -388,6 +403,27 @@ async def test_xreadgroup_nogroup_error(r):
     await r.xadd("mystream", {"f": "v1"})
     with pytest.raises(Exception, match="NOGROUP"):
         await r.xreadgroup("nogroup", "consumer1", {"mystream": ">"})
+
+
+async def test_xreadgroup_nogroup_raises_response_error(r):
+    """XREADGROUP on missing key or missing group must raise
+    redis.exceptions.ResponseError with canonical NOGROUP phrasing
+    including the per-command suffix 'in XREADGROUP'.
+    """
+    # Case 1: missing key entirely
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'nostream' or consumer group 'nogroup' in XREADGROUP",
+    ):
+        await r.xreadgroup("nogroup", "c1", {"nostream": ">"})
+
+    # Case 2: stream exists, group is missing
+    await r.xadd("existing-stream", {"f": "v1"})
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'existing-stream' or consumer group 'missing-group' in XREADGROUP",
+    ):
+        await r.xreadgroup("missing-group", "c1", {"existing-stream": ">"})
 
 
 # --- STRM-08: XACK ---
@@ -570,6 +606,26 @@ async def test_xautoclaim_returns_next_start_id(r):
     assert next_id2 == b"0-0"  # All done
 
 
+async def test_xautoclaim_nogroup_raises_response_error(r):
+    """XAUTOCLAIM on missing key or group must raise
+    redis.exceptions.ResponseError with NOGROUP + 'in XAUTOCLAIM'.
+    """
+    # Missing key
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key '.*' or consumer group '.*' in XAUTOCLAIM",
+    ):
+        await r.xautoclaim("nostream", "nogroup", "consumer1", 0)
+
+    # Stream exists, group missing
+    await r.xadd("autoclaim-stream", {"f": "v"})
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'autoclaim-stream' or consumer group 'missing-group' in XAUTOCLAIM",
+    ):
+        await r.xautoclaim("autoclaim-stream", "missing-group", "consumer1", 0)
+
+
 # --- STRM-10: XINFO GROUPS ---
 
 
@@ -742,6 +798,83 @@ async def test_xpending_range_nogroup_error(r):
     await r.xadd("mystream", {"f": "v1"})
     with pytest.raises(Exception, match="NOGROUP"):
         await r.xpending_range("mystream", "nogroup", "-", "+", 10)
+
+
+async def test_xpending_range_nogroup_raises_response_error(r):
+    """xpending_range on missing key OR missing group must raise
+    redis.exceptions.ResponseError whose message contains the Redis
+    canonical phrasing 'NOGROUP No such key ... or consumer group ... in XPENDING'.
+    """
+    # Case 1: missing key entirely
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'nonexistent-stream' or consumer group 'nonexistent-group' in XPENDING",
+    ):
+        await r.xpending_range(
+            "nonexistent-stream", "nonexistent-group", "-", "+", 10
+        )
+
+    # Case 2: stream exists, group is missing
+    await r.xadd("mystream-existing", {"f": "v"})
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'mystream-existing' or consumer group 'missing-group' in XPENDING",
+    ):
+        await r.xpending_range("mystream-existing", "missing-group", "-", "+", 10)
+
+    # Case 3: consumer-filter variant against missing key/group must also
+    # raise NOGROUP ResponseError (NOT TypeError from arg extraction).
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP.*in XPENDING",
+    ):
+        await r.xpending_range("ns", "ng", "-", "+", 10, consumername="anyone")
+
+
+async def test_xpending_summary_nogroup_raises_response_error(r):
+    """xpending() summary form on missing key or group must raise
+    redis.exceptions.ResponseError with NOGROUP and 'in XPENDING'.
+    """
+    # Missing key
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'nonexistent-stream' or consumer group 'nonexistent-group' in XPENDING",
+    ):
+        await r.xpending("nonexistent-stream", "nonexistent-group")
+
+    # Missing group
+    await r.xadd("summary-stream", {"f": "v"})
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'summary-stream' or consumer group 'missing-group' in XPENDING",
+    ):
+        await r.xpending("summary-stream", "missing-group")
+
+
+async def test_xclaim_nogroup_raises_response_error(r):
+    """XCLAIM on missing key or group must raise
+    redis.exceptions.ResponseError with NOGROUP and 'in XCLAIM'.
+    """
+    # Missing key
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key '.*' or consumer group '.*' in XCLAIM",
+    ):
+        await r.xclaim(
+            "nostream", "nogroup", "consumer1",
+            min_idle_time=0, message_ids=["0-0"],
+        )
+
+    # Stream exists, group missing
+    await r.xadd("xclaim-stream", {"f": "v"})
+    with pytest.raises(
+        redis.exceptions.ResponseError,
+        match=r"NOGROUP No such key 'xclaim-stream' or consumer group 'missing-group' in XCLAIM",
+    ):
+        await r.xclaim(
+            "xclaim-stream", "missing-group", "consumer1",
+            min_idle_time=0, message_ids=["0-0"],
+        )
 
 
 async def test_xpending_range_empty(r):
