@@ -1,0 +1,169 @@
+name: Docket test suite (Windows)
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  docket-memory-windows:
+    name: Docket, Windows, Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Checkout burner-redis
+        uses: actions/checkout@v6
+        with:
+          path: burner-redis
+
+      - name: Checkout docket
+        uses: actions/checkout@v6
+        with:
+          repository: chrisguidry/docket
+          ref: replace-fakeredis-with-burner-redis
+          path: docket
+
+      - name: Install uv + Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Override docket's burner-redis dependency
+        shell: bash
+        working-directory: docket
+        run: |
+          cat >> pyproject.toml <<'EOF'
+
+          [tool.uv.sources]
+          burner-redis = { path = "../burner-redis" }
+          EOF
+
+      - name: Install docket dependencies
+        working-directory: docket
+        run: uv sync --upgrade-package 'redis>=5'
+
+      - name: Verify burner-redis source
+        working-directory: docket
+        shell: bash
+        run: |
+          uv run python -c "import burner_redis, pathlib; p = pathlib.Path(burner_redis.__file__).resolve(); print('burner_redis at:', p); assert 'burner-redis' in str(p), f'wrong install: {p}'"
+
+      - name: Run docket test suite (excluding perpetual_race)
+        env:
+          REDIS_VERSION: memory
+          RUST_BACKTRACE: 1
+          PYTHONFAULTHANDLER: 1
+        working-directory: docket
+        run: >
+          uv run pytest --ignore=tests/cli
+          --ignore=tests/cluster
+          --deselect=tests/test_perpetual_race.py
+          --import-mode=importlib
+          -o 'addopts='
+          -v
+          --timeout=120
+
+      - name: Run perpetual_race tests (subprocess-isolated)
+        env:
+          REDIS_VERSION: memory
+          RUST_BACKTRACE: 1
+          PYTHONFAULTHANDLER: 1
+        working-directory: docket
+        shell: bash
+        run: |
+          # Run each test in test_perpetual_race.py in its own subprocess.
+          # This file's tests contaminate each other via stale pyo3/tokio
+          # runtime state when run in the same process on Windows 3.11+.
+          overall=0
+          items=$(uv run pytest tests/test_perpetual_race.py \
+            --collect-only -q \
+            -o 'addopts=' \
+            -p no:randomly \
+            2>&1 | grep '::')
+          total=$(echo "$items" | wc -l | tr -d ' ')
+          echo "=== Running $total perpetual_race tests (subprocess-isolated) ==="
+
+          run_test() {
+            # Run a single test item. Returns 0 on pass, 1 on fail.
+            # Timeout is 30s — these tests pass in <2s when they work;
+            # the hang is an all-or-nothing 30s timeout, not slowness.
+            uv run pytest "$1" \
+              -x \
+              -o 'addopts=' \
+              --numprocesses=0 \
+              --timeout=30 \
+              -p no:randomly \
+              --no-header -q \
+              2>&1 | tail -1 | grep -q "passed"
+          }
+
+          n=0
+          while IFS= read -r item; do
+            [ -z "$item" ] && continue
+            n=$((n + 1))
+            printf "[%2d/%d] %s ... " "$n" "$total" "$item"
+            # Up to 5 attempts: the hang is a flaky race in
+            # pyo3-async-runtimes' call_soon_threadsafe result delivery
+            # vs event loop teardown on Windows (cpython#116773).
+            # P(fail) ~10-20% per attempt; 5 retries → P(all fail) < 0.1%.
+            ok=0
+            for attempt in 1 2 3 4 5; do
+              if run_test "$item"; then
+                if [ $attempt -eq 1 ]; then
+                  echo "PASSED"
+                else
+                  echo "PASSED (attempt $attempt)"
+                fi
+                ok=1
+                break
+              fi
+            done
+            if [ $ok -eq 0 ]; then
+              echo "FAILED (after 5 attempts)"
+              overall=1
+            fi
+          done <<< "$items"
+
+          echo ""
+          if [ $overall -ne 0 ]; then
+            echo "SOME perpetual_race TESTS FAILED"
+          else
+            echo "ALL perpetual_race tests PASSED"
+          fi
+          exit $overall
+
+      - name: Diagnostic (on failure)
+        if: failure()
+        timeout-minutes: 3
+        env:
+          REDIS_VERSION: memory
+          RUST_BACKTRACE: 1
+          PYTHONFAULTHANDLER: 1
+        working-directory: docket
+        shell: bash
+        run: |
+          # Run the two known-problematic parametrizations with per-test
+          # timeouts and faulthandler to capture thread dumps on hang.
+          tests=(
+            "tests/test_perpetual_race.py::test_perpetual_successor_survives_mark_as_terminal[execution_ttl=0]"
+            "tests/test_perpetual_race.py::test_perpetual_successor_survives_mark_as_terminal[execution_ttl=60s]"
+          )
+          for t in "${tests[@]}"; do
+            echo ""
+            echo "--- Running: $t ---"
+            timeout 90 uv run pytest "$t" \
+              -v -s \
+              -o 'addopts=' \
+              --numprocesses=0 \
+              --timeout=60 \
+              2>&1 || echo "--- FAILED (exit $?) ---"
+            echo "--- Done ---"
+          done
