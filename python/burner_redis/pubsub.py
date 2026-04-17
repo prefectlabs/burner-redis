@@ -301,11 +301,10 @@ class PubSub:
         signal the Rust-side listener task to exit so its captured references
         to this PubSub's event loop and queue are released.
 
-        The listener-stop step is what unblocks the Windows / Python 3.11+
-        hang: without it, the background Tokio task keeps holding Py<PyAny>
-        references to an asyncio loop that pytest-asyncio has torn down,
-        and any subsequent test that cancels a TaskGroup while the listener
-        is still live deadlocks under native asyncio.TaskGroup semantics.
+        This awaits the Rust listener's actual exit before returning. Without
+        that join, the background Tokio task can outlive the function-scoped
+        asyncio loop it captured and poison later worker-shutdown tests,
+        especially on Windows.
         """
         if self.channels:
             await self.unsubscribe()

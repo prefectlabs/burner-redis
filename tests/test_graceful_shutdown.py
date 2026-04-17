@@ -115,3 +115,33 @@ async def test_aclose_stops_pubsub_listeners():
 
     # PubSub should not hang or error after client shutdown
     # (the listener task should have been stopped)
+
+
+def test_pubsub_aclose_releases_loop_before_next_run():
+    """Closing a PubSub must not leave a listener tied to a torn-down loop.
+
+    This mirrors the pytest-asyncio pattern in Docket's Windows tests where
+    each test gets a fresh loop. If the Rust-side listener outlives
+    ``PubSub.aclose()``, the next loop can hang during worker teardown.
+    """
+
+    async def cycle() -> None:
+        client = BurnerRedis()
+        ps = client.pubsub()
+        await ps.subscribe("test-channel")
+
+        # Consume the subscription acknowledgement so the listener is fully live.
+        await ps.get_message(timeout=0.1)
+
+        # Queue one real delivery so shutdown races against an active listener.
+        publish_task = asyncio.ensure_future(
+            client.publish("test-channel", "payload")
+        )
+        await asyncio.sleep(0)
+
+        await ps.aclose()
+        await publish_task
+        await client.aclose()
+
+    asyncio.run(asyncio.wait_for(cycle(), timeout=5.0))
+    asyncio.run(asyncio.wait_for(cycle(), timeout=5.0))

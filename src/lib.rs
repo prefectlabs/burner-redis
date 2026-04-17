@@ -2025,28 +2025,27 @@ impl BurnerRedis {
     }
 
     /// Internal: Signal the background listener task for `subscriber_id` to
-    /// stop and remove the subscriber's channel/pattern registrations from
-    /// the pub/sub registry.
+    /// stop, remove the subscriber's registrations, and await the task's
+    /// actual exit before returning to Python.
     ///
-    /// This is SYNCHRONOUS (resolved()) — it sets the stop_flag + fires
-    /// stop_tx and returns immediately. The listener task will exit on its
-    /// next loop iteration; the stop_flag prevents it from calling
-    /// call_soon_threadsafe after this point.
-    ///
-    /// Previously this was async (future_into_py) and awaited the listener's
-    /// JoinHandle to guarantee zero in-flight call_soon_threadsafe calls.
-    /// But the future_into_py result delivery itself uses call_soon_threadsafe,
-    /// creating the exact race it was trying to prevent (cpython#116773).
-    /// Making this synchronous removes that call_soon_threadsafe entirely.
-    /// The stop_flag guard in the listener loop is sufficient: after
-    /// stop_flag is set, the listener will not issue any new
-    /// call_soon_threadsafe calls (it checks before every delivery).
+    /// The stop flag prevents the listener from issuing any *new*
+    /// `call_soon_threadsafe` deliveries after shutdown begins. Awaiting the
+    /// JoinHandle here closes the remaining race where the task is still alive
+    /// and holding references to a function-scoped asyncio loop after
+    /// `PubSub.aclose()` has returned.
     fn _stop_subscriber_listener<'py>(&self, py: Python<'py>, subscriber_id: u64) -> PyResult<Bound<'py, PyAny>> {
-        // stop_subscriber_listener sets stop_flag, fires stop_tx, removes
-        // from registry — all synchronously. The returned JoinHandle is
-        // intentionally NOT awaited to avoid a future_into_py round-trip.
-        let _join_handle = self.store.stop_subscriber_listener(subscriber_id);
-        resolved(py, py.None())
+        let join_handle = self.store.stop_subscriber_listener(subscriber_id);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(join_handle) = join_handle {
+                let _ = join_handle.await;
+            }
+            Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?
+        })
     }
 
     /// SUBSCRIBE: Register channels for a subscriber.
