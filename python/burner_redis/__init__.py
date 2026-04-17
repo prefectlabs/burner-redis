@@ -166,4 +166,33 @@ def _register_script(self, script):
 
 BurnerRedis.register_script = _register_script
 
+
+async def _aclose(self):
+    """Graceful shutdown: drain all in-flight Rust futures and stop listeners.
+
+    Matches redis.asyncio.Redis.aclose() interface.
+    """
+    await self._aclose()
+
+
+async def _close_alias(self):
+    """Alias for aclose(). Matches redis.asyncio.Redis.close() interface."""
+    await self._aclose()
+
+
+async def _aenter(self):
+    """Async context manager entry."""
+    return self
+
+
+async def _aexit(self, *args):
+    """Async context manager exit: calls aclose()."""
+    await self._aclose()
+
+
+BurnerRedis.aclose = _aclose
+BurnerRedis.close = _close_alias
+BurnerRedis.__aenter__ = _aenter
+BurnerRedis.__aexit__ = _aexit
+
 __all__ = ["BurnerRedis", "Lock", "LockError", "NoScriptError", "Pipeline", "PubSub", "ResponseError", "Script", "_coerce_value"]

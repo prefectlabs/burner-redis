@@ -3,6 +3,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyBytes, PyCFunction, PyDict, PyList, PyTuple};
 use std::collections::HashSet as StdHashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -997,6 +998,13 @@ impl BurnerRedis {
             };
 
             loop {
+                // Graceful shutdown: return empty immediately so the Rust future
+                // completes and pyo3-async-runtimes can deliver via
+                // call_soon_threadsafe while the event loop is still alive.
+                if store.is_shutdown() {
+                    break format_xread_result(Vec::new());
+                }
+
                 let remaining = match deadline_opt {
                     Some(d) => {
                         let r = d.saturating_duration_since(tokio::time::Instant::now());
@@ -1299,6 +1307,12 @@ impl BurnerRedis {
             let deadline = tokio::time::Instant::now() + timeout_duration;
 
             loop {
+                // Graceful shutdown: return empty immediately so the Rust future
+                // completes while the Python event loop is still alive.
+                if store.is_shutdown() {
+                    break format_xreadgroup_result(Vec::new());
+                }
+
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
                     break format_xreadgroup_result(Vec::new());
@@ -1832,82 +1846,207 @@ impl BurnerRedis {
         resolved(py, count.into_pyobject(py)?.into_any().unbind())
     }
 
+    /// Graceful shutdown: signal all blocking futures to complete so they
+    /// finish via call_soon_threadsafe while the Python event loop is alive.
+    /// Also stops all pubsub listener tasks.
+    /// Python side exposes this as `aclose()` / `close()`.
+    fn _aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.store.shutdown();
+        resolved(py, py.None())
+    }
+
+    /// Alias for _aclose (sync-style name).
+    fn _close<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self._aclose(py)
+    }
+
     /// Internal: Create a new subscriber ID. Used by Python PubSub class.
     fn _new_subscriber(&self) -> PyResult<u64> {
         let (id, _rx) = self.store.new_subscriber();
         Ok(id)
     }
 
+    /// Internal: return the last stream ID for a given key as a bytes string,
+    /// or None if the key doesn't exist or isn't a stream.
+    /// Used by Python-side blocking xread/xreadgroup to resolve "$" once.
+    fn _stream_last_id<'py>(
+        &self,
+        py: Python<'py>,
+        key: &Bound<'py, PyAny>,
+    ) -> PyResult<Option<Py<PyAny>>> {
+        let key_bytes = extract_bytes(key)?;
+        match self.store.stream_last_id(&key_bytes) {
+            Some(id) => {
+                let id_str = format_stream_id(id);
+                Ok(Some(
+                    PyBytes::new(py, id_str.as_bytes()).into_any().unbind(),
+                ))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Internal: Subscribe and start a background task that filters messages
     /// into a Python asyncio.Queue. Returns subscriber_id.
     /// Called once by Python PubSub on first subscribe.
+    ///
     /// NOTE: This remains async (future_into_py) because it spawns a long-running
-    /// background Tokio task that blocks on a broadcast channel.
+    /// background Tokio task that blocks on a broadcast channel. The task is
+    /// kept bound to the lifetime of its owning Python PubSub object via a
+    /// oneshot::Sender stored in `store.pubsub.listener_stoppers` — when the
+    /// Python side calls `_stop_subscriber_listener`, the oneshot receiver
+    /// resolves and the listener's `tokio::select!` breaks out of its loop.
+    ///
+    /// WHY a dedicated stopper (not just broadcast::RecvError::Closed): the
+    /// global broadcast sender lives on the shared `Store` and is only
+    /// dropped when `BurnerRedis` itself goes away. Under pytest-asyncio on
+    /// Python 3.11+, each test tears down and re-creates its event loop.
+    /// The captured `queue` PyObject in this listener would otherwise point
+    /// at the PRIOR test's asyncio Queue. Stopping the listener from
+    /// `PubSub.aclose()` removes that foot-gun entirely.
+    ///
+    /// **Known issue:** Message delivery currently uses
+    /// `event_loop.call_soon_threadsafe(queue.put_nowait, msg)`. This
+    /// writes to the ProactorEventLoop's IOCP self-pipe on Windows, and
+    /// a racy call_soon_threadsafe against a closing loop can corrupt
+    /// IOCP state (cpython#116773), causing a flaky hang (~10-20% of
+    /// the time) in GetQueuedCompletionStatus. The stop_flag check
+    /// before each call_soon_threadsafe narrows the window but does not
+    /// eliminate it entirely. A future fix should either:
+    ///   (a) await the listener's actual exit in _stop_subscriber_listener
+    ///       so no call_soon_threadsafe fires after aclose() returns, or
+    ///   (b) replace call_soon_threadsafe with a thread-safe channel
+    ///       (e.g. janus queue) that doesn't touch the event loop pipe.
     fn _subscribe_listener<'py>(&self, py: Python<'py>, subscriber_id: u64, queue: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
-        // Capture the running asyncio event loop here (inside the Python caller's
-        // coroutine) so the background Tokio task can schedule callbacks on it
-        // from another thread. Raw `queue.put_nowait(...)` from a non-loop thread
-        // appends to the loop's _ready queue but does NOT wake its selector, so
-        // if the asyncio loop is asleep (e.g. no timers pending, all tasks
-        // parked in pyo3_async_runtimes futures like our xread/xreadgroup block
-        // paths), the message only gets processed the next time something else
-        // wakes the loop. Using `loop.call_soon_threadsafe(...)` writes to the
-        // loop's self-pipe, so the selector wakes immediately.
+        // Capture the running asyncio event loop for call_soon_threadsafe.
         let asyncio = py.import("asyncio")?;
         let event_loop: Py<PyAny> = asyncio
             .getattr("get_running_loop")?
             .call0()?
             .into();
+
+        // Atomic flag set by aclose() to prevent the listener from calling
+        // call_soon_threadsafe after the PubSub is being torn down. The
+        // listener checks this flag under GIL BEFORE every
+        // call_soon_threadsafe invocation.
+        let stop_flag = Arc::new(AtomicBool::new(false));
+
+        // Oneshot used by `tokio::select!` to break out of rx.recv()
+        // immediately on stop.
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+
+        // Clone stop_flag for the spawned task; the original goes to the
+        // stopper handle so aclose() can set it.
+        let task_stop_flag = stop_flag.clone();
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (_id, mut rx) = {
+            let mut rx = {
                 let registry = store.pubsub.read();
-                (subscriber_id, registry.tx.subscribe())
+                registry.tx.subscribe()
             };
 
-            // Spawn a background Tokio task that forwards matching messages to the Python queue
-            tokio::spawn(async move {
+            // Spawn a background Tokio task that forwards matching messages
+            // to the Python queue via call_soon_threadsafe.
+            let join_handle = tokio::spawn(async move {
+                tokio::pin!(stop_rx);
                 loop {
-                    match rx.recv().await {
-                        Ok(msg) => {
-                            let delivered = Python::try_attach(|py| -> Result<(), PyErr> {
-                                let dict = PyDict::new(py);
-                                dict.set_item("type", &msg.kind)?;
-                                match &msg.pattern {
-                                    Some(p) => dict.set_item("pattern", PyBytes::new(py, p))?,
-                                    None => dict.set_item("pattern", py.None())?,
-                                };
-                                dict.set_item("channel", PyBytes::new(py, &msg.channel))?;
-                                dict.set_item("data", PyBytes::new(py, &msg.data))?;
-                                // Schedule put_nowait via call_soon_threadsafe so the
-                                // asyncio loop's selector wakes up to process it.
-                                let put_nowait = queue.getattr(py, "put_nowait")?;
-                                event_loop
-                                    .getattr(py, "call_soon_threadsafe")?
-                                    .call1(py, (put_nowait, dict))?;
-                                Ok(())
-                            });
-                            match delivered {
-                                Some(Ok(())) => {}
-                                Some(Err(e)) => {
-                                    eprintln!("burner-redis pubsub: delivery error: {}", e);
-                                }
-                                None => {}
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(n)) => {
-                            eprintln!("burner-redis pubsub: subscriber lagged, {} messages dropped", n);
-                            continue;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
+                    tokio::select! {
+                        biased;
+
+                        _ = &mut stop_rx => {
                             break;
+                        }
+
+                        res = rx.recv() => {
+                            match res {
+                                Ok(msg) => {
+                                    // Check stop flag BEFORE touching Python.
+                                    if task_stop_flag.load(Ordering::Acquire) {
+                                        break;
+                                    }
+                                    let delivered = Python::try_attach(|py| -> Result<(), PyErr> {
+                                        // Re-check under GIL: aclose may
+                                        // have set the flag while we were
+                                        // waiting for GIL.
+                                        if task_stop_flag.load(Ordering::Acquire) {
+                                            return Ok(());
+                                        }
+                                        let dict = PyDict::new(py);
+                                        dict.set_item("type", &msg.kind)?;
+                                        match &msg.pattern {
+                                            Some(p) => dict.set_item("pattern", PyBytes::new(py, p))?,
+                                            None => dict.set_item("pattern", py.None())?,
+                                        };
+                                        dict.set_item("channel", PyBytes::new(py, &msg.channel))?;
+                                        dict.set_item("data", PyBytes::new(py, &msg.data))?;
+                                        let put_nowait = queue.getattr(py, "put_nowait")?;
+                                        event_loop
+                                            .getattr(py, "call_soon_threadsafe")?
+                                            .call1(py, (put_nowait, dict))?;
+                                        Ok(())
+                                    });
+                                    match delivered {
+                                        Some(Ok(())) => {}
+                                        Some(Err(_)) => {
+                                            // Event loop is closed or other
+                                            // error. Stop the listener.
+                                            break;
+                                        }
+                                        None => {
+                                            // Python interpreter shutting down.
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(broadcast::error::RecvError::Lagged(n)) => {
+                                    eprintln!("burner-redis pubsub: subscriber lagged, {} messages dropped", n);
+                                    continue;
+                                }
+                                Err(broadcast::error::RecvError::Closed) => {
+                                    break;
+                                }
+                            }
                         }
                     }
                 }
             });
 
+            // Register the stopper handle AFTER spawn so we have the
+            // JoinHandle. aclose() will set the stop_flag, fire stop_tx,
+            // then await join_handle to guarantee the listener has fully
+            // exited before returning.
+            store.register_listener_stopper(
+                subscriber_id, stop_tx, stop_flag, join_handle,
+            );
+
             Ok(subscriber_id)
         })
+    }
+
+    /// Internal: Signal the background listener task for `subscriber_id` to
+    /// stop and remove the subscriber's channel/pattern registrations from
+    /// the pub/sub registry.
+    ///
+    /// This is SYNCHRONOUS (resolved()) — it sets the stop_flag + fires
+    /// stop_tx and returns immediately. The listener task will exit on its
+    /// next loop iteration; the stop_flag prevents it from calling
+    /// call_soon_threadsafe after this point.
+    ///
+    /// Previously this was async (future_into_py) and awaited the listener's
+    /// JoinHandle to guarantee zero in-flight call_soon_threadsafe calls.
+    /// But the future_into_py result delivery itself uses call_soon_threadsafe,
+    /// creating the exact race it was trying to prevent (cpython#116773).
+    /// Making this synchronous removes that call_soon_threadsafe entirely.
+    /// The stop_flag guard in the listener loop is sufficient: after
+    /// stop_flag is set, the listener will not issue any new
+    /// call_soon_threadsafe calls (it checks before every delivery).
+    fn _stop_subscriber_listener<'py>(&self, py: Python<'py>, subscriber_id: u64) -> PyResult<Bound<'py, PyAny>> {
+        // stop_subscriber_listener sets stop_flag, fires stop_tx, removes
+        // from registry — all synchronously. The returned JoinHandle is
+        // intentionally NOT awaited to avoid a future_into_py round-trip.
+        let _join_handle = self.store.stop_subscriber_listener(subscriber_id);
+        resolved(py, py.None())
     }
 
     /// SUBSCRIBE: Register channels for a subscriber.

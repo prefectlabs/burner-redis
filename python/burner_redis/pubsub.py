@@ -297,11 +297,25 @@ class PubSub:
         await self.aclose()
 
     async def aclose(self):
-        """Async close -- unsubscribe from all channels and patterns."""
+        """Async close -- unsubscribe from all channels and patterns, and
+        signal the Rust-side listener task to exit so its captured references
+        to this PubSub's event loop and queue are released.
+
+        The listener-stop step is what unblocks the Windows / Python 3.11+
+        hang: without it, the background Tokio task keeps holding Py<PyAny>
+        references to an asyncio loop that pytest-asyncio has torn down,
+        and any subsequent test that cancels a TaskGroup while the listener
+        is still live deadlocks under native asyncio.TaskGroup semantics.
+        """
         if self.channels:
             await self.unsubscribe()
         if self.patterns:
             await self.punsubscribe()
+        if self._listener_started and self._subscriber_id is not None:
+            try:
+                await self._client._stop_subscriber_listener(self._subscriber_id)
+            finally:
+                self._listener_started = False
 
     async def reset(self):
         """Reset the PubSub state (deprecated alias for aclose)."""
