@@ -1,0 +1,62 @@
+name: Docket test suite (Windows)
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  docket-memory-windows:
+    name: Docket, Windows, Python ${{ matrix.python-version }}
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - name: Checkout burner-redis
+        uses: actions/checkout@v6
+        with:
+          path: burner-redis
+
+      - name: Checkout docket
+        uses: actions/checkout@v6
+        with:
+          repository: chrisguidry/docket
+          ref: replace-fakeredis-with-burner-redis
+          path: docket
+
+      - name: Install uv + Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Override docket's burner-redis dependency
+        shell: bash
+        working-directory: docket
+        run: |
+          cat >> pyproject.toml <<'EOF'
+
+          [tool.uv.sources]
+          burner-redis = { path = "../burner-redis" }
+          EOF
+
+      - name: Install docket dependencies
+        working-directory: docket
+        run: uv sync --upgrade-package 'redis>=5'
+
+      - name: Run tests
+        env:
+          REDIS_VERSION: memory
+        working-directory: docket
+        run: >
+          uv run pytest --ignore=tests/cli
+          --import-mode=importlib
+          -o 'addopts='
+          -v
+          --timeout=120

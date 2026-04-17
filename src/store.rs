@@ -4,10 +4,10 @@ use parking_lot::RwLock;
 use serde::{Serialize, Deserialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Bound;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, Notify};
+use tokio::sync::{broadcast, oneshot, Notify};
 
 use crate::commands::pubsub::glob_match;
 use crate::commands::streams::StreamId;
@@ -212,6 +212,16 @@ pub struct PubSubMessage {
     pub data: Bytes,            // message payload
 }
 
+/// Per-listener shutdown handles. See `PubSubRegistry.listener_stoppers`.
+pub struct ListenerStopHandle {
+    pub stop_tx: oneshot::Sender<()>,
+    pub stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// JoinHandle for the spawned tokio task. `_stop_subscriber_listener`
+    /// awaits this to guarantee the listener has fully exited before
+    /// returning to Python.
+    pub join_handle: Option<tokio::task::JoinHandle<()>>,
+}
+
 /// Registry tracking all active pub/sub subscriptions.
 /// Separate from keyspace data -- pub/sub is orthogonal to key-value storage.
 pub struct PubSubRegistry {
@@ -225,6 +235,20 @@ pub struct PubSubRegistry {
     subscriber_channels: HashMap<u64, HashSet<Bytes>>,
     /// Subscriber ID -> set of patterns subscribed
     subscriber_patterns: HashMap<u64, HashSet<Bytes>>,
+    /// Subscriber ID -> listener control handles.
+    ///
+    /// Each entry holds two things:
+    ///
+    /// 1. `stop_tx` — oneshot Sender that, when fired, makes the Tokio
+    ///    listener task exit its `rx.recv()` select arm. This is the
+    ///    "fast path" stop signal (wakes the task immediately if it's
+    ///    parked on recv()).
+    ///
+    /// 2. `stop_flag` — AtomicBool that the listener checks BEFORE every
+    ///    `queue.put_nowait()` call. This closes the race where the
+    ///    listener has already pulled a message off its broadcast
+    ///    receiver and is mid-delivery when aclose fires the oneshot.
+    listener_stoppers: HashMap<u64, ListenerStopHandle>,
     /// Next subscriber ID counter
     next_id: AtomicU64,
 }
@@ -238,6 +262,7 @@ impl PubSubRegistry {
             pattern_subscribers: HashMap::new(),
             subscriber_channels: HashMap::new(),
             subscriber_patterns: HashMap::new(),
+            listener_stoppers: HashMap::new(),
             next_id: AtomicU64::new(0),
         }
     }
@@ -248,6 +273,7 @@ pub struct Store {
     scripts: RwLock<HashMap<String, String>>,
     pub(crate) pubsub: RwLock<PubSubRegistry>,
     stream_notify: Arc<Notify>,
+    shutdown: AtomicBool,
 }
 
 impl Store {
@@ -257,12 +283,37 @@ impl Store {
             scripts: RwLock::new(HashMap::new()),
             pubsub: RwLock::new(PubSubRegistry::new()),
             stream_notify: Arc::new(Notify::new()),
+            shutdown: AtomicBool::new(false),
         }
     }
 
     /// Get a reference to the stream notification handle for async waiting.
     pub fn stream_notify(&self) -> Arc<Notify> {
         self.stream_notify.clone()
+    }
+
+    /// Signal graceful shutdown: wake all blocking stream waiters so their
+    /// Rust futures complete while the Python event loop is still alive.
+    /// Also stops all pubsub listener tasks.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, Ordering::Release);
+
+        // Wake all blocking xread/xreadgroup waiters so they see the flag
+        self.stream_notify.notify_waiters();
+
+        // Stop all pubsub listeners — collect IDs first, then stop each
+        let ids: Vec<u64> = {
+            let registry = self.pubsub.read();
+            registry.listener_stoppers.keys().copied().collect()
+        };
+        for id in ids {
+            self.stop_subscriber_listener(id);
+        }
+    }
+
+    /// Check whether shutdown has been signaled.
+    pub fn is_shutdown(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire)
     }
 
     // ── Persistence Methods ─────────────────────────────────────────
@@ -2397,6 +2448,78 @@ impl Store {
         (id, rx)
     }
 
+    /// Register a `ListenerStopHandle` for this subscriber's Tokio listener
+    /// task. Called by `_subscribe_listener` right before spawning the task.
+    /// Any previously registered handle for the same id is dropped — which
+    /// fires the `stop_tx` for that old handle (harmlessly; the listener
+    /// it belonged to is presumed gone or about to be replaced).
+    pub fn register_listener_stopper(
+        &self,
+        subscriber_id: u64,
+        stop_tx: oneshot::Sender<()>,
+        stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        join_handle: tokio::task::JoinHandle<()>,
+    ) {
+        let mut registry = self.pubsub.write();
+        registry.listener_stoppers.insert(
+            subscriber_id,
+            ListenerStopHandle { stop_tx, stop_flag, join_handle: Some(join_handle) },
+        );
+    }
+
+    /// Signal the listener task for `subscriber_id` to stop and remove
+    /// this subscriber's channel/pattern registrations from the registry.
+    ///
+    /// Called by `PubSub.aclose()`. Sets the stop flag, fires the stop
+    /// oneshot, cleans up channel/pattern maps, and returns the JoinHandle
+    /// so the caller can await the listener's actual exit.
+    pub fn stop_subscriber_listener(&self, subscriber_id: u64) -> Option<tokio::task::JoinHandle<()>> {
+        let mut registry = self.pubsub.write();
+        let join_handle;
+
+        if let Some(mut handle) = registry.listener_stoppers.remove(&subscriber_id) {
+            // Order matters: set the flag before firing the oneshot.
+            // The listener may be either:
+            //   (a) parked on rx.recv() inside select! — the oneshot
+            //       wakes it, it breaks out of the loop;
+            //   (b) mid-delivery inside Python::try_attach — the flag
+            //       makes it bail out before touching the Python queue.
+            handle.stop_flag.store(true, std::sync::atomic::Ordering::Release);
+            let _ = handle.stop_tx.send(());
+            join_handle = handle.join_handle.take();
+        } else {
+            join_handle = None;
+        }
+
+        // Also remove this subscriber from all channel/pattern maps so
+        // Store::publish no longer counts or dispatches to it.
+        if let Some(channels) = registry.subscriber_channels.remove(&subscriber_id) {
+            for channel in channels {
+                if let Some(subs) = registry.channel_subscribers.get_mut(&channel) {
+                    subs.remove(&subscriber_id);
+                    if subs.is_empty() {
+                        registry.channel_subscribers.remove(&channel);
+                    }
+                }
+            }
+        }
+        if let Some(patterns) = registry.subscriber_patterns.remove(&subscriber_id) {
+            for pattern in patterns {
+                if let Some(subs) = registry.pattern_subscribers.get_mut(&pattern) {
+                    subs.remove(&subscriber_id);
+                    if subs.is_empty() {
+                        registry.pattern_subscribers.remove(&pattern);
+                    }
+                }
+            }
+        }
+
+        // Drop the registry lock before returning the join handle,
+        // so the caller can await it without holding the lock.
+        drop(registry);
+        join_handle
+    }
+
     /// SUBSCRIBE: Register a subscriber for exact channels.
     /// Returns Vec<(channel_name, total_subscription_count_for_this_subscriber)>.
     pub fn subscribe(&self, subscriber_id: u64, channels: Vec<Bytes>) -> Vec<(Bytes, i64)> {
@@ -4049,5 +4172,73 @@ mod tests {
         assert_eq!(consumers.len(), 1);
         assert_eq!(consumers[0].0, Bytes::from("consumer1"));
         assert_eq!(consumers[0].1, 2);
+    }
+
+    // ── Shutdown Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_is_shutdown_initially_false() {
+        let store = Store::new();
+        assert!(!store.is_shutdown());
+    }
+
+    #[test]
+    fn test_shutdown_sets_flag() {
+        let store = Store::new();
+        store.shutdown();
+        assert!(store.is_shutdown());
+    }
+
+    #[test]
+    fn test_shutdown_is_idempotent() {
+        let store = Store::new();
+        store.shutdown();
+        store.shutdown();
+        assert!(store.is_shutdown());
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_wakes_stream_notify() {
+        let store = Arc::new(Store::new());
+        let store2 = store.clone();
+
+        // Spawn a task that waits on stream_notify — it will hang
+        // forever unless shutdown() calls notify_waiters().
+        let handle = tokio::spawn(async move {
+            let notify = store2.stream_notify();
+            notify.notified().await;
+        });
+
+        // Give the spawned task time to park on notified()
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        store.shutdown();
+
+        // The task should complete promptly (not hang)
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle,
+        ).await.expect("timed out — shutdown didn't wake notified()").unwrap();
+    }
+
+    #[test]
+    fn test_shutdown_stops_pubsub_listeners() {
+        let store = Store::new();
+        let (id, _rx) = store.new_subscriber();
+        let (stop_tx, _stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let join_handle = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .spawn(async {});
+        store.register_listener_stopper(id, stop_tx, stop_flag.clone(), join_handle);
+
+        // Listener registered
+        assert!(!stop_flag.load(std::sync::atomic::Ordering::Acquire));
+
+        store.shutdown();
+
+        // stop_flag set by shutdown -> stop_subscriber_listener
+        assert!(stop_flag.load(std::sync::atomic::Ordering::Acquire));
     }
 }

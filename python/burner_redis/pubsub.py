@@ -5,14 +5,16 @@ pattern matching, message handlers, and background thread processing.
 """
 import asyncio
 import inspect
+import queue
 import threading
+import time
 
 
 class PubSub:
     """Async pub/sub message handler mirroring redis-py's PubSub interface.
 
     Created via client.pubsub(). Manages channel/pattern subscriptions
-    and message delivery through an internal asyncio.Queue fed by a
+    and message delivery through an internal thread-safe queue fed by a
     Rust background task.
     """
 
@@ -25,7 +27,7 @@ class PubSub:
         self.ignore_subscribe_messages = ignore_subscribe_messages
         self.channels = {}      # channel_bytes -> handler or None
         self.patterns = {}      # pattern_bytes -> handler or None
-        self._queue = asyncio.Queue()
+        self._queue = queue.Queue()
         self._subscriber_id = None
         self._listener_started = False
 
@@ -77,7 +79,7 @@ class PubSub:
                 "channel": channel_bytes,
                 "data": count,
             }
-            await self._queue.put(msg)
+            self._queue.put_nowait(msg)
 
     async def unsubscribe(self, *args):
         """Unsubscribe from one or more channels. If no args, unsubscribe from all."""
@@ -105,7 +107,7 @@ class PubSub:
                 "channel": channel_bytes,
                 "data": count,
             }
-            await self._queue.put(msg)
+            self._queue.put_nowait(msg)
 
     async def psubscribe(self, *args, **kwargs):
         """Subscribe to one or more glob patterns.
@@ -138,7 +140,7 @@ class PubSub:
                 "channel": pattern_bytes,
                 "data": count,
             }
-            await self._queue.put(msg)
+            self._queue.put_nowait(msg)
 
     async def punsubscribe(self, *args):
         """Unsubscribe from one or more patterns. If no args, unsubscribe from all."""
@@ -166,7 +168,33 @@ class PubSub:
                 "channel": pattern_bytes,
                 "data": count,
             }
-            await self._queue.put(msg)
+            self._queue.put_nowait(msg)
+
+    async def _queue_get(self, timeout):
+        """Read one item from the internal thread-safe queue.
+
+        For blocking reads, poll in short slices so external task cancellation
+        still propagates promptly and no worker thread is left parked forever.
+        """
+        if timeout == 0.0:
+            try:
+                return self._queue.get_nowait()
+            except queue.Empty:
+                return None
+
+        deadline = None if timeout is None else time.monotonic() + timeout
+        poll_timeout = 0.1 if timeout is None else min(timeout, 0.1)
+
+        while True:
+            try:
+                return await asyncio.to_thread(self._queue.get, True, poll_timeout)
+            except queue.Empty:
+                if deadline is None:
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                poll_timeout = min(remaining, 0.1)
 
     async def get_message(self, ignore_subscribe_messages=False, timeout=0.0):
         """Get the next message or None.
@@ -180,30 +208,9 @@ class PubSub:
         """
         while True:
             try:
-                if timeout is None:
-                    # Block forever
-                    raw = await self._queue.get()
-                elif timeout == 0.0:
-                    # Non-blocking
-                    try:
-                        raw = self._queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        return None
-                else:
-                    # Wait with timeout -- use asyncio.wait instead of
-                    # wait_for to avoid cpython#86296 where external
-                    # task.cancel() can be lost on Python < 3.12.
-                    get_task = asyncio.ensure_future(self._queue.get())
-                    done, _ = await asyncio.wait({get_task}, timeout=timeout)
-                    if done:
-                        raw = get_task.result()
-                    else:
-                        get_task.cancel()
-                        try:
-                            await get_task
-                        except asyncio.CancelledError:
-                            pass
-                        return None
+                raw = await self._queue_get(timeout)
+                if raw is None:
+                    return None
             except Exception:
                 return None
 
@@ -297,11 +304,24 @@ class PubSub:
         await self.aclose()
 
     async def aclose(self):
-        """Async close -- unsubscribe from all channels and patterns."""
+        """Async close -- unsubscribe from all channels and patterns, and
+        signal the Rust-side listener task to exit so its captured references
+        to this PubSub's event loop and queue are released.
+
+        This awaits the Rust listener's actual exit before returning. Without
+        that join, the background Tokio task can outlive the function-scoped
+        asyncio loop it captured and poison later worker-shutdown tests,
+        especially on Windows.
+        """
         if self.channels:
             await self.unsubscribe()
         if self.patterns:
             await self.punsubscribe()
+        if self._listener_started and self._subscriber_id is not None:
+            try:
+                await self._client._stop_subscriber_listener(self._subscriber_id)
+            finally:
+                self._listener_started = False
 
     async def reset(self):
         """Reset the PubSub state (deprecated alias for aclose)."""

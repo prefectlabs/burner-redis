@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 12
 Plan: Not started
 Status: Executing Phase 12
-Last activity: 2026-04-16 - Completed quick task 260416-hbn: Add test-passing gates to the release workflow
+Last activity: 2026-04-16 - Completed quick task 260416-k68: Add tag↔Cargo.toml version guard to release workflow
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -171,6 +171,7 @@ None yet.
 | 260416-cea | Fix three redis-py stream compat gaps: xread blocking, $ stream ID, xinfo_stream method | 2026-04-16 | f3fbb84 | [260416-cea-fix-three-redis-py-stream-compat-gaps-xr](./quick/260416-cea-fix-three-redis-py-stream-compat-gaps-xr/) |
 | 260416-gqd | Add CI guard against accidental hard dependency on redis | 2026-04-16 | 2647c54 | [260416-gqd-add-ci-guard-against-accidental-hard-dep](./quick/260416-gqd-add-ci-guard-against-accidental-hard-dep/) |
 | 260416-hbn | Add test-passing gates to the release workflow | 2026-04-16 | dd34627 | [260416-hbn-add-test-passing-gates-to-the-release-wo](./quick/260416-hbn-add-test-passing-gates-to-the-release-wo/) |
+| 260416-k68 | Add tag↔Cargo.toml version guard to .github/workflows/release.yml | 2026-04-16 | 3512c2d | [260416-k68-add-tag-cargo-toml-version-guard-to-gith](./quick/260416-k68-add-tag-cargo-toml-version-guard-to-gith/) |
 
 ## Session Continuity
 
