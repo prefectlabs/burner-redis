@@ -515,9 +515,9 @@ async def test_pubsub_get_message_task_cancellation(r):
     """Regression: external task.cancel() must propagate through
     PubSub.get_message on Python 3.10/3.11 (cpython#86296).
 
-    Pinned by the asyncio.wait-based implementation in pubsub.py --
-    if someone reverts to asyncio.wait_for, 3.10/3.11 users hit
-    task hangs because wait_for swallows external cancel signals.
+    Pinned by the short-slice waiting implementation in pubsub.py --
+    if someone switches the timeout path back to a cancellation-swallowing
+    wait primitive, 3.10/3.11 users hang here again.
     """
     ps = r.pubsub(ignore_subscribe_messages=True)
     await ps.subscribe("regression-channel")
@@ -543,7 +543,7 @@ async def test_pubsub_get_message_task_cancellation(r):
     except asyncio.TimeoutError:
         pytest.fail(
             "PubSub.get_message swallowed task.cancel() -- regression of "
-            "cpython#86296 fix (pubsub.py must use asyncio.wait, not wait_for)"
+            "cpython#86296 fix in the timed wait path"
         )
 
     try:
@@ -591,17 +591,45 @@ async def test_pubsub_get_message_task_cancellation_pattern(r):
         pass
 
 
+async def test_pubsub_get_message_task_cancellation_blocking(r):
+    """Regression: task.cancel() must also propagate from get_message(timeout=None).
+
+    The blocking path now polls a thread-safe queue in short slices so the
+    waiting task stays cancellable without reintroducing Windows loop-teardown
+    races.
+    """
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    await ps.subscribe("regression-channel")
+    await ps.get_message(timeout=1.0)  # drain subscribe confirmation
+
+    task = asyncio.create_task(ps.get_message(timeout=None))
+    await asyncio.sleep(0.2)
+    task.cancel()
+
+    try:
+        await asyncio.wait_for(task, timeout=2.0)
+    except asyncio.CancelledError:
+        pass
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "PubSub.get_message(timeout=None) swallowed task.cancel() -- "
+            "blocking queue path must stay cancellable"
+        )
+
+    try:
+        await ps.aclose()
+    except Exception:
+        pass
+
+
 async def test_pubsub_delivers_message_while_xread_blocks(r):
     """Regression: pubsub delivery must not stall while an asyncio task is parked
     in a long-lived pyo3 future (e.g. xread(block=N)).
 
-    The bug: the Rust pubsub listener called ``queue.put_nowait(msg)`` directly
-    from a Tokio worker thread. That appends to the asyncio loop's ``_ready``
-    queue but does NOT wake its selector, so if nothing else on the loop is
-    scheduled soon, delivery is delayed until the next spontaneous wakeup
-    (often the test's own timeout). Fixed by scheduling via
-    ``loop.call_soon_threadsafe(queue.put_nowait, msg)``, which writes the
-    self-pipe and wakes the selector immediately.
+    Delivery must stay prompt even while the asyncio loop is parked in a long
+    blocking Rust future. The listener now writes into a thread-safe queue and
+    the async side waits for that queue without depending on loop-bound wakeups
+    from Tokio worker threads.
 
     Concretely reproduced as pydocket pub/sub timeouts on Python 3.12+ once
     xread(block=N) actually blocked (prior to that, xread returned instantly
@@ -648,11 +676,11 @@ async def test_pubsub_delivers_message_while_xread_blocks(r):
         assert result["type"] == "message"
         assert result["channel"] == b"regression-channel"
         assert result["data"] == b"hi"
-        # Delivery should be fast (< 100ms) with call_soon_threadsafe. The
-        # pre-fix behaviour was ~2000ms (matched the outer wait_for timeout).
+        # Delivery should still be fast while xread is blocked. The pre-fix
+        # behaviour was ~2000ms (matched the outer wait_for timeout).
         assert latency < 0.3, (
             f"pubsub delivery latency {latency*1000:.0f}ms while xread blocked -- "
-            "regression of listener call_soon_threadsafe fix"
+            "regression of listener wakeup fix"
         )
 
         try:

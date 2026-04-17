@@ -217,8 +217,8 @@ pub struct ListenerStopHandle {
     pub stop_tx: oneshot::Sender<()>,
     pub stop_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// JoinHandle for the spawned tokio task. `_stop_subscriber_listener`
-    /// awaits this to guarantee the listener has fully exited (and thus
-    /// no `call_soon_threadsafe` is in flight) before returning to Python.
+    /// awaits this to guarantee the listener has fully exited before
+    /// returning to Python.
     pub join_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -2472,9 +2472,7 @@ impl Store {
     ///
     /// Called by `PubSub.aclose()`. Sets the stop flag, fires the stop
     /// oneshot, cleans up channel/pattern maps, and returns the JoinHandle
-    /// so the caller can await the listener's actual exit. This guarantees
-    /// no `call_soon_threadsafe` is in flight when aclose() returns, which
-    /// prevents the Windows IOCP corruption race (cpython#116773).
+    /// so the caller can await the listener's actual exit.
     pub fn stop_subscriber_listener(&self, subscriber_id: u64) -> Option<tokio::task::JoinHandle<()>> {
         let mut registry = self.pubsub.write();
         let join_handle;
@@ -2485,7 +2483,7 @@ impl Store {
             //   (a) parked on rx.recv() inside select! — the oneshot
             //       wakes it, it breaks out of the loop;
             //   (b) mid-delivery inside Python::try_attach — the flag
-            //       makes it bail out before calling call_soon_threadsafe.
+            //       makes it bail out before touching the Python queue.
             handle.stop_flag.store(true, std::sync::atomic::Ordering::Release);
             let _ = handle.stop_tx.send(());
             join_handle = handle.join_handle.take();

@@ -1887,7 +1887,7 @@ impl BurnerRedis {
     }
 
     /// Internal: Subscribe and start a background task that filters messages
-    /// into a Python asyncio.Queue. Returns subscriber_id.
+    /// into a Python thread-safe queue. Returns subscriber_id.
     /// Called once by Python PubSub on first subscribe.
     ///
     /// NOTE: This remains async (future_into_py) because it spawns a long-running
@@ -1902,34 +1902,18 @@ impl BurnerRedis {
     /// dropped when `BurnerRedis` itself goes away. Under pytest-asyncio on
     /// Python 3.11+, each test tears down and re-creates its event loop.
     /// The captured `queue` PyObject in this listener would otherwise point
-    /// at the PRIOR test's asyncio Queue. Stopping the listener from
+    /// at the PRIOR test's queue. Stopping the listener from
     /// `PubSub.aclose()` removes that foot-gun entirely.
     ///
-    /// **Known issue:** Message delivery currently uses
-    /// `event_loop.call_soon_threadsafe(queue.put_nowait, msg)`. This
-    /// writes to the ProactorEventLoop's IOCP self-pipe on Windows, and
-    /// a racy call_soon_threadsafe against a closing loop can corrupt
-    /// IOCP state (cpython#116773), causing a flaky hang (~10-20% of
-    /// the time) in GetQueuedCompletionStatus. The stop_flag check
-    /// before each call_soon_threadsafe narrows the window but does not
-    /// eliminate it entirely. A future fix should either:
-    ///   (a) await the listener's actual exit in _stop_subscriber_listener
-    ///       so no call_soon_threadsafe fires after aclose() returns, or
-    ///   (b) replace call_soon_threadsafe with a thread-safe channel
-    ///       (e.g. janus queue) that doesn't touch the event loop pipe.
+    /// Message delivery uses a thread-safe Python queue. The Tokio listener
+    /// calls `queue.put_nowait(msg)` directly while holding the GIL, which
+    /// avoids `call_soon_threadsafe` entirely and sidesteps the Windows
+    /// ProactorEventLoop self-pipe race (cpython#116773).
     fn _subscribe_listener<'py>(&self, py: Python<'py>, subscriber_id: u64, queue: Py<PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let store = self.store.clone();
-        // Capture the running asyncio event loop for call_soon_threadsafe.
-        let asyncio = py.import("asyncio")?;
-        let event_loop: Py<PyAny> = asyncio
-            .getattr("get_running_loop")?
-            .call0()?
-            .into();
 
-        // Atomic flag set by aclose() to prevent the listener from calling
-        // call_soon_threadsafe after the PubSub is being torn down. The
-        // listener checks this flag under GIL BEFORE every
-        // call_soon_threadsafe invocation.
+        // Atomic flag set by aclose() to prevent the listener from touching
+        // the Python queue after the PubSub is being torn down.
         let stop_flag = Arc::new(AtomicBool::new(false));
 
         // Oneshot used by `tokio::select!` to break out of rx.recv()
@@ -1947,7 +1931,7 @@ impl BurnerRedis {
             };
 
             // Spawn a background Tokio task that forwards matching messages
-            // to the Python queue via call_soon_threadsafe.
+            // to the Python thread-safe queue.
             let join_handle = tokio::spawn(async move {
                 tokio::pin!(stop_rx);
                 loop {
@@ -1981,16 +1965,14 @@ impl BurnerRedis {
                                         dict.set_item("channel", PyBytes::new(py, &msg.channel))?;
                                         dict.set_item("data", PyBytes::new(py, &msg.data))?;
                                         let put_nowait = queue.getattr(py, "put_nowait")?;
-                                        event_loop
-                                            .getattr(py, "call_soon_threadsafe")?
-                                            .call1(py, (put_nowait, dict))?;
+                                        put_nowait.call1(py, (dict,))?;
                                         Ok(())
                                     });
                                     match delivered {
                                         Some(Ok(())) => {}
                                         Some(Err(_)) => {
-                                            // Event loop is closed or other
-                                            // error. Stop the listener.
+                                            // Queue is gone or another Python
+                                            // error occurred. Stop the listener.
                                             break;
                                         }
                                         None => {
@@ -2028,11 +2010,9 @@ impl BurnerRedis {
     /// stop, remove the subscriber's registrations, and await the task's
     /// actual exit before returning to Python.
     ///
-    /// The stop flag prevents the listener from issuing any *new*
-    /// `call_soon_threadsafe` deliveries after shutdown begins. Awaiting the
-    /// JoinHandle here closes the remaining race where the task is still alive
-    /// and holding references to a function-scoped asyncio loop after
-    /// `PubSub.aclose()` has returned.
+    /// The stop flag prevents the listener from issuing any new deliveries
+    /// after shutdown begins. Awaiting the JoinHandle here guarantees the
+    /// task has fully exited before `PubSub.aclose()` returns.
     fn _stop_subscriber_listener<'py>(&self, py: Python<'py>, subscriber_id: u64) -> PyResult<Bound<'py, PyAny>> {
         let join_handle = self.store.stop_subscriber_listener(subscriber_id);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
