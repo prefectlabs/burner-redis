@@ -4175,4 +4175,72 @@ mod tests {
         assert_eq!(consumers[0].0, Bytes::from("consumer1"));
         assert_eq!(consumers[0].1, 2);
     }
+
+    // ── Shutdown Tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_is_shutdown_initially_false() {
+        let store = Store::new();
+        assert!(!store.is_shutdown());
+    }
+
+    #[test]
+    fn test_shutdown_sets_flag() {
+        let store = Store::new();
+        store.shutdown();
+        assert!(store.is_shutdown());
+    }
+
+    #[test]
+    fn test_shutdown_is_idempotent() {
+        let store = Store::new();
+        store.shutdown();
+        store.shutdown();
+        assert!(store.is_shutdown());
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_wakes_stream_notify() {
+        let store = Arc::new(Store::new());
+        let store2 = store.clone();
+
+        // Spawn a task that waits on stream_notify — it will hang
+        // forever unless shutdown() calls notify_waiters().
+        let handle = tokio::spawn(async move {
+            let notify = store2.stream_notify();
+            notify.notified().await;
+        });
+
+        // Give the spawned task time to park on notified()
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        store.shutdown();
+
+        // The task should complete promptly (not hang)
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            handle,
+        ).await.expect("timed out — shutdown didn't wake notified()").unwrap();
+    }
+
+    #[test]
+    fn test_shutdown_stops_pubsub_listeners() {
+        let store = Store::new();
+        let (id, _rx) = store.new_subscriber();
+        let (stop_tx, _stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let stop_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let join_handle = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .spawn(async {});
+        store.register_listener_stopper(id, stop_tx, stop_flag.clone(), join_handle);
+
+        // Listener registered
+        assert!(!stop_flag.load(std::sync::atomic::Ordering::Acquire));
+
+        store.shutdown();
+
+        // stop_flag set by shutdown -> stop_subscriber_listener
+        assert!(stop_flag.load(std::sync::atomic::Ordering::Acquire));
+    }
 }
