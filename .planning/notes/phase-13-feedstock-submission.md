@@ -8,7 +8,7 @@ sha256: "189698190835809f73fdb5af9ead4962975181c7fc8297045a5d831c0d465add"
 sdist_url: "https://pypi.org/packages/source/b/burner-redis/burner_redis-0.1.2.tar.gz"
 maintainer_github_handle: "desertaxle"
 lint_result: "PASS"
-staged_recipes_pr_url: "<TBD — filled in after Task 2 push>"
+staged_recipes_pr_url: "https://github.com/conda-forge/staged-recipes/pull/33024"
 ---
 
 # conda-forge/staged-recipes submission — burner-redis
@@ -274,21 +274,19 @@ fix that made the second run clean.
   `skip: target_platform == "linux-ppc64le"` as the single-string form that
   matches current v1 idiom. conda-smithy accepted it with no warning.
 
-## Submission (pending — Task 2 gate)
+## Submission
 
-Task 2 is a `checkpoint:human-verify` gate. The following push steps will be
-performed by the developer (NOT by the executor) after approval:
+PR opened: https://github.com/conda-forge/staged-recipes/pull/33024
 
-1. Fork `conda-forge/staged-recipes` via `gh repo fork` (or GitHub UI).
-2. Clone fork to `/tmp/phase-13-staged-recipes/fork`, create branch
-   `add-burner-redis`, copy `/tmp/phase-13-staged-recipes/recipe-draft.yaml`
-   to `recipes/burner-redis/recipe.yaml`, commit, push.
-3. Open PR against `conda-forge/staged-recipes` with the body in the plan.
-4. Update the frontmatter field `staged_recipes_pr_url:` in this note with
-   the URL, then approve.
-
-This note's `staged_recipes_pr_url` frontmatter field is a placeholder
-(`<TBD — filled in after Task 2 push>`) and MUST be updated when the PR lands.
+- Fork: https://github.com/desertaxle/staged-recipes
+- Branch: `add-burner-redis` (commit `3b806cd519`)
+- Base: `conda-forge/staged-recipes@main`
+- Recipe path in PR: `recipes/burner-redis/recipe.yaml` (63 lines, byte-identical to
+  `/tmp/phase-13-staged-recipes/recipe-draft.yaml` which passed
+  `conda-smithy recipe-lint --conda-forge` cleanly)
+- PR title: `Add burner-redis`
+- PR body: see `/tmp/phase-13-pr-body.md`
+- Opened by: @desertaxle on 2026-04-18
 
 ## Iteration log
 
