@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 12 context gathered
-last_updated: "2026-04-18T02:38:40.227Z"
-last_activity: 2026-04-18 -- Phase 13 execution started
+stopped_at: Phase 13 Plan 01 complete — sdist feedstock-readiness verified (0.1.2)
+last_updated: "2026-04-18T03:04:14Z"
+last_activity: 2026-04-18 -- Phase 13 Plan 01 complete; pinned_version=0.1.2; Plan 02 unblocked
 progress:
   total_phases: 13
   completed_phases: 12
   total_plans: 28
-  completed_plans: 25
-  percent: 89
+  completed_plans: 26
+  percent: 93
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 ## Current Position
 
 Phase: 13 (publish-burner-redis-to-conda-forge) — EXECUTING
-Plan: 1 of 3
-Status: Executing Phase 13
-Last activity: 2026-04-18 -- Phase 13 execution started
+Plan: 2 of 3
+Status: Plan 01 complete; Plan 02 (Rust license audit) unblocked
+Last activity: 2026-04-18 -- Phase 13 Plan 01 complete (pinned_version=0.1.2)
 
-Progress: [░░░░░░░░░░] 0%
+Progress: [███░░░░░░░] 33%
 
 ## Performance Metrics
 
@@ -82,6 +82,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 08 P02 | 4min | 2 tasks | 2 files |
 | Phase 09 P01 | 1min | 2 tasks | 2 files |
 | Phase 09 P02 | 3min | 2 tasks | 3 files |
+| Phase 13 P01 | 3min | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -134,6 +135,9 @@ Recent decisions affecting current work:
 - [Phase 09]: No caching or sccache -- keep CI workflow simple for initial version
 - [Phase 09]: PyPI auth via MATURIN_PYPI_TOKEN secret with OIDC id-token permission for future trusted publisher migration
 - [Phase 09]: GitHub Release uses softprops/action-gh-release@v2 with auto-generated release notes
+- [Phase 13]: 0.1.2 sdist passed feedstock-readiness audit — no pyproject.toml fix needed, no 0.1.3 release cut (pinned_version=0.1.2 for conda-forge recipe)
+- [Phase 13]: maturin 1.x ships Cargo.lock in sdist by default — no explicit `[tool.maturin].include` needed
+- [Phase 13]: No `cargo vendor` in sdist — `CARGO_NET_OFFLINE=true` + pre-populated cargo cache proves offline-build capability, which is strictly harder than conda-forge CI's actual network posture
 
 ### Pending Todos
 
@@ -176,6 +180,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-14T20:56:01.354Z
-Stopped at: Phase 12 context gathered
-Resume file: .planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-CONTEXT.md
+Last session: 2026-04-18T03:04:14Z
+Stopped at: Phase 13 Plan 01 complete — pinned_version=0.1.2; Plan 02 (license audit) unblocked
+Resume file: .planning/phases/13-publish-burner-redis-to-conda-forge/13-02-PLAN.md
