@@ -290,7 +290,26 @@ PR opened: https://github.com/conda-forge/staged-recipes/pull/33024
 
 ## Iteration log
 
-_(Populated in Task 3 — CI feedback + reviewer comment loop.)_
+### Iteration 1 — 2026-04-18 (initial push, CI run Azure #1507570)
+
+- **linter**: PASS (conda-forge-admin bot: "in excellent condition")
+- **linux_64**: PASS
+- **osx_64**: FAIL — infra only. macOS SDK download from
+  `github.com/phracker/MacOSX-SDKs/releases/download/11.3/MacOSX11.0.sdk.tar.xz`
+  returned 92 bytes; shasum check failed. Build never started. Not a recipe issue.
+- **win_64**: FAIL — rattler-build flakiness on Windows.
+  Build fully succeeded (`burner-redis-0.1.2-py313h0ab6cc6_0.conda` written,
+  `_burner_redis.pyd` links only to whitelisted ucrt/vc14/system DLLs). Post-build
+  cleanup entered an infinite `pending-rm-` rename cascade on `D:\bld\bld\rattler-build_*\.work`,
+  eventually exceeding Windows MAX_PATH. Test phase never executed. Not a recipe issue.
+
+**Action:** pushed empty commit `aef4878cc7` ("Retrigger CI…") to re-run Azure pipeline.
+No recipe changes. If iteration 2 repeats the same Windows failure on a clean runner,
+will evaluate simpler test block or `build.skip`/`no_cache` workarounds.
+
+### Iteration 2 — 2026-04-18 (CI retrigger, awaiting results)
+
+_(In flight — awaiting Azure pipeline results from commit `aef4878cc7`.)_
 
 ## Merge
 
