@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Phase 13 Plan 02 complete — Rust dep license audit PASS; THIRDPARTY.yml committed
-last_updated: "2026-04-18T03:10:49Z"
-last_activity: 2026-04-18 -- Phase 13 Plan 02 complete; cargo-bundle-licenses 4.0.0 clean; Plan 03 (staged-recipes PR) unblocked
+status: awaiting-checkpoint
+stopped_at: Phase 13 Plan 03 Task 1 complete — recipe.yaml drafted + conda-smithy lint clean; pausing at Task 2 (checkpoint:human-verify — developer must fork conda-forge/staged-recipes, push recipe, open PR)
+last_updated: "2026-04-18T03:19:00Z"
+last_activity: 2026-04-18 -- Phase 13 Plan 03 Task 1 commit 665ca40; recipe draft at /tmp/phase-13-staged-recipes/recipe-draft.yaml; maintainer corrected from ajstreed (404) to desertaxle (verified); checkpoint awaiting developer action
 progress:
   total_phases: 13
   completed_phases: 12
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 
 ## Current Position
 
-Phase: 13 (publish-burner-redis-to-conda-forge) — EXECUTING
+Phase: 13 (publish-burner-redis-to-conda-forge) — EXECUTING (checkpoint pending)
 Plan: 3 of 3
-Status: Plan 02 complete; Plan 03 (staged-recipes PR) unblocked — hard gate (Steps 1 AND 2 both pass) now cleared
-Last activity: 2026-04-18 -- Phase 13 Plan 02 complete (license audit PASS; THIRDPARTY.yml committed)
+Status: Plan 03 Task 1 of 4 complete (recipe drafted + lint clean); paused at Task 2 checkpoint:human-verify (developer must fork conda-forge/staged-recipes, push recipe-draft.yaml, open PR)
+Last activity: 2026-04-18 -- Phase 13 Plan 03 Task 1 commit 665ca40; waiting on developer to open staged-recipes PR
 
 Progress: [██████░░░░] 67%
 
@@ -156,7 +156,7 @@ None yet.
 
 ### Blockers/Concerns
 
-None yet.
+- [Phase 13 Plan 03] Awaiting developer action on Task 2 checkpoint: fork `conda-forge/staged-recipes`, push `/tmp/phase-13-staged-recipes/recipe-draft.yaml` to `recipes/burner-redis/recipe.yaml` on a branch, open PR. Resume file: `.planning/phases/13-publish-burner-redis-to-conda-forge/13-03-PLAN.md`. Submission note: `.planning/notes/phase-13-feedstock-submission.md` (frontmatter `staged_recipes_pr_url` field must be filled in after push).
 
 ### Quick Tasks Completed
 
@@ -184,6 +184,7 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-18T03:10:49Z
-Stopped at: Phase 13 Plan 02 complete — license audit PASS; THIRDPARTY.yml at repo root; Plan 03 (staged-recipes PR) unblocked
+Last session: 2026-04-18T03:19:00Z
+Stopped at: Phase 13 Plan 03 Task 1 complete (commit 665ca40); paused at Task 2 checkpoint — developer must fork conda-forge/staged-recipes and open PR before execution resumes
 Resume file: .planning/phases/13-publish-burner-redis-to-conda-forge/13-03-PLAN.md
+Resume point: Task 2 (checkpoint:human-verify, blocking) — verify staged_recipes_pr_url recorded in .planning/notes/phase-13-feedstock-submission.md frontmatter, then continue to Task 3 (CI iteration) + Task 4 (post-merge verify + SUMMARY)
