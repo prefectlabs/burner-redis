@@ -4,14 +4,14 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 12 context gathered
-last_updated: "2026-04-14T22:09:45.024Z"
-last_activity: 2026-04-14
+last_updated: "2026-04-18T02:38:40.227Z"
+last_activity: 2026-04-18 -- Phase 13 execution started
 progress:
-  total_phases: 12
+  total_phases: 13
   completed_phases: 12
-  total_plans: 25
+  total_plans: 28
   completed_plans: 25
-  percent: 100
+  percent: 89
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 12 — close-remaining-redis-py-compatibility-gaps-for-drop-in-repl
+**Current focus:** Phase 13 — publish-burner-redis-to-conda-forge
 
 ## Current Position
 
-Phase: 12
-Plan: Not started
-Status: Executing Phase 12
-Last activity: 2026-04-16 - Completed quick task 260416-k68: Add tag↔Cargo.toml version guard to release workflow
+Phase: 13 (publish-burner-redis-to-conda-forge) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 13
+Last activity: 2026-04-18 -- Phase 13 execution started
 
 Progress: [░░░░░░░░░░] 0%
 

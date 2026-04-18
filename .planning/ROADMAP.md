@@ -230,10 +230,12 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
 ### Phase 13: Publish burner-redis to conda-forge
 
-**Goal:** [To be planned]
-**Requirements**: TBD
+**Goal:** `conda install -c conda-forge burner-redis` works on linux-64, linux-aarch64, osx-64, osx-arm64, and win-64 — unblocking conda users of Prefect who pick up burner-redis transitively through pydocket
+**Requirements**: (no REQ-IDs — external-distribution phase)
 **Depends on:** Phase 12
-**Plans:** 0 plans
+**Plans:** 3 plans
 
 Plans:
-- [ ] TBD (run /gsd-plan-phase 13 to break down)
+- [ ] 13-01-PLAN.md — Verify PyPI sdist is feedstock-ready (Cargo.lock present, offline build passes); resolve version pin (0.1.2 or cut 0.1.3)
+- [ ] 13-02-PLAN.md — Rust dependency license audit with cargo-bundle-licenses; commit THIRDPARTY.yml
+- [ ] 13-03-PLAN.md — Draft recipe on fork of conda-forge/staged-recipes, open PR, iterate on CI, verify post-merge feedstock publishes on all 5 platforms + smoke test
