@@ -307,9 +307,34 @@ PR opened: https://github.com/conda-forge/staged-recipes/pull/33024
 No recipe changes. If iteration 2 repeats the same Windows failure on a clean runner,
 will evaluate simpler test block or `build.skip`/`no_cache` workarounds.
 
-### Iteration 2 — 2026-04-18 (CI retrigger, awaiting results)
+### Iteration 2 — 2026-04-18 (CI retrigger, Azure #1507579)
 
-_(In flight — awaiting Azure pipeline results from commit `aef4878cc7`.)_
+- **linter**: PASS
+- **linux_64**: PASS
+- **osx_64**: PASS — clean runner, SDK download succeeded.
+- **win_64**: FAIL — **same rattler-build `.pending-rm-` cascade**, deterministic across retriggers.
+  Confirmed rattler-build version on runner is **0.62.2** (which includes the 5-retry fix
+  from prefix-dev/rattler-build#1589, shipped in 0.41.0). The retry budget is being
+  overwhelmed by our recipe's **two** `tests:` entries: each of 4 Python variants spins up
+  two test envs (8 cleanup cycles total), each of which leaves an undeletable `.work` dir
+  under Windows file locking. By the 4th variant the accumulated `.pending-rm-` rename
+  chain exceeds MAX_PATH.
+
+**Root cause reference:**
+- rattler-build issue: https://github.com/prefix-dev/rattler-build/issues/1431 (closed, fixed in 0.41.0)
+- rattler-build fix: https://github.com/prefix-dev/rattler-build/pull/1589 (5-retry backoff)
+- granian-feedstock precedent used `if: not win` on tests as stopgap before the fix
+
+**Action (recipe fix):** commit `b8a6e128fb` — collapse the two `tests:` entries into one.
+The redundant `python: imports + pip_check` block is removed; the existing `script:` test
+already does `pip check` + `python -c "import burner_redis; burner_redis.BurnerRedis()"`,
+which gives equivalent coverage (pip_check + import + instantiation). Halves the number of
+test environments per variant from 8 to 4, which should leave the 5-retry cleanup budget
+enough headroom to clear between variants.
+
+### Iteration 3 — 2026-04-18 (test-block collapse, awaiting results)
+
+_(In flight — awaiting Azure pipeline results from commit `b8a6e128fb`.)_
 
 ## Merge
 
