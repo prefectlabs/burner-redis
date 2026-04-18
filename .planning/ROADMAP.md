@@ -227,3 +227,13 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 10. Pub/Sub | 2/2 | Complete    | 2026-04-14 |
 | 11. Pydocket Compatibility | 2/2 | Complete    | 2026-04-14 |
 | 12. Drop-in Replacement | 2/2 | Complete    | 2026-04-14 |
+
+### Phase 13: Publish burner-redis to conda-forge
+
+**Goal:** [To be planned]
+**Requirements**: TBD
+**Depends on:** Phase 12
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 13 to break down)

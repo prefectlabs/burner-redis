@@ -144,6 +144,7 @@ None yet.
 - Phase 10 added: Add PUB/SUB support (SUBSCRIBE, UNSUBSCRIBE, PUBLISH, PSUBSCRIBE, PUNSUBSCRIBE, and message dispatch)
 - Phase 11 added: Close redis-py compatibility gaps for pydocket integration
 - Phase 12 added: Close remaining redis-py compatibility gaps for drop-in replacement
+- Phase 13 added: Publish burner-redis to conda-forge (pre-plan context committed in CONTEXT.md from 2026-04-17 brainstorm; absorbs three pending todos: verify-sdist-contains-cargo-lock, audit-rust-dep-licenses, submit-conda-forge-feedstock)
 
 ### Blockers/Concerns
 
