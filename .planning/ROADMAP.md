@@ -227,7 +227,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 10. Pub/Sub | 2/2 | Complete    | 2026-04-14 |
 | 11. Pydocket Compatibility | 2/2 | Complete    | 2026-04-14 |
 | 12. Drop-in Replacement | 2/2 | Complete    | 2026-04-14 |
-| 13. Publish burner-redis to conda-forge | 1/3 | In progress | - |
+| 13. Publish burner-redis to conda-forge | 2/3 | In progress | - |
 
 ### Phase 13: Publish burner-redis to conda-forge
 
@@ -238,5 +238,5 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 
 Plans:
 - [x] 13-01-PLAN.md — Verify PyPI sdist is feedstock-ready (Cargo.lock present, offline build passes); resolve version pin (0.1.2 or cut 0.1.3) — **PASS, pinned_version=0.1.2, sha256=189698190835809f73fdb5af9ead4962975181c7fc8297045a5d831c0d465add**
-- [ ] 13-02-PLAN.md — Rust dependency license audit with cargo-bundle-licenses; commit THIRDPARTY.yml
+- [x] 13-02-PLAN.md — Rust dependency license audit with cargo-bundle-licenses; commit THIRDPARTY.yml — **PASS, cargo-bundle-licenses 4.0.0, all 57 crates permissive (MIT / Apache-2.0 / Unlicense / Unicode-3.0), no remediation required**
 - [ ] 13-03-PLAN.md — Draft recipe on fork of conda-forge/staged-recipes, open PR, iterate on CI, verify post-merge feedstock publishes on all 5 platforms + smoke test
