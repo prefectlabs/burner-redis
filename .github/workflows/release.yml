@@ -133,6 +133,11 @@ jobs:
           command: sdist
           args: --out dist
 
+      - name: Verify sdist contains THIRDPARTY.yml
+        run: |
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')
+          tar -tzf "dist/burner_redis-${VERSION}.tar.gz" | grep -Fx "burner_redis-${VERSION}/THIRDPARTY.yml"
+
       - name: Upload sdist
         uses: actions/upload-artifact@v4
         with:
