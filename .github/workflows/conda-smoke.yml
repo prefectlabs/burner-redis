@@ -72,6 +72,37 @@ jobs:
           grep -n -- "--no-default-features" .github/conda-smoke/build.log
           grep -n "all tests passed" .github/conda-smoke/build.log
 
+      - name: Collect Windows smoke diagnostics
+        if: always()
+        shell: pwsh
+        run: |
+          $diagDir = ".github/conda-smoke/diagnostics"
+          New-Item -ItemType Directory -Force -Path $diagDir | Out-Null
+
+          $buildRoot = Get-ChildItem ".github/conda-smoke/output/bld" -Directory |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+
+          if (-not $buildRoot) {
+            Write-Host "No build root found under .github/conda-smoke/output/bld"
+            exit 0
+          }
+
+          $filesToCopy = @(
+            (Join-Path $buildRoot.FullName "conda_build.bat"),
+            (Join-Path $buildRoot.FullName "build_env.bat"),
+            (Join-Path $buildRoot.FullName "work/smoke-pip.stdout.log"),
+            (Join-Path $buildRoot.FullName "work/smoke-pip.stderr.log")
+          )
+
+          foreach ($path in $filesToCopy) {
+            if (Test-Path $path) {
+              Copy-Item $path -Destination (Join-Path $diagDir ([IO.Path]::GetFileName($path))) -Force
+            }
+          }
+
+          Get-ChildItem $diagDir | Select-Object Name,Length | Format-Table -AutoSize
+
       - name: Upload conda smoke artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -79,8 +110,5 @@ jobs:
           name: conda-smoke-win-build
           path: |
             .github/conda-smoke/build.log
-            .github/conda-smoke/output/bld/**/conda_build.bat
-            .github/conda-smoke/output/bld/**/build_env.bat
-            .github/conda-smoke/output/bld/**/work/smoke-pip.stdout.log
-            .github/conda-smoke/output/bld/**/work/smoke-pip.stderr.log
+            .github/conda-smoke/diagnostics/
             .github/conda-smoke/output/win-64/
