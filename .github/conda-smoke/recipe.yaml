@@ -28,7 +28,7 @@ requirements:
     - pip
     - python
     - maturin >=1,<2
-    - lua
+    - lua >=5.4,<5.5
   run:
     - python
 
