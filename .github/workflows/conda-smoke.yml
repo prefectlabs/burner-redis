@@ -59,7 +59,7 @@ jobs:
             --variant-config .github/conda-smoke/win64.yaml \
             --output-dir .github/conda-smoke/output \
             --keep-build \
-            --log-style plain | tee .github/conda-smoke/build.log
+            --log-style plain 2>&1 | tee .github/conda-smoke/build.log
 
       - name: Assert non-vendored Lua path
         shell: bash -el {0}
@@ -70,7 +70,9 @@ jobs:
             exit 1
           fi
           grep -n -- "--no-default-features" .github/conda-smoke/build.log
-          grep -n "all tests passed" .github/conda-smoke/build.log
+          grep -n "Archive written to" .github/conda-smoke/build.log
+          grep -n "pip check" .github/conda-smoke/build.log
+          grep -n 'python -c "import burner_redis; burner_redis.BurnerRedis()"' .github/conda-smoke/build.log
 
       - name: Collect Windows smoke diagnostics
         if: always()
