@@ -17,7 +17,7 @@ build:
   script:
     - set LUA_LIB_NAME=lua
     - set LUA_LIB=%LIBRARY_LIB%
-    - python -m pip install . -vv --no-build-isolation --config-settings=build-args=--no-default-features
+    - python -m pip install . -vv --no-build-isolation --config-settings=build-args=--no-default-features 1> smoke-pip.stdout.log 2> smoke-pip.stderr.log
 
 requirements:
   build:

@@ -79,4 +79,8 @@ jobs:
           name: conda-smoke-win-build
           path: |
             .github/conda-smoke/build.log
+            .github/conda-smoke/output/bld/**/conda_build.bat
+            .github/conda-smoke/output/bld/**/build_env.bat
+            .github/conda-smoke/output/bld/**/work/smoke-pip.stdout.log
+            .github/conda-smoke/output/bld/**/work/smoke-pip.stderr.log
             .github/conda-smoke/output/win-64/
