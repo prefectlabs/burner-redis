@@ -21,9 +21,9 @@ build:
 
 requirements:
   build:
-    - ${{ compiler('c') }}
-    - ${{ stdlib('c') }}
-    - ${{ compiler('rust') }}
+    - vs2022_win-64
+    - vs_win-64
+    - rust_win-64 >=1.94
   host:
     - pip
     - python
@@ -46,4 +46,3 @@ about:
   license_file:
     - LICENSE
     - THIRDPARTY.yml
-

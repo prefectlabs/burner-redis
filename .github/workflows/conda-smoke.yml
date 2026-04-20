@@ -79,4 +79,4 @@ jobs:
           name: conda-smoke-win-build
           path: |
             .github/conda-smoke/build.log
-            .github/conda-smoke/output/
+            .github/conda-smoke/output/win-64/
