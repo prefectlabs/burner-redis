@@ -12,7 +12,7 @@ Built to back [docket](https://github.com/chrisguidry/docket) and self-hosted [P
 pip install burner-redis
 ```
 
-Requires Python 3.9+. Pre-built wheels available for Linux (x86_64, aarch64) and macOS (x86_64, arm64).
+Requires Python 3.10+. Pre-built wheels available for Linux (x86_64, aarch64), macOS (x86_64, arm64), and Windows (x86_64, arm64).
 
 ## Quick start
 
@@ -92,6 +92,25 @@ uv run pytest
 
 # Run Rust tests
 cargo test
+```
+
+## Packaging notes
+
+Wheel builds use a vendored Lua 5.4 by default so `pip install burner-redis` does not require a
+system Lua.
+
+Packaging systems that already provide Lua can opt out of vendoring and link against that copy
+instead:
+
+```bash
+maturin build --release --no-default-features
+```
+
+If auto-detection is not available, point Cargo at the packaged Lua library explicitly:
+
+```bash
+LUA_LIB_NAME=lua
+LUA_LIB=/path/to/lib
 ```
 
 ## License
