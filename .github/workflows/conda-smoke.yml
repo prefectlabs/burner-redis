@@ -1,0 +1,82 @@
+name: Conda Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - README.md
+      - python/**
+      - src/**
+      - THIRDPARTY.yml
+      - .github/workflows/conda-smoke.yml
+      - .github/conda-smoke/**
+  pull_request:
+    branches:
+      - main
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - README.md
+      - python/**
+      - src/**
+      - THIRDPARTY.yml
+      - .github/workflows/conda-smoke.yml
+      - .github/conda-smoke/**
+
+permissions:
+  contents: read
+
+jobs:
+  windows-conda-nonvendored:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up micromamba
+        uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: .github/conda-smoke/environment-win.yml
+          environment-name: conda-smoke
+          cache-environment: false
+          cache-downloads: true
+          init-shell: >-
+            bash
+
+      - name: Build local conda smoke recipe
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          rattler-build build \
+            -r .github/conda-smoke \
+            --target-platform win-64 \
+            --variant-config .github/conda-smoke/win64.yaml \
+            --output-dir .github/conda-smoke/output \
+            --keep-build \
+            --log-style plain | tee .github/conda-smoke/build.log
+
+      - name: Assert non-vendored Lua path
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          if grep -n "Downloaded lua-src" .github/conda-smoke/build.log; then
+            echo "::error::Vendored lua-src was still pulled into the build."
+            exit 1
+          fi
+          grep -n -- "--no-default-features" .github/conda-smoke/build.log
+          grep -n "all tests passed" .github/conda-smoke/build.log
+
+      - name: Upload conda smoke artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: conda-smoke-win-build
+          path: |
+            .github/conda-smoke/build.log
+            .github/conda-smoke/output/

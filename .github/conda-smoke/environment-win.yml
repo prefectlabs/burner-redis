@@ -1,0 +1,6 @@
+name: conda-smoke
+channels:
+  - conda-forge
+dependencies:
+  - rattler-build =0.62.2
+

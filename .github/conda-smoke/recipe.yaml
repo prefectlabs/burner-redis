@@ -1,0 +1,49 @@
+schema_version: 1
+
+context:
+  name: burner-redis
+  # Keep this in sync with Cargo.toml when the package version changes.
+  version: "0.1.5"
+
+package:
+  name: ${{ name|lower }}
+  version: ${{ version }}
+
+source:
+  path: ../..
+
+build:
+  number: 0
+  script:
+    - set LUA_LIB_NAME=lua
+    - set LUA_LIB=%LIBRARY_LIB%
+    - python -m pip install . -vv --no-build-isolation --config-settings=build-args=--no-default-features
+
+requirements:
+  build:
+    - ${{ compiler('c') }}
+    - ${{ stdlib('c') }}
+    - ${{ compiler('rust') }}
+  host:
+    - pip
+    - python
+    - maturin >=1,<2
+    - lua
+  run:
+    - python
+
+tests:
+  - requirements:
+      run:
+        - pip
+    script:
+      - pip check
+      - python -c "import burner_redis; burner_redis.BurnerRedis()"
+
+about:
+  summary: Windows conda smoke test for the non-vendored Lua build path
+  license: MIT
+  license_file:
+    - LICENSE
+    - THIRDPARTY.yml
+
