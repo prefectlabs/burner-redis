@@ -2,6 +2,10 @@ c_stdlib:
   - vs
 channel_sources:
   - conda-forge
+python:
+  - 3.10.* *_cpython
+  - 3.11.* *_cpython
+  - 3.12.* *_cpython
+  - 3.13.* *_cpython
 target_platform:
   - win-64
-

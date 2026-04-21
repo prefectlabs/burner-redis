@@ -15,9 +15,13 @@ source:
 build:
   number: 0
   script:
+    - set BUILD_SRC=%TEMP%\burner-redis-src-%RANDOM%%RANDOM%
+    - powershell -NoProfile -Command "Copy-Item -LiteralPath $env:SRC_DIR -Destination $env:BUILD_SRC -Recurse -Force"
+    - set CARGO_TARGET_DIR=%TEMP%\burner-redis-cargo-target-%RANDOM%%RANDOM%
     - set LUA_LIB_NAME=lua
     - set LUA_LIB=%LIBRARY_LIB%
-    - python -m pip install . -vv --no-build-isolation --config-settings=build-args=--no-default-features 1> smoke-pip.stdout.log 2> smoke-pip.stderr.log
+    - cd /D "%BUILD_SRC%"
+    - python -m pip install "%BUILD_SRC%" -vv --no-build-isolation --config-settings=build-args=--no-default-features 1> "%SRC_DIR%\\smoke-pip.stdout.log" 2> "%SRC_DIR%\\smoke-pip.stderr.log"
 
 requirements:
   build:

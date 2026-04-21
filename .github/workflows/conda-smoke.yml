@@ -103,6 +103,27 @@ jobs:
             }
           }
 
+          Get-ChildItem $buildRoot.FullName -Force -Recurse |
+            Select-Object FullName, Attributes, Length |
+            Format-Table -AutoSize |
+            Out-File (Join-Path $diagDir "build-root-tree.txt") -Width 4096
+
+          Get-ChildItem $buildRoot.FullName -Force -Recurse |
+            Where-Object { $_.Name -like "*pending-rm*" } |
+            Select-Object FullName, Attributes, Length |
+            Format-Table -AutoSize |
+            Out-File (Join-Path $diagDir "pending-rm.txt") -Width 4096
+
+          Get-CimInstance Win32_Process |
+            Where-Object {
+              $_.Name -in @("cargo.exe", "rustc.exe", "python.exe", "cmd.exe", "powershell.exe", "link.exe", "cl.exe") -or
+              ($_.CommandLine -match "burner-redis|maturin|rattler-build")
+            } |
+            Select-Object Name, ProcessId, ParentProcessId, ExecutablePath, CommandLine |
+            Sort-Object Name, ProcessId |
+            Format-List |
+            Out-File (Join-Path $diagDir "processes.txt") -Width 4096
+
           Get-ChildItem $diagDir | Select-Object Name,Length | Format-Table -AutoSize
 
       - name: Upload conda smoke artifacts
