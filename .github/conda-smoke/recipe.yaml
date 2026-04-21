@@ -22,6 +22,8 @@ build:
     - set LUA_LIB=%LIBRARY_LIB%
     - cd /D "%BUILD_SRC%"
     - python -m pip install "%BUILD_SRC%" -vv --no-build-isolation --config-settings=build-args=--no-default-features 1> "%SRC_DIR%\\smoke-pip.stdout.log" 2> "%SRC_DIR%\\smoke-pip.stderr.log"
+    - powershell -NoProfile -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -in @('cargo.exe','rustc.exe','python.exe','cmd.exe','powershell.exe','link.exe','cl.exe') -or ($_.CommandLine -match 'burner-redis|maturin|rattler-build') } | Select-Object Name,ProcessId,ParentProcessId,ExecutablePath,CommandLine | Sort-Object Name,ProcessId | Format-List | Out-File (Join-Path $env:SRC_DIR 'process-snapshot.txt') -Width 4096"
+    - powershell -NoProfile -Command "$tool = Join-Path $env:GITHUB_WORKSPACE '.github\\conda-smoke\\tools\\handle64.exe'; if (Test-Path $tool) { & $tool -accepteula $env:SRC_DIR *>&1 | Out-File (Join-Path $env:SRC_DIR 'handle-src.txt') -Width 4096; & $tool -accepteula (Split-Path -Parent $env:SRC_DIR) *>&1 | Out-File (Join-Path $env:SRC_DIR 'handle-root.txt') -Width 4096 }"
 
 requirements:
   build:

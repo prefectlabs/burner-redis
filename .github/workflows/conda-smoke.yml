@@ -49,6 +49,15 @@ jobs:
           init-shell: >-
             bash
 
+      - name: Install handle.exe
+        shell: pwsh
+        run: |
+          $toolDir = ".github/conda-smoke/tools"
+          New-Item -ItemType Directory -Force -Path $toolDir | Out-Null
+          $zipPath = Join-Path $toolDir "Handle.zip"
+          Invoke-WebRequest "https://download.sysinternals.com/files/Handle.zip" -OutFile $zipPath
+          Expand-Archive $zipPath -DestinationPath $toolDir -Force
+
       - name: Build local conda smoke recipe
         shell: bash -el {0}
         run: |
@@ -94,7 +103,10 @@ jobs:
             (Join-Path $buildRoot.FullName "conda_build.bat"),
             (Join-Path $buildRoot.FullName "build_env.bat"),
             (Join-Path $buildRoot.FullName "work/smoke-pip.stdout.log"),
-            (Join-Path $buildRoot.FullName "work/smoke-pip.stderr.log")
+            (Join-Path $buildRoot.FullName "work/smoke-pip.stderr.log"),
+            (Join-Path $buildRoot.FullName "work/process-snapshot.txt"),
+            (Join-Path $buildRoot.FullName "work/handle-src.txt"),
+            (Join-Path $buildRoot.FullName "work/handle-root.txt")
           )
 
           foreach ($path in $filesToCopy) {
