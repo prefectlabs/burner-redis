@@ -2888,6 +2888,323 @@ impl Store {
         // inclusive on both ends
         Ok(list.iter().skip(s).take(e - s + 1).cloned().collect())
     }
+
+    /// LPOP: Pop from the head of a list.
+    ///
+    /// - `count = None`  → `Single(bytes)` on non-empty, `Nil` on missing/empty
+    /// - `count = Some(n)` → `Array(vec)` (possibly empty for n=0 or missing key → Nil)
+    ///
+    /// Deletes the key when the list becomes empty (D-03). WRONGTYPE on
+    /// non-list. Type-check happens BEFORE the count=0 fast-return so that
+    /// `LPOP strkey 0` returns WRONGTYPE rather than `[]` (Pitfall 4).
+    pub fn lpop(&self, key: &Bytes, count: Option<usize>) -> Result<LPopResult, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+            }
+        }
+
+        // Type-check against the existing entry (if any) BEFORE any early
+        // return for count=0. A WRONGTYPE against a string key must
+        // propagate even for LPOP k 0.
+        match data.get(key) {
+            None => return Ok(LPopResult::Nil),
+            Some(entry) => match &entry.data {
+                ValueData::List(_) => {} // proceed
+                _ => return Err(StoreError::WrongType),
+            },
+        }
+
+        // Type-confirmed. Handle count=0 fast-return.
+        if count == Some(0) {
+            return Ok(LPopResult::Array(Vec::new()));
+        }
+
+        let entry = data.get_mut(key).expect("entry exists (checked above)");
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => unreachable!(),
+        };
+
+        let result = match count {
+            None => match list.pop_front() {
+                Some(v) => LPopResult::Single(v),
+                None => LPopResult::Nil,
+            },
+            Some(n) => {
+                let actual = n.min(list.len());
+                let popped: Vec<Bytes> = (0..actual)
+                    .map(|_| list.pop_front().expect("len checked"))
+                    .collect();
+                LPopResult::Array(popped)
+            }
+        };
+
+        // D-03: delete key if the list is now empty.
+        if let Some(entry) = data.get(key) {
+            if let ValueData::List(l) = &entry.data {
+                if l.is_empty() {
+                    data.remove(key);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// RPOP: Pop from the tail of a list — mirror of lpop().
+    pub fn rpop(&self, key: &Bytes, count: Option<usize>) -> Result<LPopResult, StoreError> {
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+            }
+        }
+
+        match data.get(key) {
+            None => return Ok(LPopResult::Nil),
+            Some(entry) => match &entry.data {
+                ValueData::List(_) => {}
+                _ => return Err(StoreError::WrongType),
+            },
+        }
+
+        if count == Some(0) {
+            return Ok(LPopResult::Array(Vec::new()));
+        }
+
+        let entry = data.get_mut(key).expect("entry exists (checked above)");
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => unreachable!(),
+        };
+
+        let result = match count {
+            None => match list.pop_back() {
+                Some(v) => LPopResult::Single(v),
+                None => LPopResult::Nil,
+            },
+            Some(n) => {
+                let actual = n.min(list.len());
+                let popped: Vec<Bytes> = (0..actual)
+                    .map(|_| list.pop_back().expect("len checked"))
+                    .collect();
+                LPopResult::Array(popped)
+            }
+        };
+
+        if let Some(entry) = data.get(key) {
+            if let ValueData::List(l) = &entry.data {
+                if l.is_empty() {
+                    data.remove(key);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// LREM: Remove up to `count` copies of `value` from a list.
+    ///
+    /// - count > 0: scan head→tail, remove up to `count` matches
+    /// - count < 0: scan tail→head, remove up to `|count|` matches
+    /// - count = 0: remove all matches
+    ///
+    /// Returns the number of elements removed. Deletes the key if the list
+    /// becomes empty (D-03). Missing key → 0. WRONGTYPE on non-list.
+    pub fn lrem(&self, key: &Bytes, count: i64, value: Bytes) -> Result<i64, StoreError> {
+        use crate::commands::lists::{LremDirection, parse_lrem_count};
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Ok(0),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let mut removed: i64 = 0;
+        match parse_lrem_count(count) {
+            LremDirection::Head(target) => {
+                list.retain(|v| {
+                    if (removed as usize) < target && v == &value {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            LremDirection::Tail(target) => {
+                // Walk from the tail. Collect matching indices in descending
+                // order so later `remove(idx)` calls don't shift subsequent
+                // indices we still need to visit.
+                let indices: Vec<usize> = list
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter_map(|(i, v)| if v == &value { Some(i) } else { None })
+                    .take(target)
+                    .collect();
+                for i in indices {
+                    list.remove(i);
+                    removed += 1;
+                }
+            }
+            LremDirection::All => {
+                let before = list.len();
+                list.retain(|v| v != &value);
+                removed = (before - list.len()) as i64;
+            }
+        }
+
+        if list.is_empty() {
+            data.remove(key);
+        }
+        Ok(removed)
+    }
+
+    /// LSET: Replace the element at `index` with `value`.
+    ///
+    /// Returns `Err(NoSuchKey)` on missing key, `Err(Syntax(...))` on
+    /// out-of-range index (matching `ERR index out of range` Redis wording),
+    /// `Err(WrongType)` on non-list. Does NOT fire list_notify (mutation
+    /// doesn't grow the list, so no waiters are unblocked).
+    pub fn lset(&self, key: &Bytes, index: i64, value: Bytes) -> Result<(), StoreError> {
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Err(StoreError::NoSuchKey);
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Err(StoreError::NoSuchKey),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let n = list.len() as i64;
+        let actual = if index < 0 { index + n } else { index };
+        if actual < 0 || actual >= n {
+            return Err(StoreError::Syntax("ERR index out of range".to_string()));
+        }
+        list[actual as usize] = value;
+        Ok(())
+    }
+
+    /// LTRIM: Clamp a list to an inclusive range. Out-of-range → empty
+    /// list, which deletes the key (D-03). Missing key → no-op (Ok(())).
+    /// WRONGTYPE on non-list.
+    pub fn ltrim(&self, key: &Bytes, start: i64, stop: i64) -> Result<(), StoreError> {
+        use crate::commands::lists::normalize_range_indices;
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(());
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Ok(()),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let len = list.len();
+        match normalize_range_indices(start, stop, len) {
+            None => {
+                // Empty result: delete the key (D-03).
+                data.remove(key);
+            }
+            Some((s, e)) => {
+                let new_list: VecDeque<Bytes> =
+                    list.iter().skip(s).take(e - s + 1).cloned().collect();
+                *list = new_list;
+                if list.is_empty() {
+                    data.remove(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// LINSERT: Insert `value` immediately before or after the first
+    /// occurrence of `pivot`. Returns:
+    /// - the new length on success,
+    /// - -1 when the pivot is not found,
+    /// - 0 when the key is missing.
+    ///
+    /// Does NOT fire list_notify — redis-py's LINSERT is documented as not
+    /// waking BRPOP waiters in real Redis, since the list must already
+    /// exist to match a pivot. If we later observe a pydocket need for
+    /// wake-up here, revisit.
+    pub fn linsert(
+        &self,
+        key: &Bytes,
+        where_: crate::commands::lists::InsertPosition,
+        pivot: &Bytes,
+        value: Bytes,
+    ) -> Result<i64, StoreError> {
+        use crate::commands::lists::InsertPosition;
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Ok(0),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let pos = match list.iter().position(|v| v == pivot) {
+            None => return Ok(-1),
+            Some(p) => p,
+        };
+        let insert_at = match where_ {
+            InsertPosition::Before => pos,
+            InsertPosition::After => pos + 1,
+        };
+        list.insert(insert_at, value);
+        Ok(list.len() as i64)
+    }
+}
+
+/// Return variants for LPOP/RPOP mirroring redis-py semantics:
+/// - `Nil`: missing key (with or without count)
+/// - `Single`: count was None and a single element was popped
+/// - `Array`: count was Some(n), possibly empty (count=0 → empty array)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LPopResult {
+    Nil,
+    Single(Bytes),
+    Array(Vec<Bytes>),
 }
 
 // ── Persistable Snapshot Types ──────────────────────────────────────────
@@ -4567,5 +4884,187 @@ mod tests {
             .lpush(key.clone(), vec![Bytes::from_static(b"v")])
             .unwrap();
         assert_eq!(store.llen(&key).unwrap(), 1);
+    }
+
+    // ── List mutating-op tests (Phase 14, Plan 01, Task 4) ──────────
+
+    #[test]
+    fn lpop_no_count_single() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+            )
+            .unwrap();
+        match store.lpop(&k, None).unwrap() {
+            LPopResult::Single(v) => assert_eq!(v, Bytes::from_static(b"a")),
+            other => panic!("expected Single, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lpop_count_zero_returns_empty_array() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(k.clone(), vec![Bytes::from_static(b"a")])
+            .unwrap();
+        match store.lpop(&k, Some(0)).unwrap() {
+            LPopResult::Array(v) => assert_eq!(v.len(), 0),
+            _ => panic!("expected empty Array for count=0"),
+        }
+    }
+
+    #[test]
+    fn lpop_missing_key_is_nil() {
+        let store = Store::new();
+        assert!(matches!(
+            store
+                .lpop(&Bytes::from_static(b"missing"), None)
+                .unwrap(),
+            LPopResult::Nil
+        ));
+        assert!(matches!(
+            store
+                .lpop(&Bytes::from_static(b"missing"), Some(5))
+                .unwrap(),
+            LPopResult::Nil
+        ));
+    }
+
+    #[test]
+    fn lpop_deletes_key_when_empty() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(k.clone(), vec![Bytes::from_static(b"a")])
+            .unwrap();
+        store.lpop(&k, None).unwrap();
+        assert_eq!(store.llen(&k).unwrap(), 0);
+        // Verify key is actually deleted, not just empty:
+        assert!(matches!(
+            store.lpop(&k, None).unwrap(),
+            LPopResult::Nil
+        ));
+    }
+
+    #[test]
+    fn lrem_head_negative_all() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        let a = Bytes::from_static(b"a");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    a.clone(),
+                    Bytes::from_static(b"b"),
+                    a.clone(),
+                    Bytes::from_static(b"c"),
+                    a.clone(),
+                ],
+            )
+            .unwrap();
+        // count=2 (head→tail): remove first 2 'a's → [b, c, a]
+        assert_eq!(store.lrem(&k, 2, a.clone()).unwrap(), 2);
+        assert_eq!(
+            store.lrange(&k, 0, -1).unwrap(),
+            vec![
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"c"),
+                a.clone()
+            ]
+        );
+        // count=-1 (tail→head): remove last remaining 'a'
+        assert_eq!(store.lrem(&k, -1, a.clone()).unwrap(), 1);
+        // count=0 on clean list: remove all 'z's (none found → 0)
+        assert_eq!(store.lrem(&k, 0, Bytes::from_static(b"z")).unwrap(), 0);
+    }
+
+    #[test]
+    fn lset_out_of_range() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(k.clone(), vec![Bytes::from_static(b"a")])
+            .unwrap();
+        let err = store.lset(&k, 5, Bytes::from_static(b"v")).unwrap_err();
+        assert!(format!("{}", err).contains("index out of range"));
+    }
+
+    #[test]
+    fn ltrim_empty_result_deletes_key() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        store.ltrim(&k, 5, 10).unwrap(); // out-of-range → empty
+        assert_eq!(store.llen(&k).unwrap(), 0);
+    }
+
+    #[test]
+    fn linsert_pivot_behavior() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![Bytes::from_static(b"a"), Bytes::from_static(b"c")],
+            )
+            .unwrap();
+        // Insert BEFORE "c" → [a, b, c]
+        assert_eq!(
+            store
+                .linsert(
+                    &k,
+                    crate::commands::lists::InsertPosition::Before,
+                    &Bytes::from_static(b"c"),
+                    Bytes::from_static(b"b"),
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store.lrange(&k, 0, -1).unwrap(),
+            vec![
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"c")
+            ]
+        );
+        // Pivot not found → -1
+        assert_eq!(
+            store
+                .linsert(
+                    &k,
+                    crate::commands::lists::InsertPosition::Before,
+                    &Bytes::from_static(b"z"),
+                    Bytes::from_static(b"w"),
+                )
+                .unwrap(),
+            -1
+        );
+        // Missing key → 0
+        assert_eq!(
+            store
+                .linsert(
+                    &Bytes::from_static(b"missing"),
+                    crate::commands::lists::InsertPosition::After,
+                    &Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                )
+                .unwrap(),
+            0
+        );
     }
 }
