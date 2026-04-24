@@ -361,3 +361,289 @@ async def test_linsert_int_coerced(r):
     await r.rpush("k", "a")
     await r.linsert("k", "AFTER", "a", 42)
     assert await r.lrange("k", 0, -1) == [b"a", b"42"]
+
+
+# ---- LIST-16: Lua integration ----
+
+async def test_lua_lpush_rpush_lrange(r):
+    """LIST-16: Lua can dispatch LPUSH/LRANGE correctly."""
+    result = await r.eval(
+        "redis.call('LPUSH', KEYS[1], 'a', 'b', 'c'); "
+        "return redis.call('LRANGE', KEYS[1], 0, -1)",
+        1,
+        "k",
+    )
+    assert result == [b"c", b"b", b"a"]
+
+
+async def test_lua_rpush_order(r):
+    """LIST-16: Lua RPUSH preserves order."""
+    result = await r.eval(
+        "redis.call('RPUSH', KEYS[1], 'a', 'b', 'c'); "
+        "return redis.call('LRANGE', KEYS[1], 0, -1)",
+        1,
+        "k",
+    )
+    assert result == [b"a", b"b", b"c"]
+
+
+async def test_lua_lpop_count(r):
+    """LIST-16: Lua LPOP with count returns array."""
+    await r.rpush("k", "a", "b", "c")
+    result = await r.eval(
+        "return redis.call('LPOP', KEYS[1], 2)",
+        1,
+        "k",
+    )
+    assert result == [b"a", b"b"]
+
+
+async def test_lua_rpop_no_count(r):
+    await r.rpush("k", "a", "b", "c")
+    result = await r.eval("return redis.call('RPOP', KEYS[1])", 1, "k")
+    assert result == b"c"
+
+
+async def test_lua_llen(r):
+    await r.rpush("k", "a", "b", "c")
+    result = await r.eval("return redis.call('LLEN', KEYS[1])", 1, "k")
+    assert result == 3
+
+
+async def test_lua_lindex(r):
+    await r.rpush("k", "a", "b", "c")
+    result = await r.eval("return redis.call('LINDEX', KEYS[1], 1)", 1, "k")
+    assert result == b"b"
+
+
+async def test_lua_linsert(r):
+    await r.rpush("k", "a", "c")
+    result = await r.eval(
+        "return redis.call('LINSERT', KEYS[1], 'AFTER', 'a', 'b')",
+        1,
+        "k",
+    )
+    assert result == 3
+    assert await r.lrange("k", 0, -1) == [b"a", b"b", b"c"]
+
+
+async def test_lua_lrem(r):
+    await r.rpush("k", "a", "b", "a", "c", "a")
+    result = await r.eval(
+        "return redis.call('LREM', KEYS[1], 0, 'a')",
+        1,
+        "k",
+    )
+    assert result == 3
+    assert await r.lrange("k", 0, -1) == [b"b", b"c"]
+
+
+async def test_lua_lset(r):
+    await r.rpush("k", "a", "b", "c")
+    result = await r.eval(
+        "return redis.call('LSET', KEYS[1], 1, 'B')",
+        1,
+        "k",
+    )
+    # Status "OK" is mapped through Lua back to Python
+    assert result in (b"OK", "OK")
+    assert await r.lrange("k", 0, -1) == [b"a", b"B", b"c"]
+
+
+async def test_lua_lset_out_of_range_pcall(r):
+    await r.rpush("k", "a")
+    result = await r.eval(
+        "local ok = redis.pcall('LSET', KEYS[1], 5, 'x'); "
+        "if ok.err then return ok.err else return 'nope' end",
+        1,
+        "k",
+    )
+    assert b"index out of range" in result
+
+
+async def test_lua_ltrim(r):
+    await r.rpush("k", "a", "b", "c", "d")
+    await r.eval("redis.call('LTRIM', KEYS[1], 1, 2)", 1, "k")
+    assert await r.lrange("k", 0, -1) == [b"b", b"c"]
+
+
+async def test_lua_lmove(r):
+    await r.rpush("src", "a", "b", "c")
+    result = await r.eval(
+        "return redis.call('LMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT')",
+        2, "src", "dst",
+    )
+    assert result == b"a"
+    assert await r.lrange("dst", 0, -1) == [b"a"]
+    assert await r.lrange("src", 0, -1) == [b"b", b"c"]
+
+
+async def test_lua_rpoplpush(r):
+    await r.rpush("src", "a", "b", "c")
+    result = await r.eval(
+        "return redis.call('RPOPLPUSH', KEYS[1], KEYS[2])",
+        2, "src", "dst",
+    )
+    assert result == b"c"
+    assert await r.lrange("dst", 0, -1) == [b"c"]
+    assert await r.lrange("src", 0, -1) == [b"a", b"b"]
+
+
+async def test_lua_blpop_rejected(r):
+    """LIST-16: Lua BLPOP must raise 'not allowed from scripts'."""
+    with pytest.raises(Exception, match="not allowed from scripts"):
+        await r.eval("return redis.call('BLPOP', KEYS[1], 0)", 1, "k")
+
+
+async def test_lua_brpop_rejected(r):
+    with pytest.raises(Exception, match="not allowed from scripts"):
+        await r.eval("return redis.call('BRPOP', KEYS[1], 0)", 1, "k")
+
+
+async def test_lua_blmove_rejected(r):
+    with pytest.raises(Exception, match="not allowed from scripts"):
+        await r.eval(
+            "return redis.call('BLMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT', 0)",
+            2, "src", "dst",
+        )
+
+
+async def test_brpop_wakes_on_lua_lpush(r):
+    """LIST-16 regression: BRPOP must wake when LPUSH is issued from inside a Lua script.
+    This is the Phase-11-style race fix guarded by the had_list_mutation flag.
+    """
+    async def lua_push_later():
+        await asyncio.sleep(0.05)
+        await r.eval("redis.call('LPUSH', KEYS[1], 'v'); return 1", 1, "k")
+
+    task = asyncio.create_task(lua_push_later())
+    start = time.monotonic()
+    result = await r.brpop(["k"], timeout=2.0)
+    elapsed = time.monotonic() - start
+    await task
+    assert elapsed < 1.0, f"BRPOP did not wake promptly on Lua LPUSH: {elapsed}s"
+    assert result == (b"k", b"v")
+
+
+async def test_blpop_wakes_on_lua_rpush(r):
+    """Mirror for RPUSH — also marked had_list_mutation."""
+    async def lua_push_later():
+        await asyncio.sleep(0.05)
+        await r.eval("redis.call('RPUSH', KEYS[1], 'v'); return 1", 1, "k")
+
+    task = asyncio.create_task(lua_push_later())
+    result = await asyncio.wait_for(r.blpop(["k"], timeout=2.0), timeout=3.0)
+    await task
+    assert result == (b"k", b"v")
+
+
+# ---- LIST-16: Pipeline integration ----
+
+async def test_pipeline_list_commands_non_blocking(r):
+    """All non-blocking list commands in a pipeline — verify results + fast-path timing."""
+    pipe = r.pipeline()
+    pipe.lpush("k", "a", "b", "c")
+    pipe.llen("k")
+    pipe.lrange("k", 0, -1)
+    pipe.lindex("k", 0)
+    pipe.lpop("k")
+    start = time.monotonic()
+    results = await pipe.execute()
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.1, f"fast path too slow: {elapsed}s"
+    assert results[0] == 3  # lpush count
+    assert results[1] == 3  # llen
+    assert results[2] == [b"c", b"b", b"a"]  # lrange
+    assert results[3] == b"c"  # lindex 0
+    assert results[4] == b"c"  # lpop
+
+
+async def test_pipeline_with_blocking_command(r):
+    """Pipeline mixing blocking + non-blocking commands respects per-command timeout."""
+    pipe = r.pipeline()
+    pipe.set("x", "1")
+    pipe.blpop(["missing"], timeout=0.1)
+    pipe.set("y", "2")
+    start = time.monotonic()
+    results = await pipe.execute()
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.05, f"blocking pipeline did not block: {elapsed}s"
+    assert results[0] is True  # set
+    assert results[1] is None  # blpop timeout
+    assert results[2] is True  # set after blpop
+
+
+async def test_pipeline_blocking_wakes_on_existing_data(r):
+    """Pipeline BLPOP with pre-existing data returns immediately."""
+    await r.rpush("k", "pre-existing")  # guarantees first poll succeeds
+
+    pipe = r.pipeline()
+    pipe.set("x", "1")
+    pipe.blpop(["k"], timeout=2.0)
+    pipe.set("y", "2")
+
+    start = time.monotonic()
+    results = await pipe.execute()
+    elapsed = time.monotonic() - start
+
+    assert elapsed < 1.0, f"BLPOP in pipeline blocked unnecessarily: {elapsed}s"
+    assert results[0] is True
+    assert results[1] == (b"k", b"pre-existing")
+    assert results[2] is True
+
+
+async def test_pipeline_non_blocking_fast_path_timing(r):
+    """Regression guard for quick task 260415-an2: non-blocking pipelines must stay sync-fast."""
+    pipe = r.pipeline()
+    for _ in range(50):
+        pipe.lpush("k", "v")
+    pipe.llen("k")
+    start = time.monotonic()
+    results = await pipe.execute()
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.1, f"50-cmd non-blocking pipeline too slow: {elapsed}s (fast path may have regressed)"
+    assert results[-1] == 50
+
+
+async def test_pipeline_lrem_ltrim_lset(r):
+    """Pipeline coverage for in-place list mutations."""
+    pipe = r.pipeline()
+    pipe.rpush("k", "a", "b", "a", "c")
+    pipe.lrem("k", 0, "a")
+    pipe.lset("k", 0, "B")
+    pipe.ltrim("k", 0, 0)
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 4  # rpush count
+    assert results[1] == 2  # lrem removed 2 a's
+    assert results[2] is True  # lset
+    assert results[3] is True  # ltrim
+    assert results[4] == [b"B"]
+
+
+async def test_pipeline_lmove_rpoplpush(r):
+    """Pipeline coverage for cross-key atomic moves."""
+    pipe = r.pipeline()
+    pipe.rpush("src", "a", "b", "c")
+    pipe.lmove("src", "dst", src="LEFT", dest="RIGHT")
+    pipe.rpoplpush("src", "dst")
+    pipe.lrange("dst", 0, -1)
+    pipe.lrange("src", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 3  # rpush count
+    assert results[1] == b"a"  # lmove popped "a" from head of src
+    assert results[2] == b"c"  # rpoplpush popped "c" from tail of src, pushed to head of dst
+    assert results[3] == [b"c", b"a"]  # dst: c (head), a (tail)
+    assert results[4] == [b"b"]  # src: remaining
+
+
+async def test_pipeline_linsert(r):
+    """Pipeline coverage for LINSERT (variadic position arg)."""
+    pipe = r.pipeline()
+    pipe.rpush("k", "a", "c")
+    pipe.linsert("k", "AFTER", "a", "b")
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 2
+    assert results[1] == 3  # new length
+    assert results[2] == [b"a", b"b", b"c"]

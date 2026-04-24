@@ -91,7 +91,7 @@ Requirements for initial release. Each maps to roadmap phases.
 **: User can BRPOP/BLPOP with float-seconds timeout, multi-key scan
 - [x] **LIST-15
 **: User can BLMOVE with timeout, atomic src/dst semantics
-- [ ] **LIST-16**: All list commands work in pipelines; 13 non-blocking work in Lua
+- [x] **LIST-16**: All list commands work in pipelines; 13 non-blocking work in Lua
 
 ### Lua Scripting
 
@@ -237,7 +237,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | LIST-13 | Phase 14 | Complete |
 | LIST-14 | Phase 14 | Complete |
 | LIST-15 | Phase 14 | Complete |
-| LIST-16 | Phase 14 | In Progress |
+| LIST-16 | Phase 14 | Complete |
 
 **Coverage:**
 - v1 requirements: 69 total
