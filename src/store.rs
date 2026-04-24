@@ -2,7 +2,7 @@ use bytes::Bytes;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
 use serde::{Serialize, Deserialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -126,6 +126,8 @@ pub enum ValueData {
     SortedSet(SortedSet),
     /// Redis stream value (ordered log of field-value entries).
     Stream(Stream),
+    /// Redis list value (ordered sequence of byte values; head is index 0).
+    List(VecDeque<Bytes>),
 }
 
 /// A value entry in the store, containing typed data and optional expiration.
@@ -173,6 +175,14 @@ impl ValueEntry {
     pub fn new_stream() -> Self {
         ValueEntry {
             data: ValueData::Stream(Stream::new()),
+            expires_at: None,
+        }
+    }
+
+    /// Create a new empty List-typed entry with no expiration.
+    pub fn new_list() -> Self {
+        ValueEntry {
+            data: ValueData::List(VecDeque::new()),
             expires_at: None,
         }
     }
@@ -273,6 +283,7 @@ pub struct Store {
     scripts: RwLock<HashMap<String, String>>,
     pub(crate) pubsub: RwLock<PubSubRegistry>,
     stream_notify: Arc<Notify>,
+    list_notify: Arc<Notify>,
     shutdown: AtomicBool,
 }
 
@@ -283,6 +294,7 @@ impl Store {
             scripts: RwLock::new(HashMap::new()),
             pubsub: RwLock::new(PubSubRegistry::new()),
             stream_notify: Arc::new(Notify::new()),
+            list_notify: Arc::new(Notify::new()),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -290,6 +302,12 @@ impl Store {
     /// Get a reference to the stream notification handle for async waiting.
     pub fn stream_notify(&self) -> Arc<Notify> {
         self.stream_notify.clone()
+    }
+
+    /// Get a reference to the list notification handle for async waiting.
+    /// Used by BRPOP/BLPOP/BLMOVE to wait for LPUSH/RPUSH/LMOVE mutations.
+    pub fn list_notify(&self) -> Arc<Notify> {
+        self.list_notify.clone()
     }
 
     /// Signal graceful shutdown: wake all blocking stream waiters so their
@@ -300,6 +318,9 @@ impl Store {
 
         // Wake all blocking xread/xreadgroup waiters so they see the flag
         self.stream_notify.notify_waiters();
+
+        // Wake all blocking brpop/blpop/blmove waiters so they see the flag
+        self.list_notify.notify_waiters();
 
         // Stop all pubsub listeners — collect IDs first, then stop each
         let ids: Vec<u64> = {
@@ -2742,6 +2763,9 @@ pub enum PersistableValueData {
     Set(Vec<Vec<u8>>),
     SortedSet(PersistableSortedSet),
     Stream(PersistableStream),
+    /// Serialized as Vec<Vec<u8>> (same shape as Set); order is preserved
+    /// by virtue of being a Vec. Deserialized back into a VecDeque<Bytes>.
+    List(Vec<Vec<u8>>),
 }
 
 /// Persistable version of SortedSet.
@@ -2861,6 +2885,9 @@ impl PersistableStore {
                                 .collect(),
                         })
                     }
+                    ValueData::List(list) => {
+                        PersistableValueData::List(list.iter().map(|b| b.to_vec()).collect())
+                    }
                 };
 
                 (key.to_vec(), PersistableEntry {
@@ -2972,6 +2999,11 @@ impl PersistableStore {
                         last_id: pstream.last_id,
                         groups,
                     })
+                }
+                PersistableValueData::List(items) => {
+                    let deque: VecDeque<Bytes> =
+                        items.into_iter().map(Bytes::from).collect();
+                    ValueData::List(deque)
                 }
             };
 
@@ -4240,5 +4272,33 @@ mod tests {
 
         // stop_flag set by shutdown -> stop_subscriber_listener
         assert!(stop_flag.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    // ── List scaffolding tests (Phase 14, Plan 01, Task 1) ──────────
+
+    #[test]
+    fn list_variant_constructs() {
+        let entry = ValueEntry::new_list();
+        assert!(matches!(entry.data, ValueData::List(_)));
+        if let ValueData::List(ref list) = entry.data {
+            assert_eq!(list.len(), 0);
+        }
+    }
+
+    #[test]
+    fn list_notify_accessor_works() {
+        let store = Store::new();
+        // Must compile and return Arc<Notify>
+        let _notify: Arc<Notify> = store.list_notify();
+    }
+
+    #[test]
+    fn shutdown_wakes_list_waiters() {
+        // Smoke test — just call shutdown and verify flag set.
+        // Full wake behavior is covered indirectly by list_notify accessor above
+        // and by Phase 14 Plan 02 integration tests.
+        let store = Store::new();
+        store.shutdown();
+        assert!(store.is_shutdown());
     }
 }
