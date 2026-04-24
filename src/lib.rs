@@ -285,6 +285,44 @@ fn build_xinfo_stream_dict<'py>(
     Ok(dict)
 }
 
+/// Normalize a Python `keys` argument (str, bytes, list, or tuple) into Vec<Bytes>.
+///
+/// redis-py's `blpop` / `brpop` accept either a single str/bytes key or a list/tuple of keys.
+/// This mirrors that behavior at the PyO3 binding layer.
+fn normalize_key_list(keys: &Bound<'_, PyAny>) -> PyResult<Vec<Bytes>> {
+    // str / bytes are sequences too — handle them as a single-key case first.
+    if keys.is_instance_of::<pyo3::types::PyString>()
+        || keys.is_instance_of::<pyo3::types::PyBytes>()
+    {
+        return Ok(vec![extract_bytes(keys)?]);
+    }
+    // Try list/tuple via sequence protocol.
+    if let Ok(seq) = keys.downcast::<pyo3::types::PySequence>() {
+        let len = seq.len()?;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let item = seq.get_item(i)?;
+            out.push(extract_bytes(&item)?);
+        }
+        return Ok(out);
+    }
+    // Fallback: treat as a single key (will error if not str/bytes).
+    Ok(vec![extract_bytes(keys)?])
+}
+
+/// Convert a redis-py timeout value (None | 0 | positive float seconds) to milliseconds.
+/// None or 0 → 0 (block forever). Negative → PyValueError.
+fn timeout_to_ms(timeout: Option<f64>) -> PyResult<u64> {
+    match timeout {
+        None => Ok(0),
+        Some(t) if t < 0.0 => Err(pyo3::exceptions::PyValueError::new_err(
+            "timeout must be a non-negative number",
+        )),
+        Some(t) if t == 0.0 => Ok(0),
+        Some(t) => Ok((t * 1000.0) as u64),
+    }
+}
+
 #[pyclass]
 pub struct BurnerRedis {
     store: Arc<Store>,
@@ -2462,6 +2500,332 @@ impl BurnerRedis {
             None => py.None(),
         };
         resolved(py, py_result)
+    }
+
+    // -- Blocking List Commands ----
+
+    /// BLPOP command matching redis.asyncio.Redis.blpop(keys, timeout=0) signature.
+    /// Scans keys left-to-right; returns first (key, value) tuple found, or None on timeout.
+    /// timeout=None or 0 → block forever. timeout as float seconds (int auto-converts).
+    #[pyo3(signature = (keys, timeout=None))]
+    fn blpop<'py>(
+        &self,
+        py: Python<'py>,
+        keys: &Bound<'py, PyAny>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key_list = normalize_key_list(keys)?;
+        let block_ms = timeout_to_ms(timeout)?;
+        let store = self.store.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.list_notify();
+            let mut waiter = Box::pin(notify.notified());
+            waiter.as_mut().enable(); // arm permit BEFORE first poll
+
+            // First non-blocking attempt
+            if let Some((k, v)) = store.blpop_poll(&key_list).map_err(store_err_to_py)? {
+                return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                    let tup = pyo3::types::PyTuple::new(
+                        py,
+                        &[
+                            pyo3::types::PyBytes::new(py, &k).into_any(),
+                            pyo3::types::PyBytes::new(py, &v).into_any(),
+                        ],
+                    )?;
+                    Ok(tup.into_any().unbind())
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?;
+            }
+
+            // block_ms == 0 means block forever; otherwise enforce a deadline.
+            let deadline_opt = if block_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_ms))
+            };
+
+            loop {
+                // Graceful shutdown: return None so the future completes cleanly.
+                if store.is_shutdown() {
+                    return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?;
+                }
+
+                let remaining = match deadline_opt {
+                    Some(d) => {
+                        let r = d.saturating_duration_since(tokio::time::Instant::now());
+                        if r.is_zero() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(py.None())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        r
+                    }
+                    None => Duration::from_secs(3600),
+                };
+
+                tokio::select! {
+                    _ = waiter.as_mut() => {
+                        // Re-arm (Phase 11 critical fix)
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
+                        if let Some((k, v)) = store.blpop_poll(&key_list).map_err(store_err_to_py)? {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                let tup = pyo3::types::PyTuple::new(
+                                    py,
+                                    &[
+                                        pyo3::types::PyBytes::new(py, &k).into_any(),
+                                        pyo3::types::PyBytes::new(py, &v).into_any(),
+                                    ],
+                                )?;
+                                Ok(tup.into_any().unbind())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        // else: spurious wake / unrelated key — keep looping
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        if deadline_opt.is_some() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                                .ok_or_else(|| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                        "failed to attach to Python interpreter",
+                                    )
+                                })?;
+                        }
+                        // block=0: long slice expired; keep looping
+                    }
+                }
+            }
+        })
+    }
+
+    /// BRPOP command matching redis.asyncio.Redis.brpop(keys, timeout=0) signature.
+    /// Same as BLPOP but pops from the tail (right) of each list.
+    #[pyo3(signature = (keys, timeout=None))]
+    fn brpop<'py>(
+        &self,
+        py: Python<'py>,
+        keys: &Bound<'py, PyAny>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key_list = normalize_key_list(keys)?;
+        let block_ms = timeout_to_ms(timeout)?;
+        let store = self.store.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.list_notify();
+            let mut waiter = Box::pin(notify.notified());
+            waiter.as_mut().enable();
+
+            if let Some((k, v)) = store.brpop_poll(&key_list).map_err(store_err_to_py)? {
+                return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                    let tup = pyo3::types::PyTuple::new(
+                        py,
+                        &[
+                            pyo3::types::PyBytes::new(py, &k).into_any(),
+                            pyo3::types::PyBytes::new(py, &v).into_any(),
+                        ],
+                    )?;
+                    Ok(tup.into_any().unbind())
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?;
+            }
+
+            let deadline_opt = if block_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_ms))
+            };
+
+            loop {
+                if store.is_shutdown() {
+                    return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?;
+                }
+
+                let remaining = match deadline_opt {
+                    Some(d) => {
+                        let r = d.saturating_duration_since(tokio::time::Instant::now());
+                        if r.is_zero() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(py.None())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        r
+                    }
+                    None => Duration::from_secs(3600),
+                };
+
+                tokio::select! {
+                    _ = waiter.as_mut() => {
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
+                        if let Some((k, v)) = store.brpop_poll(&key_list).map_err(store_err_to_py)? {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                let tup = pyo3::types::PyTuple::new(
+                                    py,
+                                    &[
+                                        pyo3::types::PyBytes::new(py, &k).into_any(),
+                                        pyo3::types::PyBytes::new(py, &v).into_any(),
+                                    ],
+                                )?;
+                                Ok(tup.into_any().unbind())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        if deadline_opt.is_some() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                                .ok_or_else(|| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                        "failed to attach to Python interpreter",
+                                    )
+                                })?;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// BLMOVE command matching redis.asyncio.Redis.blmove(first_list, second_list, timeout, src="LEFT", dest="RIGHT").
+    /// Atomic cross-key pop+push with blocking. Returns popped bytes or None on timeout.
+    #[pyo3(signature = (first_list, second_list, timeout, src="LEFT", dest="RIGHT"))]
+    fn blmove<'py>(
+        &self,
+        py: Python<'py>,
+        first_list: &Bound<'py, PyAny>,
+        second_list: &Bound<'py, PyAny>,
+        timeout: f64,
+        src: &str,
+        dest: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::commands::lists::parse_list_end;
+        let src_key = extract_bytes(first_list)?;
+        let dst_key = extract_bytes(second_list)?;
+        let src_end = parse_list_end(src).map_err(store_err_to_py)?;
+        let dst_end = parse_list_end(dest).map_err(store_err_to_py)?;
+        let block_ms = timeout_to_ms(Some(timeout))?;
+        let store = self.store.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.list_notify();
+            let mut waiter = Box::pin(notify.notified());
+            waiter.as_mut().enable();
+
+            if let Some(v) = store
+                .lmove_atomic(&src_key, &dst_key, src_end, dst_end)
+                .map_err(store_err_to_py)?
+            {
+                return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                    Ok(pyo3::types::PyBytes::new(py, &v).into_any().unbind())
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?;
+            }
+
+            let deadline_opt = if block_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_ms))
+            };
+
+            loop {
+                if store.is_shutdown() {
+                    return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?;
+                }
+
+                let remaining = match deadline_opt {
+                    Some(d) => {
+                        let r = d.saturating_duration_since(tokio::time::Instant::now());
+                        if r.is_zero() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(py.None())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        r
+                    }
+                    None => Duration::from_secs(3600),
+                };
+
+                tokio::select! {
+                    _ = waiter.as_mut() => {
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
+                        if let Some(v) = store.lmove_atomic(&src_key, &dst_key, src_end, dst_end).map_err(store_err_to_py)? {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(pyo3::types::PyBytes::new(py, &v).into_any().unbind())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        if deadline_opt.is_some() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                                .ok_or_else(|| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                        "failed to attach to Python interpreter",
+                                    )
+                                })?;
+                        }
+                    }
+                }
+            }
+        })
     }
 
     /// Execute a batch of pipeline commands in a single Rust call.
