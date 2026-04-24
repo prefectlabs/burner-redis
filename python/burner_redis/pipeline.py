@@ -5,6 +5,34 @@ and executes them sequentially against a BurnerRedis instance.
 """
 
 
+def _coerce_value(value):
+    """Coerce a value to str or bytes, matching redis-py's Encoder.encode() behavior.
+
+    Mirror of burner_redis._coerce_value — duplicated here to avoid a circular
+    import (burner_redis.__init__ imports Pipeline). Pipeline list/string stubs
+    must apply the same coercion as the monkey-patched client methods so that
+    `pipe.lpush("k", 42).execute()` matches `r.lpush("k", 42)` (H-01).
+
+    Accepts: bytes, memoryview, int, float, str.
+    Rejects: bool (redis-py rejects bools with TypeError since bool is subclass of int).
+    """
+    if isinstance(value, (bytes, memoryview)):
+        return value
+    if isinstance(value, bool):
+        raise TypeError(
+            "Invalid input of type: 'bool'. "
+            "Convert to a bytes, string, int or float first."
+        )
+    if isinstance(value, (int, float)):
+        return repr(value).encode()
+    if isinstance(value, str):
+        return value
+    raise TypeError(
+        f"Invalid input of type: '{type(value).__name__}'. "
+        "Convert to a bytes, string, int or float first."
+    )
+
+
 class Pipeline:
     """Buffers commands and executes them as a batch.
 
@@ -84,7 +112,10 @@ class Pipeline:
     # ---- String Commands ----
 
     def set(self, name, value, ex=None, px=None, nx=False, xx=False):
-        self._commands.append(("set", (name, value), {"ex": ex, "px": px, "nx": nx, "xx": xx}))
+        # H-01: apply value coercion at buffer time so the pipeline matches
+        # the monkey-patched client (`r.set` runs `_coerced_set` first).
+        coerced = _coerce_value(value)
+        self._commands.append(("set", (name, coerced), {"ex": ex, "px": px, "nx": nx, "xx": xx}))
         return self
 
     def get(self, name):
@@ -164,11 +195,15 @@ class Pipeline:
     # ---- List Commands ----
 
     def lpush(self, name, *values):
-        self._commands.append(("lpush", (name, *values), {}))
+        # H-01: per-value coercion mirrors the monkey-patched `_coerced_lpush`.
+        coerced = tuple(_coerce_value(v) for v in values)
+        self._commands.append(("lpush", (name, *coerced), {}))
         return self
 
     def rpush(self, name, *values):
-        self._commands.append(("rpush", (name, *values), {}))
+        # H-01: per-value coercion mirrors the monkey-patched `_coerced_rpush`.
+        coerced = tuple(_coerce_value(v) for v in values)
+        self._commands.append(("rpush", (name, *coerced), {}))
         return self
 
     def lpop(self, name, count=None):
@@ -192,7 +227,9 @@ class Pipeline:
         return self
 
     def linsert(self, name, where, refvalue, value):
-        self._commands.append(("linsert", (name, where, refvalue, value), {}))
+        # H-01: coerce only the inserted `value`. `refvalue` is a lookup
+        # pivot — matches `_coerced_linsert` in burner_redis/__init__.py.
+        self._commands.append(("linsert", (name, where, refvalue, _coerce_value(value)), {}))
         return self
 
     def lrem(self, name, count, value):
@@ -200,7 +237,8 @@ class Pipeline:
         return self
 
     def lset(self, name, index, value):
-        self._commands.append(("lset", (name, index, value), {}))
+        # H-01: coerce inserted value (mirror of `_coerced_lset`).
+        self._commands.append(("lset", (name, index, _coerce_value(value)), {}))
         return self
 
     def ltrim(self, name, start, end):

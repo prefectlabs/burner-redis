@@ -647,3 +647,74 @@ async def test_pipeline_linsert(r):
     assert results[0] == 2
     assert results[1] == 3  # new length
     assert results[2] == [b"a", b"b", b"c"]
+
+
+# ---- H-01 regression: pipeline value coercion (drop-in parity with client) ----
+
+async def test_pipeline_lpush_int_coerced(r):
+    """Pipeline lpush must coerce ints to bytes — same rule as r.lpush."""
+    pipe = r.pipeline()
+    pipe.lpush("k", 42)
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 1
+    assert results[1] == [b"42"]
+
+
+async def test_pipeline_rpush_float_coerced(r):
+    """Pipeline rpush must coerce floats to bytes — same rule as r.rpush."""
+    pipe = r.pipeline()
+    pipe.rpush("k", 3.14)
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 1
+    assert results[1] == [b"3.14"]
+
+
+async def test_pipeline_lpush_bool_raises(r):
+    """Pipeline lpush must reject booleans — same rule as r.lpush.
+
+    Coercion happens at buffer time, so we expect TypeError on the .lpush()
+    call itself (before .execute()).
+    """
+    pipe = r.pipeline()
+    with pytest.raises(TypeError):
+        pipe.lpush("k", True)
+
+
+async def test_pipeline_lset_int_coerced(r):
+    """Pipeline lset must coerce ints — mirror of r.lset."""
+    await r.rpush("k", "a")
+    pipe = r.pipeline()
+    pipe.lset("k", 0, 42)
+    pipe.lindex("k", 0)
+    results = await pipe.execute()
+    assert results[1] == b"42"
+
+
+async def test_pipeline_linsert_int_coerced(r):
+    """Pipeline linsert must coerce inserted value but leave refvalue alone."""
+    await r.rpush("k", "a")
+    pipe = r.pipeline()
+    pipe.linsert("k", "AFTER", "a", 42)
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 2
+    assert results[1] == [b"a", b"42"]
+
+
+async def test_pipeline_set_int_coerced(r):
+    """Pipeline set must coerce ints — mirror of monkey-patched _coerced_set."""
+    pipe = r.pipeline()
+    pipe.set("k", 42)
+    pipe.get("k")
+    results = await pipe.execute()
+    assert results[0] is True
+    assert results[1] == b"42"
+
+
+async def test_pipeline_set_bool_raises(r):
+    """Pipeline set must reject booleans (same rule as r.set)."""
+    pipe = r.pipeline()
+    with pytest.raises(TypeError):
+        pipe.set("k", True)
