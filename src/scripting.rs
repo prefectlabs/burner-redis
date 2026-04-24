@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 
 use crate::store::{PubSubMessage, ValueData, ValueEntry};
+use std::collections::VecDeque;
 
 /// Represents a Redis command return value for Lua-Redis type conversion.
 #[derive(Debug, Clone)]
@@ -107,14 +108,16 @@ impl LuaEngine {
     /// `data` is the ALREADY WRITE-LOCKED store data HashMap -- the caller (Store::eval)
     /// acquires the write lock and passes the mutable reference. This ensures atomicity.
     /// `pubsub_tx` is an optional broadcast sender for PUBLISH command support in Lua scripts.
-    /// Execute a Lua script. Returns (RedisValue, bool) where bool indicates XADD occurred.
+    /// Execute a Lua script. Returns (RedisValue, had_xadd, had_list_mutation) where the
+    /// two bool flags indicate whether stream / list mutations occurred (callers use these
+    /// to fire stream_notify / list_notify waiters after dropping the data lock).
     pub fn execute(
         script: &str,
         keys: Vec<Bytes>,
         args: Vec<Bytes>,
         data: &mut HashMap<Bytes, ValueEntry>,
         pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
-    ) -> Result<(RedisValue, bool), String> {
+    ) -> Result<(RedisValue, bool, bool), String> {
         // Create a fresh Lua VM per execution (isolation, no state leakage)
         let lua = Lua::new();
 
@@ -124,6 +127,10 @@ impl LuaEngine {
         let pubsub_tx_clone = pubsub_tx.cloned();
         // Track if any XADD occurred during script execution
         let had_xadd = std::cell::Cell::new(false);
+        // Track if any list-growing mutation (LPUSH/RPUSH/LMOVE/RPOPLPUSH/LINSERT) occurred.
+        // Used by Store::eval/evalsha to fire list_notify.notify_waiters() after dropping
+        // the data lock — the Phase-11-class-of-bug fix for BRPOP waiters missing a Lua LPUSH.
+        let had_list_mutation = std::cell::Cell::new(false);
 
         let scope_result: LuaResult<RedisValue> = lua.scope(|scope| {
             // Set up KEYS global
@@ -179,9 +186,10 @@ impl LuaEngine {
                     let result = dispatch_command(&cmd_name, &cmd_args, *data_ref, pubsub_tx_ref);
 
                     match result {
-                        Ok((RedisValue::Error(msg), _)) => Err(LuaError::RuntimeError(msg)),
-                        Ok((val, xadd_flag)) => {
+                        Ok((RedisValue::Error(msg), _, _)) => Err(LuaError::RuntimeError(msg)),
+                        Ok((val, xadd_flag, list_mut_flag)) => {
                             if xadd_flag { had_xadd.set(true); }
+                            if list_mut_flag { had_list_mutation.set(true); }
                             val.into_lua(lua_ctx)
                         },
                         Err(msg) => Err(LuaError::RuntimeError(msg)),
@@ -226,13 +234,14 @@ impl LuaEngine {
                     let result = dispatch_command(&cmd_name, &cmd_args, *data_ref, pubsub_tx_ref);
 
                     match result {
-                        Ok((RedisValue::Error(msg), _)) => {
+                        Ok((RedisValue::Error(msg), _, _)) => {
                             let table = lua_ctx.create_table()?;
                             table.set("err", msg)?;
                             Ok(LuaValue::Table(table))
                         }
-                        Ok((val, xadd_flag)) => {
+                        Ok((val, xadd_flag, list_mut_flag)) => {
                             if xadd_flag { had_xadd.set(true); }
+                            if list_mut_flag { had_list_mutation.set(true); }
                             val.into_lua(lua_ctx)
                         },
                         Err(msg) => {
@@ -257,25 +266,38 @@ impl LuaEngine {
             Ok(lua_to_redis_value(result))
         });
 
-        scope_result.map(|v| (v, had_xadd.get())).map_err(|e| e.to_string())
+        scope_result
+            .map(|v| (v, had_xadd.get(), had_list_mutation.get()))
+            .map_err(|e| e.to_string())
     }
 }
 
 /// Dispatch a Redis command to the appropriate operation on the raw data HashMap.
 /// This operates directly on the write-locked data for atomicity during Lua execution.
 /// `pubsub_tx` is an optional broadcast sender for PUBLISH support in Lua scripts.
-/// Returns (RedisValue, bool) where the bool indicates if an XADD occurred (for stream notification).
+/// Returns (RedisValue, had_xadd, had_list_mutation) where the flags indicate whether
+/// a successful XADD / list-growing mutation occurred (so callers can fire the matching
+/// notify_waiters() outside the data lock).
+///
+/// Per RESEARCH.md Assumptions Log A2: only list-GROW operations mark had_list_mutation.
+/// LINSERT is included because it can grow a non-empty list (pivot match inserts a new
+/// element mid-list, increasing length). LPOP/RPOP/LREM/LTRIM/LSET never grow a list.
 fn dispatch_command(
     cmd: &str,
     args: &[Bytes],
     data: &mut HashMap<Bytes, ValueEntry>,
     pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
-) -> Result<(RedisValue, bool), String> {
+) -> Result<(RedisValue, bool, bool), String> {
     let is_xadd = cmd == "XADD";
+    let is_list_write = matches!(
+        cmd,
+        "LPUSH" | "RPUSH" | "LMOVE" | "RPOPLPUSH" | "LINSERT"
+    );
     let result = dispatch_command_inner(cmd, args, data, pubsub_tx)?;
-    // Signal that an XADD occurred only if the command succeeded (not an error)
-    let had_xadd = is_xadd && !matches!(result, RedisValue::Error(_));
-    Ok((result, had_xadd))
+    let success = !matches!(result, RedisValue::Error(_));
+    let had_xadd = is_xadd && success;
+    let had_list_mutation = is_list_write && success;
+    Ok((result, had_xadd, had_list_mutation))
 }
 
 /// Inner dispatch that returns just the RedisValue.
@@ -1804,6 +1826,763 @@ fn dispatch_command_inner(
                 }
             }
         }
+
+        // ── List commands (non-blocking) ─────────────────────────────
+        "LPUSH" => {
+            if args.len() < 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'lpush' command".to_string(),
+                ));
+            }
+            let key = args[0].clone();
+
+            // Passive expiration
+            if let Some(entry) = data.get(&key) {
+                if entry.is_expired() {
+                    data.remove(&key);
+                }
+            }
+
+            let entry = data.entry(key).or_insert_with(ValueEntry::new_list);
+            match entry.data {
+                ValueData::List(ref mut list) => {
+                    for v in &args[1..] {
+                        list.push_front(v.clone());
+                    }
+                    Ok(RedisValue::Integer(list.len() as i64))
+                }
+                _ => Ok(RedisValue::Error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+                )),
+            }
+        }
+
+        "RPUSH" => {
+            if args.len() < 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'rpush' command".to_string(),
+                ));
+            }
+            let key = args[0].clone();
+
+            if let Some(entry) = data.get(&key) {
+                if entry.is_expired() {
+                    data.remove(&key);
+                }
+            }
+
+            let entry = data.entry(key).or_insert_with(ValueEntry::new_list);
+            match entry.data {
+                ValueData::List(ref mut list) => {
+                    for v in &args[1..] {
+                        list.push_back(v.clone());
+                    }
+                    Ok(RedisValue::Integer(list.len() as i64))
+                }
+                _ => Ok(RedisValue::Error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+                )),
+            }
+        }
+
+        "LPOP" => {
+            if args.is_empty() || args.len() > 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'lpop' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let count: Option<usize> = if args.len() == 2 {
+                let n: i64 = match String::from_utf8_lossy(&args[1]).parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        return Ok(RedisValue::Error(
+                            "ERR value is not an integer or out of range".to_string(),
+                        ));
+                    }
+                };
+                if n < 0 {
+                    return Ok(RedisValue::Error(
+                        "ERR value is out of range, must be positive".to_string(),
+                    ));
+                }
+                Some(n as usize)
+            } else {
+                None
+            };
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                }
+            }
+
+            // Type-check BEFORE count=0 fast-return so WRONGTYPE still propagates.
+            match data.get(key) {
+                None => return Ok(RedisValue::Nil),
+                Some(entry) => match &entry.data {
+                    ValueData::List(_) => {}
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                },
+            }
+
+            if count == Some(0) {
+                return Ok(RedisValue::Array(Vec::new()));
+            }
+
+            let entry = data.get_mut(key).expect("entry exists (checked above)");
+            let list = match &mut entry.data {
+                ValueData::List(l) => l,
+                _ => unreachable!(),
+            };
+
+            let result = match count {
+                None => match list.pop_front() {
+                    Some(v) => RedisValue::BulkString(v),
+                    None => RedisValue::Nil,
+                },
+                Some(n) => {
+                    let actual = n.min(list.len());
+                    let popped: Vec<RedisValue> = (0..actual)
+                        .map(|_| RedisValue::BulkString(list.pop_front().expect("len checked")))
+                        .collect();
+                    RedisValue::Array(popped)
+                }
+            };
+
+            // D-03: delete key if empty.
+            if let Some(entry) = data.get(key) {
+                if let ValueData::List(l) = &entry.data {
+                    if l.is_empty() {
+                        data.remove(key);
+                    }
+                }
+            }
+            Ok(result)
+        }
+
+        "RPOP" => {
+            if args.is_empty() || args.len() > 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'rpop' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let count: Option<usize> = if args.len() == 2 {
+                let n: i64 = match String::from_utf8_lossy(&args[1]).parse() {
+                    Ok(n) => n,
+                    Err(_) => {
+                        return Ok(RedisValue::Error(
+                            "ERR value is not an integer or out of range".to_string(),
+                        ));
+                    }
+                };
+                if n < 0 {
+                    return Ok(RedisValue::Error(
+                        "ERR value is out of range, must be positive".to_string(),
+                    ));
+                }
+                Some(n as usize)
+            } else {
+                None
+            };
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                }
+            }
+
+            match data.get(key) {
+                None => return Ok(RedisValue::Nil),
+                Some(entry) => match &entry.data {
+                    ValueData::List(_) => {}
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                },
+            }
+
+            if count == Some(0) {
+                return Ok(RedisValue::Array(Vec::new()));
+            }
+
+            let entry = data.get_mut(key).expect("entry exists (checked above)");
+            let list = match &mut entry.data {
+                ValueData::List(l) => l,
+                _ => unreachable!(),
+            };
+
+            let result = match count {
+                None => match list.pop_back() {
+                    Some(v) => RedisValue::BulkString(v),
+                    None => RedisValue::Nil,
+                },
+                Some(n) => {
+                    let actual = n.min(list.len());
+                    let popped: Vec<RedisValue> = (0..actual)
+                        .map(|_| RedisValue::BulkString(list.pop_back().expect("len checked")))
+                        .collect();
+                    RedisValue::Array(popped)
+                }
+            };
+
+            if let Some(entry) = data.get(key) {
+                if let ValueData::List(l) = &entry.data {
+                    if l.is_empty() {
+                        data.remove(key);
+                    }
+                }
+            }
+            Ok(result)
+        }
+
+        "LRANGE" => {
+            if args.len() != 3 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'lrange' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let start: i64 = match String::from_utf8_lossy(&args[1]).parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Ok(RedisValue::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+            let stop: i64 = match String::from_utf8_lossy(&args[2]).parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Ok(RedisValue::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Array(Vec::new()));
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Array(Vec::new())),
+                Some(entry) => match &entry.data {
+                    ValueData::List(list) => {
+                        let (s, e) = match crate::commands::lists::normalize_range_indices(
+                            start,
+                            stop,
+                            list.len(),
+                        ) {
+                            None => return Ok(RedisValue::Array(Vec::new())),
+                            Some(pair) => pair,
+                        };
+                        let items: Vec<RedisValue> = list
+                            .iter()
+                            .skip(s)
+                            .take(e - s + 1)
+                            .map(|b| RedisValue::BulkString(b.clone()))
+                            .collect();
+                        Ok(RedisValue::Array(items))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "LLEN" => {
+            if args.len() != 1 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'llen' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => match &entry.data {
+                    ValueData::List(list) => Ok(RedisValue::Integer(list.len() as i64)),
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "LINDEX" => {
+            if args.len() != 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'lindex' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let index: i64 = match String::from_utf8_lossy(&args[1]).parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Ok(RedisValue::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Nil);
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Nil),
+                Some(entry) => match &entry.data {
+                    ValueData::List(list) => {
+                        let n = list.len() as i64;
+                        let actual = if index < 0 { index + n } else { index };
+                        if actual < 0 || actual >= n {
+                            Ok(RedisValue::Nil)
+                        } else {
+                            match list.get(actual as usize) {
+                                Some(b) => Ok(RedisValue::BulkString(b.clone())),
+                                None => Ok(RedisValue::Nil),
+                            }
+                        }
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "LINSERT" => {
+            // LINSERT key BEFORE|AFTER pivot value
+            if args.len() != 4 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'linsert' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let where_str = String::from_utf8_lossy(&args[1]);
+            let position = match crate::commands::lists::parse_linsert_where(&where_str) {
+                Ok(p) => p,
+                Err(e) => return Ok(RedisValue::Error(e.to_string())),
+            };
+            let pivot = &args[2];
+            let value = args[3].clone();
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get_mut(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => match &mut entry.data {
+                    ValueData::List(list) => {
+                        let pos = match list.iter().position(|v| v == pivot) {
+                            None => return Ok(RedisValue::Integer(-1)),
+                            Some(p) => p,
+                        };
+                        let insert_at = match position {
+                            crate::commands::lists::InsertPosition::Before => pos,
+                            crate::commands::lists::InsertPosition::After => pos + 1,
+                        };
+                        list.insert(insert_at, value);
+                        Ok(RedisValue::Integer(list.len() as i64))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "LREM" => {
+            if args.len() != 3 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'lrem' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let count: i64 = match String::from_utf8_lossy(&args[1]).parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Ok(RedisValue::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+            let value = args[2].clone();
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            let mut removed: i64 = 0;
+            let became_empty;
+            match data.get_mut(key) {
+                None => return Ok(RedisValue::Integer(0)),
+                Some(entry) => match &mut entry.data {
+                    ValueData::List(list) => {
+                        match crate::commands::lists::parse_lrem_count(count) {
+                            crate::commands::lists::LremDirection::Head(target) => {
+                                list.retain(|v| {
+                                    if (removed as usize) < target && v == &value {
+                                        removed += 1;
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                });
+                            }
+                            crate::commands::lists::LremDirection::Tail(target) => {
+                                let indices: Vec<usize> = list
+                                    .iter()
+                                    .enumerate()
+                                    .rev()
+                                    .filter_map(|(i, v)| if v == &value { Some(i) } else { None })
+                                    .take(target)
+                                    .collect();
+                                for i in indices {
+                                    list.remove(i);
+                                    removed += 1;
+                                }
+                            }
+                            crate::commands::lists::LremDirection::All => {
+                                let before = list.len();
+                                list.retain(|v| v != &value);
+                                removed = (before - list.len()) as i64;
+                            }
+                        }
+                        became_empty = list.is_empty();
+                    }
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                },
+            }
+            if became_empty {
+                data.remove(key);
+            }
+            Ok(RedisValue::Integer(removed))
+        }
+
+        "LSET" => {
+            if args.len() != 3 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'lset' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let index: i64 = match String::from_utf8_lossy(&args[1]).parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Ok(RedisValue::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+            let value = args[2].clone();
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Error("ERR no such key".to_string()));
+                }
+            }
+
+            match data.get_mut(key) {
+                None => Ok(RedisValue::Error("ERR no such key".to_string())),
+                Some(entry) => match &mut entry.data {
+                    ValueData::List(list) => {
+                        let n = list.len() as i64;
+                        let actual = if index < 0 { index + n } else { index };
+                        if actual < 0 || actual >= n {
+                            return Ok(RedisValue::Error("ERR index out of range".to_string()));
+                        }
+                        list[actual as usize] = value;
+                        Ok(RedisValue::Status("OK".to_string()))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "LTRIM" => {
+            if args.len() != 3 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'ltrim' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+            let start: i64 = match String::from_utf8_lossy(&args[1]).parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Ok(RedisValue::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+            let stop: i64 = match String::from_utf8_lossy(&args[2]).parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    return Ok(RedisValue::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Status("OK".to_string()));
+                }
+            }
+
+            let mut remove_key = false;
+            match data.get_mut(key) {
+                None => return Ok(RedisValue::Status("OK".to_string())),
+                Some(entry) => match &mut entry.data {
+                    ValueData::List(list) => {
+                        let len = list.len();
+                        match crate::commands::lists::normalize_range_indices(start, stop, len) {
+                            None => {
+                                remove_key = true;
+                            }
+                            Some((s, e)) => {
+                                let new_list: VecDeque<Bytes> =
+                                    list.iter().skip(s).take(e - s + 1).cloned().collect();
+                                *list = new_list;
+                                if list.is_empty() {
+                                    remove_key = true;
+                                }
+                            }
+                        }
+                    }
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                },
+            }
+            if remove_key {
+                data.remove(key);
+            }
+            Ok(RedisValue::Status("OK".to_string()))
+        }
+
+        "LMOVE" => {
+            // LMOVE src dst LEFT|RIGHT LEFT|RIGHT
+            if args.len() != 4 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'lmove' command".to_string(),
+                ));
+            }
+            let src = args[0].clone();
+            let dst = args[1].clone();
+            let src_end_str = String::from_utf8_lossy(&args[2]);
+            let dst_end_str = String::from_utf8_lossy(&args[3]);
+            let src_from = match crate::commands::lists::parse_list_end(&src_end_str) {
+                Ok(e) => e,
+                Err(e) => return Ok(RedisValue::Error(e.to_string())),
+            };
+            let dst_to = match crate::commands::lists::parse_list_end(&dst_end_str) {
+                Ok(e) => e,
+                Err(e) => return Ok(RedisValue::Error(e.to_string())),
+            };
+
+            // Passive expiration
+            if let Some(e) = data.get(&src) {
+                if e.is_expired() {
+                    data.remove(&src);
+                }
+            }
+            if src != dst {
+                if let Some(e) = data.get(&dst) {
+                    if e.is_expired() {
+                        data.remove(&dst);
+                    }
+                }
+            }
+
+            // Type-check destination BEFORE popping source (matches Redis semantics).
+            if src != dst {
+                if let Some(dst_entry) = data.get(&dst) {
+                    if !matches!(dst_entry.data, ValueData::List(_)) {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
+            // Pop from source (narrow scope so the borrow ends before data.remove).
+            let (popped_opt, src_empty) = {
+                let src_entry = match data.get_mut(&src) {
+                    None => return Ok(RedisValue::Nil),
+                    Some(e) => e,
+                };
+                let src_list = match &mut src_entry.data {
+                    ValueData::List(l) => l,
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                };
+                let val = match src_from {
+                    crate::commands::lists::ListEnd::Left => src_list.pop_front(),
+                    crate::commands::lists::ListEnd::Right => src_list.pop_back(),
+                };
+                (val, src_list.is_empty())
+            };
+
+            let popped = match popped_opt {
+                None => return Ok(RedisValue::Nil),
+                Some(v) => v,
+            };
+
+            if src_empty {
+                data.remove(&src);
+            }
+
+            let dst_entry = data.entry(dst).or_insert_with(ValueEntry::new_list);
+            match &mut dst_entry.data {
+                ValueData::List(l) => match dst_to {
+                    crate::commands::lists::ListEnd::Left => l.push_front(popped.clone()),
+                    crate::commands::lists::ListEnd::Right => l.push_back(popped.clone()),
+                },
+                _ => {
+                    return Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    ));
+                }
+            }
+            Ok(RedisValue::BulkString(popped))
+        }
+
+        "RPOPLPUSH" => {
+            // Equivalent to: LMOVE src dst RIGHT LEFT
+            if args.len() != 2 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'rpoplpush' command".to_string(),
+                ));
+            }
+            let src = args[0].clone();
+            let dst = args[1].clone();
+
+            if let Some(e) = data.get(&src) {
+                if e.is_expired() {
+                    data.remove(&src);
+                }
+            }
+            if src != dst {
+                if let Some(e) = data.get(&dst) {
+                    if e.is_expired() {
+                        data.remove(&dst);
+                    }
+                }
+            }
+
+            if src != dst {
+                if let Some(dst_entry) = data.get(&dst) {
+                    if !matches!(dst_entry.data, ValueData::List(_)) {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
+            let (popped_opt, src_empty) = {
+                let src_entry = match data.get_mut(&src) {
+                    None => return Ok(RedisValue::Nil),
+                    Some(e) => e,
+                };
+                let src_list = match &mut src_entry.data {
+                    ValueData::List(l) => l,
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                };
+                let val = src_list.pop_back();
+                (val, src_list.is_empty())
+            };
+
+            let popped = match popped_opt {
+                None => return Ok(RedisValue::Nil),
+                Some(v) => v,
+            };
+
+            if src_empty {
+                data.remove(&src);
+            }
+
+            let dst_entry = data.entry(dst).or_insert_with(ValueEntry::new_list);
+            match &mut dst_entry.data {
+                ValueData::List(l) => l.push_front(popped.clone()),
+                _ => {
+                    return Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    ));
+                }
+            }
+            Ok(RedisValue::BulkString(popped))
+        }
+
+        // ── Blocking list commands (rejected — scripts are atomic) ───
+        // Per D-13: real Redis returns this exact error wording when a
+        // script tries to invoke a blocking command.
+        "BLPOP" | "BRPOP" | "BLMOVE" => Ok(RedisValue::Error(format!(
+            "ERR This Redis command is not allowed from scripts: {}",
+            cmd
+        ))),
 
         _ => Ok(RedisValue::Error(format!("ERR unknown command '{}'", cmd))),
     }

@@ -2421,7 +2421,7 @@ impl Store {
         // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
         let pubsub_tx = self.pubsub_sender();
 
-        let (result, had_xadd) = {
+        let (result, had_xadd, had_list_mutation) = {
             // Acquire write lock on data -- held for entire script execution
             let mut data = self.data.write();
             LuaEngine::execute(script, keys, args, &mut *data, Some(&pubsub_tx))?
@@ -2429,6 +2429,11 @@ impl Store {
         };
         if had_xadd {
             self.stream_notify.notify_waiters();
+        }
+        if had_list_mutation {
+            // Phase-11-style lost-wakeup fix: BRPOP waiters must be woken when
+            // a Lua LPUSH/RPUSH/LMOVE/RPOPLPUSH/LINSERT grows a list.
+            self.list_notify.notify_waiters();
         }
         Ok(result)
     }
@@ -2449,7 +2454,7 @@ impl Store {
         // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
         let pubsub_tx = self.pubsub_sender();
 
-        let (result, had_xadd) = {
+        let (result, had_xadd, had_list_mutation) = {
             // Acquire write lock on data -- held for entire script execution
             let mut data = self.data.write();
             LuaEngine::execute(&script, keys, args, &mut *data, Some(&pubsub_tx))?
@@ -2457,6 +2462,9 @@ impl Store {
         };
         if had_xadd {
             self.stream_notify.notify_waiters();
+        }
+        if had_list_mutation {
+            self.list_notify.notify_waiters();
         }
         Ok(result)
     }
