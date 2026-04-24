@@ -3194,6 +3194,183 @@ impl Store {
         list.insert(insert_at, value);
         Ok(list.len() as i64)
     }
+
+    /// LMOVE (atomic): Pop an element from one end of `src`, push to one end
+    /// of `dst`. Single write lock, so src==dst is a valid rotation.
+    ///
+    /// Semantics:
+    /// - Missing/empty src → `Ok(None)`; dst is untouched and not created.
+    /// - WRONGTYPE on src or dst (dst type-checked before popping src).
+    /// - Deletes src when empty after pop (D-03).
+    /// - Fires `list_notify.notify_waiters()` after the push (D-10).
+    pub fn lmove_atomic(
+        &self,
+        src: &Bytes,
+        dst: &Bytes,
+        src_from: crate::commands::lists::ListEnd,
+        dst_to: crate::commands::lists::ListEnd,
+    ) -> Result<Option<Bytes>, StoreError> {
+        use crate::commands::lists::ListEnd;
+        let mut data = self.data.write();
+
+        // Passive expiration for both keys.
+        if let Some(e) = data.get(src) {
+            if e.is_expired() {
+                data.remove(src);
+            }
+        }
+        if src != dst {
+            if let Some(e) = data.get(dst) {
+                if e.is_expired() {
+                    data.remove(dst);
+                }
+            }
+        }
+
+        // Type-check destination BEFORE mutating source (matches Redis
+        // order — if dst is a string key we must not silently pop from src).
+        // Skipped when src == dst (rotation); src type is checked below.
+        if src != dst {
+            if let Some(dst_entry) = data.get(dst) {
+                if !matches!(dst_entry.data, ValueData::List(_)) {
+                    return Err(StoreError::WrongType);
+                }
+            }
+        }
+
+        // Pop from source. Compute (popped_value, src_empty) in a narrow
+        // scope so the mutable borrow on src_entry ends before we may
+        // need to data.remove(src).
+        let (popped_opt, src_empty) = {
+            let src_entry = match data.get_mut(src) {
+                None => return Ok(None),
+                Some(e) => e,
+            };
+            let src_list = match &mut src_entry.data {
+                ValueData::List(l) => l,
+                _ => return Err(StoreError::WrongType),
+            };
+            let val = match src_from {
+                ListEnd::Left => src_list.pop_front(),
+                ListEnd::Right => src_list.pop_back(),
+            };
+            let empty = src_list.is_empty();
+            (val, empty)
+        };
+
+        let popped = match popped_opt {
+            None => return Ok(None),
+            Some(v) => v,
+        };
+
+        // D-03: delete src if empty. Note: if src == dst and we just popped
+        // the only element, the list is empty now; we still proceed to the
+        // push arm below, which will re-create the key if needed.
+        if src_empty {
+            data.remove(src);
+        }
+
+        // Push onto destination.
+        let dst_entry = data
+            .entry(dst.clone())
+            .or_insert_with(ValueEntry::new_list);
+        match &mut dst_entry.data {
+            ValueData::List(l) => match dst_to {
+                ListEnd::Left => l.push_front(popped.clone()),
+                ListEnd::Right => l.push_back(popped.clone()),
+            },
+            _ => {
+                // Unreachable given the pre-check above, but keep defensive.
+                return Err(StoreError::WrongType);
+            }
+        }
+
+        // Wake BRPOP/BLPOP waiters (D-10).
+        self.list_notify.notify_waiters();
+        Ok(Some(popped))
+    }
+
+    /// RPOPLPUSH (legacy): `LMOVE src dst RIGHT LEFT`. Kept as a distinct
+    /// method to match redis-py's `rpoplpush()` signature.
+    pub fn rpoplpush_atomic(
+        &self,
+        src: &Bytes,
+        dst: &Bytes,
+    ) -> Result<Option<Bytes>, StoreError> {
+        use crate::commands::lists::ListEnd;
+        self.lmove_atomic(src, dst, ListEnd::Right, ListEnd::Left)
+    }
+
+    /// BLPOP helper: one non-blocking scan of `keys` LEFT-TO-RIGHT, popping
+    /// from the HEAD of the first non-empty list. Used by the async BLPOP
+    /// loop in Plan 02.
+    ///
+    /// - Returns `Ok(Some((key, value)))` on first hit,
+    /// - `Ok(None)` if all keys were missing/empty,
+    /// - `Err(WrongType)` as soon as a non-list key is encountered (abort scan).
+    ///
+    /// Deletes a key after the pop if its list becomes empty (D-03).
+    pub fn blpop_poll(
+        &self,
+        keys: &[Bytes],
+    ) -> Result<Option<(Bytes, Bytes)>, StoreError> {
+        let mut data = self.data.write();
+        for k in keys {
+            // Passive expiration
+            if let Some(e) = data.get(k) {
+                if e.is_expired() {
+                    data.remove(k);
+                }
+            }
+            let entry = match data.get_mut(k) {
+                None => continue,
+                Some(e) => e,
+            };
+            let list = match &mut entry.data {
+                ValueData::List(l) => l,
+                _ => return Err(StoreError::WrongType),
+            };
+            if let Some(v) = list.pop_front() {
+                let empty = list.is_empty();
+                if empty {
+                    data.remove(k);
+                }
+                return Ok(Some((k.clone(), v)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// BRPOP helper: mirror of blpop_poll, but pops from the TAIL.
+    pub fn brpop_poll(
+        &self,
+        keys: &[Bytes],
+    ) -> Result<Option<(Bytes, Bytes)>, StoreError> {
+        let mut data = self.data.write();
+        for k in keys {
+            if let Some(e) = data.get(k) {
+                if e.is_expired() {
+                    data.remove(k);
+                }
+            }
+            let entry = match data.get_mut(k) {
+                None => continue,
+                Some(e) => e,
+            };
+            let list = match &mut entry.data {
+                ValueData::List(l) => l,
+                _ => return Err(StoreError::WrongType),
+            };
+            if let Some(v) = list.pop_back() {
+                let empty = list.is_empty();
+                if empty {
+                    data.remove(k);
+                }
+                return Ok(Some((k.clone(), v)));
+            }
+        }
+        Ok(None)
+    }
 }
 
 /// Return variants for LPOP/RPOP mirroring redis-py semantics:
@@ -5066,5 +5243,175 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    // ── List cross-key + blocking-helper tests (Task 5) ─────────────
+
+    #[test]
+    fn lmove_cross_key_atomic() {
+        let store = Store::new();
+        let src = Bytes::from_static(b"src");
+        let dst = Bytes::from_static(b"dst");
+        store
+            .rpush(
+                src.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        let moved = store
+            .lmove_atomic(
+                &src,
+                &dst,
+                crate::commands::lists::ListEnd::Left,
+                crate::commands::lists::ListEnd::Right,
+            )
+            .unwrap();
+        assert_eq!(moved, Some(Bytes::from_static(b"a")));
+        assert_eq!(
+            store.lrange(&src, 0, -1).unwrap(),
+            vec![Bytes::from_static(b"b"), Bytes::from_static(b"c")]
+        );
+        assert_eq!(
+            store.lrange(&dst, 0, -1).unwrap(),
+            vec![Bytes::from_static(b"a")]
+        );
+    }
+
+    #[test]
+    fn lmove_same_key_rotation() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        // RIGHT → LEFT rotates tail to head: [c, a, b]
+        let moved = store
+            .lmove_atomic(
+                &k,
+                &k,
+                crate::commands::lists::ListEnd::Right,
+                crate::commands::lists::ListEnd::Left,
+            )
+            .unwrap();
+        assert_eq!(moved, Some(Bytes::from_static(b"c")));
+        assert_eq!(
+            store.lrange(&k, 0, -1).unwrap(),
+            vec![
+                Bytes::from_static(b"c"),
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"b")
+            ]
+        );
+    }
+
+    #[test]
+    fn lmove_empty_source_returns_none() {
+        let store = Store::new();
+        assert_eq!(
+            store
+                .lmove_atomic(
+                    &Bytes::from_static(b"missing"),
+                    &Bytes::from_static(b"dst"),
+                    crate::commands::lists::ListEnd::Left,
+                    crate::commands::lists::ListEnd::Right,
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rpoplpush_equivalent_to_lmove() {
+        let store = Store::new();
+        let src = Bytes::from_static(b"src");
+        let dst = Bytes::from_static(b"dst");
+        store
+            .rpush(
+                src.clone(),
+                vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+            )
+            .unwrap();
+        // RPOPLPUSH = LMOVE src dst RIGHT LEFT → pops "b" from tail of src.
+        let moved = store.rpoplpush_atomic(&src, &dst).unwrap();
+        assert_eq!(moved, Some(Bytes::from_static(b"b")));
+        assert_eq!(
+            store.lrange(&dst, 0, -1).unwrap(),
+            vec![Bytes::from_static(b"b")]
+        );
+    }
+
+    #[test]
+    fn blpop_poll_scans_left_to_right() {
+        let store = Store::new();
+        store
+            .rpush(Bytes::from_static(b"k2"), vec![Bytes::from_static(b"v2")])
+            .unwrap();
+        store
+            .rpush(Bytes::from_static(b"k4"), vec![Bytes::from_static(b"v4")])
+            .unwrap();
+        let keys = vec![
+            Bytes::from_static(b"k1"),
+            Bytes::from_static(b"k2"),
+            Bytes::from_static(b"k3"),
+            Bytes::from_static(b"k4"),
+        ];
+        let result = store.blpop_poll(&keys).unwrap();
+        assert_eq!(
+            result,
+            Some((Bytes::from_static(b"k2"), Bytes::from_static(b"v2")))
+        );
+        // k4 must still have its value — scan stopped at the first hit.
+        assert_eq!(store.llen(&Bytes::from_static(b"k4")).unwrap(), 1);
+    }
+
+    #[test]
+    fn blpop_poll_all_empty_returns_none() {
+        let store = Store::new();
+        let keys = vec![Bytes::from_static(b"k1"), Bytes::from_static(b"k2")];
+        assert_eq!(store.blpop_poll(&keys).unwrap(), None);
+    }
+
+    #[test]
+    fn brpop_poll_pops_from_tail() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        let result = store.brpop_poll(&[k.clone()]).unwrap();
+        assert_eq!(result, Some((k, Bytes::from_static(b"c"))));
+    }
+
+    #[test]
+    fn blpop_poll_wrongtype_aborts_scan() {
+        let store = Store::new();
+        store.set(
+            Bytes::from_static(b"s"),
+            Bytes::from_static(b"v"),
+            None,
+            false,
+            false,
+        );
+        let keys = vec![Bytes::from_static(b"s"), Bytes::from_static(b"k")];
+        let err = store.blpop_poll(&keys).unwrap_err();
+        assert!(matches!(err, StoreError::WrongType));
     }
 }
