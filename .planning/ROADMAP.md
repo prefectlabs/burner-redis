@@ -252,7 +252,7 @@ Plans:
 
 **Requirements**: LIST-01, LIST-02, LIST-03, LIST-04, LIST-05, LIST-06, LIST-07, LIST-08, LIST-09, LIST-10, LIST-11, LIST-12, LIST-13, LIST-14, LIST-15, LIST-16
 **Depends on:** Phase 13
-**Plans:** 3 plans
+**Plans:** 3/3 plans complete
 
 Plans:
 - [x] 14-01-PLAN.md — Rust engine: ValueData::List variant, list_notify field, 13 non-blocking Store methods + blpop_poll/brpop_poll/lmove_atomic helpers, src/commands/lists.rs helpers, REQUIREMENTS.md update adding LIST-01..LIST-16 (Wave 1)
