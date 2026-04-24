@@ -211,6 +211,14 @@ pub enum StoreError {
     BusyGroup,
     #[error("ERR The XGROUP subcommand requires the key to exist")]
     KeyNotFound,
+    /// Generic ERR-prefixed message used for list helper parsing errors
+    /// (e.g. LMOVE LEFT/RIGHT, LINSERT BEFORE/AFTER) and LSET index-out-of-range.
+    /// The payload IS the full wire-format error message.
+    #[error("{0}")]
+    Syntax(String),
+    /// ERR no such key — used by LSET when the target key does not exist.
+    #[error("ERR no such key")]
+    NoSuchKey,
 }
 
 /// A pub/sub message delivered through the broadcast channel.
