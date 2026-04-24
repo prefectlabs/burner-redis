@@ -2578,11 +2578,11 @@ fn dispatch_command_inner(
 
         // ── Blocking list commands (rejected — scripts are atomic) ───
         // Per D-13: real Redis returns this exact error wording when a
-        // script tries to invoke a blocking command.
-        "BLPOP" | "BRPOP" | "BLMOVE" => Ok(RedisValue::Error(format!(
-            "ERR This Redis command is not allowed from scripts: {}",
-            cmd
-        ))),
+        // script tries to invoke a blocking command (singular "script", no
+        // colon, no command name). M-01 fix: matches actual Redis output.
+        "BLPOP" | "BRPOP" | "BLMOVE" => Ok(RedisValue::Error(
+            "ERR This Redis command is not allowed from script".to_string(),
+        )),
 
         _ => Ok(RedisValue::Error(format!("ERR unknown command '{}'", cmd))),
     }

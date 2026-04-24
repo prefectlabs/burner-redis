@@ -490,22 +490,40 @@ async def test_lua_rpoplpush(r):
 
 
 async def test_lua_blpop_rejected(r):
-    """LIST-16: Lua BLPOP must raise 'not allowed from scripts'."""
-    with pytest.raises(Exception, match="not allowed from scripts"):
+    """LIST-16: Lua BLPOP must raise the exact real-Redis wording.
+
+    Real Redis returns: "This Redis command is not allowed from script"
+    (singular "script", no colon, no command name) — M-01.
+    """
+    with pytest.raises(Exception, match="not allowed from script"):
         await r.eval("return redis.call('BLPOP', KEYS[1], 0)", 1, "k")
 
 
 async def test_lua_brpop_rejected(r):
-    with pytest.raises(Exception, match="not allowed from scripts"):
+    with pytest.raises(Exception, match="not allowed from script"):
         await r.eval("return redis.call('BRPOP', KEYS[1], 0)", 1, "k")
 
 
 async def test_lua_blmove_rejected(r):
-    with pytest.raises(Exception, match="not allowed from scripts"):
+    with pytest.raises(Exception, match="not allowed from script"):
         await r.eval(
             "return redis.call('BLMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT', 0)",
             2, "src", "dst",
         )
+
+
+async def test_lua_blocking_error_does_not_include_command_name(r):
+    """M-01 regression: error must NOT include the command name or a colon.
+
+    Guards against the previous wording "...not allowed from scripts: BLPOP".
+    """
+    with pytest.raises(Exception) as excinfo:
+        await r.eval("return redis.call('BLPOP', KEYS[1], 0)", 1, "k")
+    msg = str(excinfo.value)
+    assert "BLPOP" not in msg, f"command name leaked into error: {msg!r}"
+    assert ": " not in msg.split("not allowed from script", 1)[1], (
+        f"unexpected colon after error wording: {msg!r}"
+    )
 
 
 async def test_brpop_wakes_on_lua_lpush(r):
