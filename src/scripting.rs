@@ -282,6 +282,13 @@ impl LuaEngine {
 /// Per RESEARCH.md Assumptions Log A2: only list-GROW operations mark had_list_mutation.
 /// LINSERT is included because it can grow a non-empty list (pivot match inserts a new
 /// element mid-list, increasing length). LPOP/RPOP/LREM/LTRIM/LSET never grow a list.
+///
+/// M-04: refined per-command — LINSERT triggers only when it actually inserted
+/// (return value > 0; -1 = pivot not found, 0 = key missing → no mutation),
+/// and LMOVE/RPOPLPUSH trigger only when they actually moved an element
+/// (BulkString result; Nil = empty source → no mutation). LPUSH/RPUSH always
+/// grow the list on a successful Integer return. This avoids spurious wakes
+/// of BLPOP/BRPOP waiters in the case where the script command was a no-op.
 fn dispatch_command(
     cmd: &str,
     args: &[Bytes],
@@ -289,14 +296,23 @@ fn dispatch_command(
     pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
 ) -> Result<(RedisValue, bool, bool), String> {
     let is_xadd = cmd == "XADD";
-    let is_list_write = matches!(
-        cmd,
-        "LPUSH" | "RPUSH" | "LMOVE" | "RPOPLPUSH" | "LINSERT"
-    );
     let result = dispatch_command_inner(cmd, args, data, pubsub_tx)?;
     let success = !matches!(result, RedisValue::Error(_));
     let had_xadd = is_xadd && success;
-    let had_list_mutation = is_list_write && success;
+    let had_list_mutation = match cmd {
+        // LPUSH/RPUSH always grow the destination on a successful Integer
+        // return. (Errors short-circuit above; non-Integer returns would be
+        // a bug in dispatch_command_inner.)
+        "LPUSH" | "RPUSH" => matches!(result, RedisValue::Integer(_)),
+        // LINSERT returns the new list length on success, -1 if pivot not
+        // found, 0 if the key is missing. Only positive values represent an
+        // actual insertion.
+        "LINSERT" => matches!(result, RedisValue::Integer(n) if n > 0),
+        // LMOVE/RPOPLPUSH return the moved element as BulkString on success,
+        // Nil if the source was empty/missing.
+        "LMOVE" | "RPOPLPUSH" => matches!(result, RedisValue::BulkString(_)),
+        _ => false,
+    };
     Ok((result, had_xadd, had_list_mutation))
 }
 
