@@ -2740,6 +2740,154 @@ impl Store {
             .map(|s| s.len() as i64)
             .sum()
     }
+
+    // ── List Commands ────────────────────────────────────────────────
+    //
+    // All list mutators that GROW a list (LPUSH, RPUSH, LMOVE-dst,
+    // RPOPLPUSH-dst) call `self.list_notify.notify_waiters()` inside the
+    // write lock after the mutation — this mirrors the XADD notify pattern
+    // and is what unblocks BRPOP/BLPOP/BLMOVE waiters in the async layer.
+    //
+    // All list mutators that SHRINK a list (LPOP, RPOP, LREM, LTRIM,
+    // BRPOP/BLPOP pop, LMOVE-src) delete the key when the list becomes
+    // empty (D-03), matching Redis's standard behavior.
+
+    /// LPUSH: Push one or more values onto the head of a list.
+    ///
+    /// For a single call `LPUSH k a b c`, each value is pushed in turn to
+    /// the head, so the resulting order is `[c, b, a]` (last-pushed first).
+    /// Creates the list if it does not exist. Returns the new length.
+    /// Fires `list_notify.notify_waiters()` inside the write lock.
+    pub fn lpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(&key) {
+            if entry.is_expired() {
+                data.remove(&key);
+            }
+        }
+
+        let entry = data.entry(key).or_insert_with(ValueEntry::new_list);
+        match entry.data {
+            ValueData::List(ref mut list) => {
+                for v in values {
+                    list.push_front(v);
+                }
+                let len = list.len() as i64;
+                // Wake blocking BRPOP/BLPOP waiters (D-10) — inside write lock.
+                self.list_notify.notify_waiters();
+                Ok(len)
+            }
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
+    /// RPUSH: Push one or more values onto the tail of a list.
+    ///
+    /// Order is preserved: `RPUSH k a b c` → `[a, b, c]`. Creates the list
+    /// if it does not exist. Returns the new length. Fires list_notify.
+    pub fn rpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(&key) {
+            if entry.is_expired() {
+                data.remove(&key);
+            }
+        }
+
+        let entry = data.entry(key).or_insert_with(ValueEntry::new_list);
+        match entry.data {
+            ValueData::List(ref mut list) => {
+                for v in values {
+                    list.push_back(v);
+                }
+                let len = list.len() as i64;
+                self.list_notify.notify_waiters();
+                Ok(len)
+            }
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
+    /// LLEN: Return the length of a list. Missing key → 0; WRONGTYPE on
+    /// a non-list key.
+    pub fn llen(&self, key: &Bytes) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(0),
+            Some(entry) => match &entry.data {
+                ValueData::List(list) => Ok(list.len() as i64),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// LINDEX: Read an element at a (possibly negative) index. Missing key
+    /// or out-of-range → None; WRONGTYPE on non-list.
+    pub fn lindex(&self, key: &Bytes, index: i64) -> Result<Option<Bytes>, StoreError> {
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(None);
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => return Ok(None),
+            Some(e) => e,
+        };
+        let list = match &entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let n = list.len() as i64;
+        let actual = if index < 0 { index + n } else { index };
+        if actual < 0 || actual >= n {
+            return Ok(None);
+        }
+        Ok(list.get(actual as usize).cloned())
+    }
+
+    /// LRANGE: Return elements in a (possibly negative) inclusive range.
+    /// Missing key or empty range → empty Vec; WRONGTYPE on non-list.
+    pub fn lrange(&self, key: &Bytes, start: i64, stop: i64) -> Result<Vec<Bytes>, StoreError> {
+        use crate::commands::lists::normalize_range_indices;
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(Vec::new());
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => return Ok(Vec::new()),
+            Some(e) => e,
+        };
+        let list = match &entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let (s, e) = match normalize_range_indices(start, stop, list.len()) {
+            None => return Ok(Vec::new()),
+            Some(pair) => pair,
+        };
+        // inclusive on both ends
+        Ok(list.iter().skip(s).take(e - s + 1).cloned().collect())
+    }
 }
 
 // ── Persistable Snapshot Types ──────────────────────────────────────────
@@ -4308,5 +4456,116 @@ mod tests {
         let store = Store::new();
         store.shutdown();
         assert!(store.is_shutdown());
+    }
+
+    // ── List foundational tests (Phase 14, Plan 01, Task 3) ─────────
+
+    #[test]
+    fn lpush_creates_and_reverses_order() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        let n = store
+            .lpush(
+                key.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        let elems = store.lrange(&key, 0, -1).unwrap();
+        assert_eq!(
+            elems,
+            vec![
+                Bytes::from_static(b"c"),
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"a")
+            ]
+        );
+    }
+
+    #[test]
+    fn rpush_creates_and_preserves_order() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        let n = store
+            .rpush(
+                key.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        let elems = store.lrange(&key, 0, -1).unwrap();
+        assert_eq!(
+            elems,
+            vec![
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"c")
+            ]
+        );
+    }
+
+    #[test]
+    fn llen_missing_is_zero() {
+        let store = Store::new();
+        assert_eq!(
+            store.llen(&Bytes::from_static(b"missing")).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn lindex_negative_and_out_of_range() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        store
+            .rpush(
+                key.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store.lindex(&key, 0).unwrap(),
+            Some(Bytes::from_static(b"a"))
+        );
+        assert_eq!(
+            store.lindex(&key, -1).unwrap(),
+            Some(Bytes::from_static(b"c"))
+        );
+        assert_eq!(store.lindex(&key, 100).unwrap(), None);
+        assert_eq!(store.lindex(&key, -100).unwrap(), None);
+    }
+
+    #[test]
+    fn lpush_on_string_key_returns_wrongtype() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"strkey");
+        // store.set returns bool; arity is (key, value, ttl, nx, xx).
+        store.set(key.clone(), Bytes::from_static(b"val"), None, false, false);
+        let err = store.lpush(key, vec![Bytes::from_static(b"a")]).unwrap_err();
+        assert!(matches!(err, StoreError::WrongType));
+    }
+
+    #[test]
+    fn lpush_notifies_waiters() {
+        // Smoke: call lpush and verify the list was populated. The notify
+        // itself is observed via async BRPOP in Plan 02 integration tests.
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        store
+            .lpush(key.clone(), vec![Bytes::from_static(b"v")])
+            .unwrap();
+        assert_eq!(store.llen(&key).unwrap(), 1);
     }
 }
