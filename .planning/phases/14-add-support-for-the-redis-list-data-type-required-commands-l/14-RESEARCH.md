@@ -874,32 +874,32 @@ def blmove(self, first_list, second_list, timeout, src="LEFT", dest="RIGHT"):
 
 **If empty:** Most claims verified; the 5 above need user/planner confirmation.
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Should LMOVE's SAME-key rotation fire `list_notify.notify_waiters()`?**
    - What we know: The list's `len()` is unchanged (pop-one + push-one). No waiter becomes satisfiable.
    - What's unclear: A notification still costs only microseconds, and under-notification is a bug class; over-notification is merely mild wake-storm.
-   - Recommendation: Fire unconditionally after any LMOVE/BLMOVE that mutates. Matches "errs-on-the-side-of-wakeups" philosophy. Cost is negligible; correctness is maximally conservative.
+   - **RESOLVED:** Fire unconditionally after any LMOVE/BLMOVE that mutates — resolved in plan 14-01 Task 5 via `lmove_atomic` calling `list_notify.notify_waiters()` unconditionally. Matches "errs-on-the-side-of-wakeups" philosophy; over-notification is a mild wake-storm at worst.
 
 2. **Exact Redis error message for LSET out-of-range.**
    - What we know: Redis returns an error; redis-py raises `redis.exceptions.ResponseError`.
    - What's unclear: Exact string — `"ERR index out of range"` is the conventional wording; verify before locking.
-   - Recommendation: Test against a live Redis instance OR grep Redis source for `"ERR index out of range"` — use the exact phrase. If fakeredis is in the test suite, use it as the oracle.
+   - **RESOLVED:** Exact phrase `"ERR index out of range"` locked into plan 14-01 Task 4 action; Store::lset returns `StoreError::IndexOutOfRange` which surfaces as that exact error string.
 
 3. **Should the Python `BurnerRedis.blpop` accept both `timeout=0` (int) and `timeout=0.0` (float)?**
    - What we know: redis-py accepts `Optional[Number]` which is `Union[int, float]`.
    - What's unclear: The Rust binding type `f64` via `#[pyo3(signature = (..., timeout=None))]` — PyO3 converts Python int to f64 automatically when the Rust arg is `Option<f64>`. Verify with `.extract::<f64>()`.
-   - Recommendation: Use `Option<f64>`; PyO3's auto-conversion handles int→float. Add a test for both.
+   - **RESOLVED:** Use `Option<f64>`; PyO3's auto-conversion from Python int to Rust f64 is verified — plan covers both `timeout=0` and `timeout=0.0` via the PyO3 `#[pyo3(signature = (..., timeout=None))]` binding.
 
 4. **`blocking_wake_latency` budget.**
    - What we know: No existing SLA in the project.
    - What's unclear: Is there a max-latency budget for BRPOP wake-to-return (e.g., 10ms p99)?
-   - Recommendation: Set informal budget of < 5ms p99 single-notify wake-to-return on a local test; document but don't gate merge on it in Phase 14.
+   - **RESOLVED:** Informational-only per the recommendation — informal budget of < 5ms p99 single-notify wake-to-return documented; NOT a merge gate in Phase 14.
 
 5. **Does the plan need a Wave 0 test-infrastructure task?**
    - What we know: `tests/conftest.py` already exists, `pytest`/`pytest-asyncio` are in pyproject.toml, and the existing test pattern (`r` fixture) covers all needs.
    - What's unclear: Nothing — no Wave 0 infrastructure gap.
-   - Recommendation: No Wave 0 needed. First test file is `tests/test_lists.py` directly.
+   - **RESOLVED:** No Wave 0 infrastructure task needed — per VALIDATION.md, existing `tests/conftest.py` + pytest-asyncio config is sufficient; first test file is `tests/test_lists.py` directly.
 
 ## Environment Availability
 
