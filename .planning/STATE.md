@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 14-02-PLAN.md; Plan 03 (Lua + pipeline integration) ready
-last_updated: "2026-04-24T20:54:45.429Z"
-last_activity: 2026-04-24 -- Phase --phase execution started
+stopped_at: Completed 14-03-PLAN.md (Phase 14 complete)
+last_updated: "2026-04-24T21:14:56.738Z"
+last_activity: 2026-04-24
 progress:
   total_phases: 14
-  completed_phases: 12
+  completed_phases: 13
   total_plans: 31
-  completed_plans: 29
-  percent: 94
+  completed_plans: 30
+  percent: 97
 ---
 
 # Project State
@@ -26,11 +26,11 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 ## Current Position
 
 Phase: 14 — EXECUTING
-Plan: 2 of 3 completed (14-02 done; 14-03 pending — Lua + pipeline integration)
-Status: Executing Phase 14
-Last activity: 2026-04-24 — Completed 14-02-PLAN.md (Python surface for list commands)
+Plan: 3 of 3 completed (14-02 done; 14-03 pending — Lua + pipeline integration)
+Status: Ready to execute
+Last activity: 2026-04-24
 
-Progress: [█████████░] 94%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
@@ -87,6 +87,7 @@ Progress: [█████████░] 94%
 | Phase 13 P02 | 3min | 1 tasks | 2 files |
 | Phase 14 P01 | 12min | 5 tasks | 4 files |
 | Phase 14 P02 | 9min | 3 tasks | 3 files |
+| Phase 14 P14-03 | 10min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -154,6 +155,11 @@ Recent decisions affecting current work:
 - [Phase 14] normalize_key_list checks PyString/PyBytes BEFORE PySequence — str is a PySequence, so early-check prevents BLPOP('k', timeout=0.1) from iterating str as per-char list
 - [Phase 14] Wrap future_into_py calls in an async def inner coroutine when passing to asyncio.create_task — pyo3-async-runtimes returns a Future, not a coroutine
 - [Phase 14] Used Python::try_attach(|py| ...).ok_or_else(RuntimeError) pattern for GIL re-attach in blocking list loops — matches existing codebase convention (lib.rs lines 231, 2022)
+- [Phase 14] had_list_mutation flag on LPUSH/RPUSH/LMOVE/RPOPLPUSH/LINSERT propagated through LuaEngine 3-tuple to Store::eval/evalsha, which fires list_notify.notify_waiters() after dropping data lock — Phase-11-style lost-wakeup fix for BRPOP waiters missing Lua LPUSH
+- [Phase 14] Blocking-aware pipeline dispatch lives in Python Pipeline.execute() (D-16) not Rust execute_pipeline — keeps Rust sync fast-path pristine and avoids awaiting Python coroutines from inside a single Rust future
+- [Phase 14] Blocking list commands (BRPOP/BLPOP/BLMOVE) in Lua scripts return canonical Redis error 'ERR This Redis command is not allowed from scripts: <cmd>' — matches real Redis wording for compat with ported Lua scripts
+- [Phase 14] Pipeline LINSERT stub keeps 'where' positional (redis-py signature) — Rust dispatch extracts args.get_item(1).extract::<String>() not kwargs
+- [Phase 14] Blocking commands in pipeline go through the Python slow path (iterate + await on client) rather than a dedicated Rust arm — reuses Plan 02 blocking pymethods, no duplication
 
 ### Pending Todos
 
@@ -197,8 +203,8 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-24T20:54:26.138Z
-Stopped at: Completed 14-02-PLAN.md; Plan 03 (Lua + pipeline integration) ready
+Last session: 2026-04-24T21:14:56.733Z
+Stopped at: Completed 14-03-PLAN.md (Phase 14 complete)
 Resume file: None
 Resume point: Task 2 (checkpoint:human-verify, blocking) — verify staged_recipes_pr_url recorded in .planning/notes/phase-13-feedstock-submission.md frontmatter, then continue to Task 3 (CI iteration) + Task 4 (post-merge verify + SUMMARY)
 
