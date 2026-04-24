@@ -80,6 +80,54 @@ async def _setex(self, name, time, value):
 BurnerRedis.setex = _setex
 
 
+# ---- List Commands: value coercion wrappers (redis-py parity) ----
+
+_original_lpush = BurnerRedis.lpush
+
+
+async def _coerced_lpush(self, name, *values):
+    """LPUSH with per-value coercion matching redis-py behavior."""
+    coerced = [_coerce_value(v) for v in values]
+    return await _original_lpush(self, name, *coerced)
+
+
+BurnerRedis.lpush = _coerced_lpush
+
+
+_original_rpush = BurnerRedis.rpush
+
+
+async def _coerced_rpush(self, name, *values):
+    """RPUSH with per-value coercion matching redis-py behavior."""
+    coerced = [_coerce_value(v) for v in values]
+    return await _original_rpush(self, name, *coerced)
+
+
+BurnerRedis.rpush = _coerced_rpush
+
+
+_original_lset = BurnerRedis.lset
+
+
+async def _coerced_lset(self, name, index, value):
+    """LSET with value coercion matching redis-py behavior."""
+    return await _original_lset(self, name, index, _coerce_value(value))
+
+
+BurnerRedis.lset = _coerced_lset
+
+
+_original_linsert = BurnerRedis.linsert
+
+
+async def _coerced_linsert(self, name, where, refvalue, value):
+    """LINSERT with value coercion (refvalue is a lookup pivot, not coerced — matches redis-py)."""
+    return await _original_linsert(self, name, where, refvalue, _coerce_value(value))
+
+
+BurnerRedis.linsert = _coerced_linsert
+
+
 async def _scan_iter(self, match=None, count=None, _type=None):
     """Async iterator over keys matching a glob pattern.
 
