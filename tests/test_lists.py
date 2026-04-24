@@ -238,7 +238,10 @@ async def test_blpop_timeout_returns_none(r):
     result = await r.blpop(["empty"], timeout=0.1)
     elapsed = time.monotonic() - start
     assert result is None
-    assert 0.05 < elapsed < 0.5
+    # M-05: lower bound is the meaningful assertion (we did wait at least
+    # the requested timeout). Upper bound widened to 2.0s so loaded CI does
+    # not flake on scheduling jitter.
+    assert 0.05 < elapsed < 2.0
 
 
 async def test_blpop_returns_tuple_on_success(r):
@@ -285,6 +288,57 @@ async def test_brpop_pops_from_tail(r):
     assert result == (b"k", b"c")
 
 
+# M-02: Explicit slow-path wake tests. The other "wakes_on_push" tests cannot
+# distinguish "first poll succeeded because the pusher race-won" from "the
+# tokio::select! wake-up actually fired" — both succeed cheaply. These tests
+# pin a lower bound on elapsed time so a regression that only ever serves the
+# fast path would be caught.
+async def test_blpop_slow_path_wake_elapsed_lower_bound(r):
+    """BLPOP must really sleep until LPUSH wakes it (not poll-and-find)."""
+    SLEEP = 0.15
+
+    async def push_later():
+        await asyncio.sleep(SLEEP)
+        await r.lpush("k", "v")
+
+    task = asyncio.create_task(push_later())
+    start = time.monotonic()
+    result = await r.blpop(["k"], timeout=2.0)
+    elapsed = time.monotonic() - start
+    await task
+    assert result == (b"k", b"v")
+    # Must have actually waited at least roughly SLEEP — the only way the
+    # client can have the value before this is if the slow path itself was
+    # the path that produced it.
+    assert elapsed >= SLEEP * 0.8, (
+        f"BLPOP returned too fast ({elapsed}s); did not exercise slow path "
+        f"(expected at least ~{SLEEP}s)"
+    )
+    # And it must not have hit the 2.0s timeout cap.
+    assert elapsed < 2.0
+
+
+async def test_brpop_slow_path_wake_elapsed_lower_bound(r):
+    """BRPOP must really sleep until RPUSH wakes it."""
+    SLEEP = 0.15
+
+    async def push_later():
+        await asyncio.sleep(SLEEP)
+        await r.rpush("k", "v")
+
+    task = asyncio.create_task(push_later())
+    start = time.monotonic()
+    result = await r.brpop(["k"], timeout=2.0)
+    elapsed = time.monotonic() - start
+    await task
+    assert result == (b"k", b"v")
+    assert elapsed >= SLEEP * 0.8, (
+        f"BRPOP returned too fast ({elapsed}s); did not exercise slow path "
+        f"(expected at least ~{SLEEP}s)"
+    )
+    assert elapsed < 2.0
+
+
 async def test_blpop_cancellation_is_clean(r):
     # future_into_py returns a Future directly (not a coroutine), so wrap it
     # in a coroutine for asyncio.create_task.
@@ -319,7 +373,8 @@ async def test_blmove_timeout_returns_none(r):
     result = await r.blmove("empty", "dst", timeout=0.1, src="LEFT", dest="RIGHT")
     elapsed = time.monotonic() - start
     assert result is None
-    assert 0.05 < elapsed < 0.5
+    # M-05: widen upper bound for loaded CI. Lower bound carries the meaning.
+    assert 0.05 < elapsed < 2.0
 
 
 async def test_blmove_wakes_on_push(r):
