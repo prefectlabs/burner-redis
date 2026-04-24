@@ -20,9 +20,17 @@ class Pipeline:
     async def execute(self, raise_on_error: bool = True) -> list:
         """Execute all queued commands and return results in order.
 
-        Uses native Rust pipeline execution: a single Python-to-Rust
-        boundary crossing executes all commands synchronously in a tight
-        loop, eliminating per-command async overhead.
+        Fast path (no blocking commands in the queue): uses native Rust
+        pipeline execution — a single Python-to-Rust boundary crossing
+        executes all commands synchronously in a tight loop, eliminating
+        per-command async overhead (quick task 260415-an2).
+
+        Slow path (at least one of brpop/blpop/blmove in the queue): iterate
+        commands in Python and await each one individually on self._client.
+        Blocking commands respect their per-command timeouts; subsequent
+        commands execute after the block resolves. Pipeline semantics in
+        redis-py are sequential — blocking one command really does block
+        the rest (D-15/D-16).
 
         Matches redis-py behavior: all commands execute regardless of
         individual failures. When raise_on_error is True (default, matching
@@ -33,13 +41,36 @@ class Pipeline:
         """
         if not self._commands:
             return []
-        results = await self._client.execute_pipeline(self._commands)
+
+        blocking_cmds = {"brpop", "blpop", "blmove"}
+        has_blocking = any(c[0] in blocking_cmds for c in self._commands)
+
+        if not has_blocking:
+            # FAST PATH: single-boundary Rust dispatch (preserves 260415-an2 perf).
+            results = await self._client.execute_pipeline(self._commands)
+            self._commands = []
+            results = list(results)
+            if raise_on_error:
+                for r in results:
+                    if isinstance(r, Exception):
+                        raise r
+            return results
+
+        # SLOW PATH: iterate + await individual awaitables on the client.
+        # Keeps Rust execute_pipeline purely synchronous; no Python-coroutine
+        # awaiting from inside a single Rust future.
+        results: list = []
+        commands = self._commands
         self._commands = []
-        results = list(results)
-        if raise_on_error:
-            for r in results:
-                if isinstance(r, Exception):
-                    raise r
+        for (method_name, args, kwargs) in commands:
+            try:
+                method = getattr(self._client, method_name)
+                result = await method(*args, **kwargs)
+                results.append(result)
+            except Exception as e:
+                if raise_on_error:
+                    raise
+                results.append(e)
         return results
 
     async def __aenter__(self):
@@ -128,6 +159,72 @@ class Pipeline:
 
     def zremrangebyscore(self, name, min, max):
         self._commands.append(("zremrangebyscore", (name, min, max), {}))
+        return self
+
+    # ---- List Commands ----
+
+    def lpush(self, name, *values):
+        self._commands.append(("lpush", (name, *values), {}))
+        return self
+
+    def rpush(self, name, *values):
+        self._commands.append(("rpush", (name, *values), {}))
+        return self
+
+    def lpop(self, name, count=None):
+        self._commands.append(("lpop", (name,), {"count": count}))
+        return self
+
+    def rpop(self, name, count=None):
+        self._commands.append(("rpop", (name,), {"count": count}))
+        return self
+
+    def lrange(self, name, start, end):
+        self._commands.append(("lrange", (name, start, end), {}))
+        return self
+
+    def llen(self, name):
+        self._commands.append(("llen", (name,), {}))
+        return self
+
+    def lindex(self, name, index):
+        self._commands.append(("lindex", (name, index), {}))
+        return self
+
+    def linsert(self, name, where, refvalue, value):
+        self._commands.append(("linsert", (name, where, refvalue, value), {}))
+        return self
+
+    def lrem(self, name, count, value):
+        self._commands.append(("lrem", (name, count, value), {}))
+        return self
+
+    def lset(self, name, index, value):
+        self._commands.append(("lset", (name, index, value), {}))
+        return self
+
+    def ltrim(self, name, start, end):
+        self._commands.append(("ltrim", (name, start, end), {}))
+        return self
+
+    def lmove(self, first_list, second_list, src="LEFT", dest="RIGHT"):
+        self._commands.append(("lmove", (first_list, second_list), {"src": src, "dest": dest}))
+        return self
+
+    def rpoplpush(self, src, dst):
+        self._commands.append(("rpoplpush", (src, dst), {}))
+        return self
+
+    def blpop(self, keys, timeout=0):
+        self._commands.append(("blpop", (keys,), {"timeout": timeout}))
+        return self
+
+    def brpop(self, keys, timeout=0):
+        self._commands.append(("brpop", (keys,), {"timeout": timeout}))
+        return self
+
+    def blmove(self, first_list, second_list, timeout, src="LEFT", dest="RIGHT"):
+        self._commands.append(("blmove", (first_list, second_list, timeout), {"src": src, "dest": dest}))
         return self
 
     # ---- Stream Commands ----

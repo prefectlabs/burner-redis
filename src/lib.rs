@@ -3554,6 +3554,220 @@ impl BurnerRedis {
                 dict.set_item("consumers", consumer_list)?;
                 Ok(dict.into_any().unbind())
             }
+            // ---- List Commands (non-blocking) ----
+            "lpush" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let vals: Vec<Bytes> = args
+                    .iter()
+                    .skip(1)
+                    .map(|obj| extract_bytes(&obj))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.lpush(name_bytes, vals).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "rpush" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let vals: Vec<Bytes> = args
+                    .iter()
+                    .skip(1)
+                    .map(|obj| extract_bytes(&obj))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.rpush(name_bytes, vals).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "lpop" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let count: Option<i64> = kwargs
+                    .get_item("count")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| v.extract::<i64>())
+                    .transpose()?;
+                let count_opt: Option<usize> = match count {
+                    None => None,
+                    Some(n) if n < 0 => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "count must be non-negative",
+                        ));
+                    }
+                    Some(n) => Some(n as usize),
+                };
+                let result = self.store.lpop(&key, count_opt).map_err(store_err_to_py)?;
+                let py_result = match result {
+                    crate::store::LPopResult::Nil => py.None(),
+                    crate::store::LPopResult::Single(b) => {
+                        PyBytes::new(py, &b).into_any().unbind()
+                    }
+                    crate::store::LPopResult::Array(vs) => {
+                        let py_list = pyo3::types::PyList::empty(py);
+                        for v in vs {
+                            py_list.append(PyBytes::new(py, &v))?;
+                        }
+                        py_list.into_any().unbind()
+                    }
+                };
+                Ok(py_result)
+            }
+            "rpop" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let count: Option<i64> = kwargs
+                    .get_item("count")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| v.extract::<i64>())
+                    .transpose()?;
+                let count_opt: Option<usize> = match count {
+                    None => None,
+                    Some(n) if n < 0 => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "count must be non-negative",
+                        ));
+                    }
+                    Some(n) => Some(n as usize),
+                };
+                let result = self.store.rpop(&key, count_opt).map_err(store_err_to_py)?;
+                let py_result = match result {
+                    crate::store::LPopResult::Nil => py.None(),
+                    crate::store::LPopResult::Single(b) => {
+                        PyBytes::new(py, &b).into_any().unbind()
+                    }
+                    crate::store::LPopResult::Array(vs) => {
+                        let py_list = pyo3::types::PyList::empty(py);
+                        for v in vs {
+                            py_list.append(PyBytes::new(py, &v))?;
+                        }
+                        py_list.into_any().unbind()
+                    }
+                };
+                Ok(py_result)
+            }
+            "lrange" => {
+                let name = &args.get_item(0)?;
+                let start: i64 = args.get_item(1)?.extract()?;
+                let end: i64 = args.get_item(2)?.extract()?;
+                let key = extract_bytes(name)?;
+                let elems = self.store.lrange(&key, start, end).map_err(store_err_to_py)?;
+                let py_list = pyo3::types::PyList::empty(py);
+                for v in elems {
+                    py_list.append(PyBytes::new(py, &v))?;
+                }
+                Ok(py_list.into_any().unbind())
+            }
+            "llen" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let n = self.store.llen(&key).map_err(store_err_to_py)?;
+                Ok(n.into_pyobject(py)?.into_any().unbind())
+            }
+            "lindex" => {
+                let name = &args.get_item(0)?;
+                let index: i64 = args.get_item(1)?.extract()?;
+                let key = extract_bytes(name)?;
+                let result = self.store.lindex(&key, index).map_err(store_err_to_py)?;
+                let py_result = match result {
+                    Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+                    None => py.None(),
+                };
+                Ok(py_result)
+            }
+            "linsert" => {
+                // redis-py signature: linsert(name, where, refvalue, value)
+                let name = &args.get_item(0)?;
+                let where_str: String = args.get_item(1)?.extract()?;
+                let refvalue = &args.get_item(2)?;
+                let value = &args.get_item(3)?;
+                let key = extract_bytes(name)?;
+                let pivot = extract_bytes(refvalue)?;
+                let val = extract_bytes(value)?;
+                let position = crate::commands::lists::parse_linsert_where(&where_str)
+                    .map_err(store_err_to_py)?;
+                let n = self
+                    .store
+                    .linsert(&key, position, &pivot, val)
+                    .map_err(store_err_to_py)?;
+                Ok(n.into_pyobject(py)?.into_any().unbind())
+            }
+            "lrem" => {
+                let name = &args.get_item(0)?;
+                let count: i64 = args.get_item(1)?.extract()?;
+                let value = &args.get_item(2)?;
+                let key = extract_bytes(name)?;
+                let val = extract_bytes(value)?;
+                let n = self.store.lrem(&key, count, val).map_err(store_err_to_py)?;
+                Ok(n.into_pyobject(py)?.into_any().unbind())
+            }
+            "lset" => {
+                let name = &args.get_item(0)?;
+                let index: i64 = args.get_item(1)?.extract()?;
+                let value = &args.get_item(2)?;
+                let key = extract_bytes(name)?;
+                let val = extract_bytes(value)?;
+                self.store.lset(&key, index, val).map_err(store_err_to_py)?;
+                Ok(pyo3::types::PyBool::new(py, true)
+                    .to_owned()
+                    .into_any()
+                    .unbind())
+            }
+            "ltrim" => {
+                let name = &args.get_item(0)?;
+                let start: i64 = args.get_item(1)?.extract()?;
+                let end: i64 = args.get_item(2)?.extract()?;
+                let key = extract_bytes(name)?;
+                self.store.ltrim(&key, start, end).map_err(store_err_to_py)?;
+                Ok(pyo3::types::PyBool::new(py, true)
+                    .to_owned()
+                    .into_any()
+                    .unbind())
+            }
+            "lmove" => {
+                // Pipeline stub buffers (first_list, second_list) positional + {"src", "dest"} kwargs.
+                let first = &args.get_item(0)?;
+                let second = &args.get_item(1)?;
+                let src_str: String = kwargs
+                    .get_item("src")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_else(|| "LEFT".to_string());
+                let dest_str: String = kwargs
+                    .get_item("dest")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_else(|| "RIGHT".to_string());
+                let src_key = extract_bytes(first)?;
+                let dst_key = extract_bytes(second)?;
+                let src_end = crate::commands::lists::parse_list_end(&src_str)
+                    .map_err(store_err_to_py)?;
+                let dst_end = crate::commands::lists::parse_list_end(&dest_str)
+                    .map_err(store_err_to_py)?;
+                let result = self
+                    .store
+                    .lmove_atomic(&src_key, &dst_key, src_end, dst_end)
+                    .map_err(store_err_to_py)?;
+                let py_result = match result {
+                    Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+                    None => py.None(),
+                };
+                Ok(py_result)
+            }
+            "rpoplpush" => {
+                let src = &args.get_item(0)?;
+                let dst = &args.get_item(1)?;
+                let src_key = extract_bytes(src)?;
+                let dst_key = extract_bytes(dst)?;
+                let result = self
+                    .store
+                    .rpoplpush_atomic(&src_key, &dst_key)
+                    .map_err(store_err_to_py)?;
+                let py_result = match result {
+                    Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+                    None => py.None(),
+                };
+                Ok(py_result)
+            }
             _ => {
                 Err(pyo3::exceptions::PyException::new_err(format!("Unknown pipeline command: {}", method)))
             }
