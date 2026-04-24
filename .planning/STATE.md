@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: planning
-stopped_at: Phase 14 context gathered
-last_updated: "2026-04-24T19:00:04.715Z"
-last_activity: 2026-04-24
+status: executing
+stopped_at: Completed 14-01-PLAN.md; Plan 02 (Python surface) ready to start
+last_updated: "2026-04-24T20:36:04.020Z"
+last_activity: 2026-04-24 -- Phase --phase execution started
 progress:
   total_phases: 14
   completed_phases: 12
-  total_plans: 28
-  completed_plans: 27
-  percent: 96
+  total_plans: 31
+  completed_plans: 28
+  percent: 90
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 13 — publish-burner-redis-to-conda-forge
+**Current focus:** Phase --phase — 14
 
 ## Current Position
 
-Phase: 14
-Plan: Not started
-Status: Ready to plan
-Last activity: 2026-04-24
+Phase: --phase (14) — EXECUTING
+Plan: 1 of --name
+Status: Executing Phase --phase
+Last activity: 2026-04-24 -- Phase --phase execution started
 
-Progress: [██████░░░░] 67%
+Progress: [█████████░] 90%
 
 ## Performance Metrics
 
@@ -85,6 +85,7 @@ Progress: [██████░░░░] 67%
 | Phase 09 P02 | 3min | 2 tasks | 3 files |
 | Phase 13 P01 | 3min | 2 tasks | 1 files |
 | Phase 13 P02 | 3min | 1 tasks | 2 files |
+| Phase 14 P01 | 12min | 5 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -143,6 +144,11 @@ Recent decisions affecting current work:
 - [Phase 13]: Pinned cargo-bundle-licenses to 4.0.0 — latest 4.2.0 requires rustc 1.86 (via cargo_metadata 0.23); our toolchain is 1.85 (edition 2024 MSRV). 4.0.0 emits equivalent YAML schema with `package_name:` field
 - [Phase 13]: All 57 bundled Rust crates fall in the permissive license set (MIT / Apache-2.0 / Unlicense / Unicode-3.0 / Apache-2.0 WITH LLVM-exception) — no GPL/AGPL/MPL/proprietary; no dep upgrade or swap required
 - [Phase 13]: mlua-sys 0.6.8 `text: NOT FOUND` is cosmetic — SPDX ID is cleanly `MIT` in Cargo.toml; LICENSE text lives at mlua workspace repo root, not in the subcrate dir (standard Rust-workspace packaging quirk)
+- [Phase 14] Added StoreError::Syntax(String) + NoSuchKey variants for LSET/helpers; avoids reusing KeyNotFound which is XGROUP-specific
+- [Phase 14] LLEN/LINDEX/LRANGE use data.write() for passive expiration, consistent with smembers/sismember
+- [Phase 14] normalize_range_indices treats positive start >= n as None (empty range), not a 1-element clamp — matches redis-py LRANGE semantics
+- [Phase 14] lmove_atomic type-checks dst BEFORE popping src; narrow inner scope releases src_entry borrow before data.remove(src)
+- [Phase 14] LINSERT does NOT fire list_notify (list was already non-empty, no waiter could be newly unblocked)
 
 ### Pending Todos
 
@@ -186,7 +192,9 @@ None yet.
 
 ## Session Continuity
 
-Last session: --stopped-at
-Stopped at: Phase 14 context gathered
-Resume file: --resume-file
+Last session: 2026-04-24T20:36:04.015Z
+Stopped at: Completed 14-01-PLAN.md; Plan 02 (Python surface) ready to start
+Resume file: None
 Resume point: Task 2 (checkpoint:human-verify, blocking) — verify staged_recipes_pr_url recorded in .planning/notes/phase-13-feedstock-submission.md frontmatter, then continue to Task 3 (CI iteration) + Task 4 (post-merge verify + SUMMARY)
+
+**Planned Phase:** 14 (add-support-for-the-redis-list-data-type-required-commands-l) — 3 plans — 2026-04-24T20:06:26.408Z
