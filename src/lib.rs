@@ -2176,6 +2176,294 @@ impl BurnerRedis {
         resolved(py, dict.into_any().unbind())
     }
 
+    // -- List Commands ----
+
+    /// LPUSH command matching redis.asyncio.Redis.lpush() signature.
+    /// Accepts variadic values, returns new list length.
+    #[pyo3(signature = (name, *values))]
+    fn lpush<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        values: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let vals: Vec<Bytes> = values
+            .iter()
+            .map(|obj| extract_bytes(&obj))
+            .collect::<PyResult<Vec<_>>>()?;
+        let len = self.store.lpush(key, vals).map_err(store_err_to_py)?;
+        resolved(py, len.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// RPUSH command matching redis.asyncio.Redis.rpush() signature.
+    /// Accepts variadic values, returns new list length.
+    #[pyo3(signature = (name, *values))]
+    fn rpush<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        values: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let vals: Vec<Bytes> = values
+            .iter()
+            .map(|obj| extract_bytes(&obj))
+            .collect::<PyResult<Vec<_>>>()?;
+        let len = self.store.rpush(key, vals).map_err(store_err_to_py)?;
+        resolved(py, len.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LPOP command matching redis.asyncio.Redis.lpop() signature.
+    /// Without count: returns bytes or None (single element).
+    /// With count=N: returns list[bytes] of up to N elements, or None if key missing.
+    /// With count=0 on an existing list: returns [].
+    #[pyo3(signature = (name, count=None))]
+    fn lpop<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        count: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let count_opt: Option<usize> = match count {
+            None => None,
+            Some(n) if n < 0 => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "count must be non-negative",
+                ));
+            }
+            Some(n) => Some(n as usize),
+        };
+        let result = self.store.lpop(&key, count_opt).map_err(store_err_to_py)?;
+        let py_result = match result {
+            crate::store::LPopResult::Nil => py.None(),
+            crate::store::LPopResult::Single(b) => {
+                pyo3::types::PyBytes::new(py, &b).into_any().unbind()
+            }
+            crate::store::LPopResult::Array(vs) => {
+                let py_list = pyo3::types::PyList::empty(py);
+                for v in vs {
+                    py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+                }
+                py_list.into_any().unbind()
+            }
+        };
+        resolved(py, py_result)
+    }
+
+    /// RPOP command matching redis.asyncio.Redis.rpop() signature.
+    /// Mirror of LPOP from the tail.
+    #[pyo3(signature = (name, count=None))]
+    fn rpop<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        count: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let count_opt: Option<usize> = match count {
+            None => None,
+            Some(n) if n < 0 => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "count must be non-negative",
+                ));
+            }
+            Some(n) => Some(n as usize),
+        };
+        let result = self.store.rpop(&key, count_opt).map_err(store_err_to_py)?;
+        let py_result = match result {
+            crate::store::LPopResult::Nil => py.None(),
+            crate::store::LPopResult::Single(b) => {
+                pyo3::types::PyBytes::new(py, &b).into_any().unbind()
+            }
+            crate::store::LPopResult::Array(vs) => {
+                let py_list = pyo3::types::PyList::empty(py);
+                for v in vs {
+                    py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+                }
+                py_list.into_any().unbind()
+            }
+        };
+        resolved(py, py_result)
+    }
+
+    /// LRANGE command matching redis.asyncio.Redis.lrange() signature.
+    /// Returns list[bytes] (empty list for missing key).
+    #[pyo3(signature = (name, start, end))]
+    fn lrange<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        start: i64,
+        end: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let elems = self.store.lrange(&key, start, end).map_err(store_err_to_py)?;
+        let py_list = pyo3::types::PyList::empty(py);
+        for v in elems {
+            py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+        }
+        resolved(py, py_list.into_any().unbind())
+    }
+
+    /// LLEN command matching redis.asyncio.Redis.llen() signature.
+    /// Returns int (0 for missing key).
+    fn llen<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let n = self.store.llen(&key).map_err(store_err_to_py)?;
+        resolved(py, n.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LINDEX command matching redis.asyncio.Redis.lindex() signature.
+    /// Returns bytes or None.
+    #[pyo3(signature = (name, index))]
+    fn lindex<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        index: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let result = self.store.lindex(&key, index).map_err(store_err_to_py)?;
+        let py_result = match result {
+            Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
+    }
+
+    /// LINSERT command matching redis.asyncio.Redis.linsert(name, where, refvalue, value).
+    /// Returns new list length, or -1 if pivot not found, or 0 if key missing.
+    #[pyo3(signature = (name, r#where, refvalue, value))]
+    fn linsert<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        r#where: &str,
+        refvalue: &Bound<'py, PyAny>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::commands::lists::parse_linsert_where;
+        let key = extract_bytes(name)?;
+        let pivot = extract_bytes(refvalue)?;
+        let val = extract_bytes(value)?;
+        let position = parse_linsert_where(r#where).map_err(store_err_to_py)?;
+        let n = self
+            .store
+            .linsert(&key, position, &pivot, val)
+            .map_err(store_err_to_py)?;
+        resolved(py, n.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LREM command matching redis.asyncio.Redis.lrem(name, count, value).
+    /// Returns count removed. count>0 removes head-to-tail, count<0 tail-to-head, 0=all.
+    #[pyo3(signature = (name, count, value))]
+    fn lrem<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        count: i64,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let val = extract_bytes(value)?;
+        let n = self.store.lrem(&key, count, val).map_err(store_err_to_py)?;
+        resolved(py, n.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LSET command matching redis.asyncio.Redis.lset(name, index, value).
+    /// Returns True on success; raises ResponseError on out-of-range or missing key.
+    #[pyo3(signature = (name, index, value))]
+    fn lset<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        index: i64,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let val = extract_bytes(value)?;
+        self.store.lset(&key, index, val).map_err(store_err_to_py)?;
+        resolved(
+            py,
+            pyo3::types::PyBool::new(py, true)
+                .to_owned()
+                .into_any()
+                .unbind(),
+        )
+    }
+
+    /// LTRIM command matching redis.asyncio.Redis.ltrim(name, start, end).
+    /// Returns True.
+    #[pyo3(signature = (name, start, end))]
+    fn ltrim<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        start: i64,
+        end: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        self.store.ltrim(&key, start, end).map_err(store_err_to_py)?;
+        resolved(
+            py,
+            pyo3::types::PyBool::new(py, true)
+                .to_owned()
+                .into_any()
+                .unbind(),
+        )
+    }
+
+    /// LMOVE command matching redis.asyncio.Redis.lmove(first_list, second_list, src="LEFT", dest="RIGHT").
+    /// Atomic cross-key (or same-key) pop+push. Returns popped bytes or None.
+    #[pyo3(signature = (first_list, second_list, src="LEFT", dest="RIGHT"))]
+    fn lmove<'py>(
+        &self,
+        py: Python<'py>,
+        first_list: &Bound<'py, PyAny>,
+        second_list: &Bound<'py, PyAny>,
+        src: &str,
+        dest: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::commands::lists::parse_list_end;
+        let src_key = extract_bytes(first_list)?;
+        let dst_key = extract_bytes(second_list)?;
+        let src_end = parse_list_end(src).map_err(store_err_to_py)?;
+        let dst_end = parse_list_end(dest).map_err(store_err_to_py)?;
+        let result = self
+            .store
+            .lmove_atomic(&src_key, &dst_key, src_end, dst_end)
+            .map_err(store_err_to_py)?;
+        let py_result = match result {
+            Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
+    }
+
+    /// RPOPLPUSH command matching redis.asyncio.Redis.rpoplpush(src, dst).
+    /// Atomic pop-from-tail-of-src + push-to-head-of-dst. Returns popped bytes or None.
+    #[pyo3(signature = (src, dst))]
+    fn rpoplpush<'py>(
+        &self,
+        py: Python<'py>,
+        src: &Bound<'py, PyAny>,
+        dst: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let src_key = extract_bytes(src)?;
+        let dst_key = extract_bytes(dst)?;
+        let result = self
+            .store
+            .rpoplpush_atomic(&src_key, &dst_key)
+            .map_err(store_err_to_py)?;
+        let py_result = match result {
+            Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
+    }
+
     /// Execute a batch of pipeline commands in a single Rust call.
     /// Accepts a list of (method_name, args_tuple, kwargs_dict) tuples.
     /// Returns a list of results (with errors as exception objects at the failed position).
