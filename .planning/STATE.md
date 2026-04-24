@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 14-01-PLAN.md; Plan 02 (Python surface) ready to start
-last_updated: "2026-04-24T20:36:04.020Z"
+stopped_at: Completed 14-02-PLAN.md; Plan 03 (Lua + pipeline integration) ready
+last_updated: "2026-04-24T20:54:45.429Z"
 last_activity: 2026-04-24 -- Phase --phase execution started
 progress:
   total_phases: 14
   completed_phases: 12
   total_plans: 31
-  completed_plans: 28
-  percent: 90
+  completed_plans: 29
+  percent: 94
 ---
 
 # Project State
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 
 ## Current Position
 
-Phase: --phase (14) — EXECUTING
-Plan: 1 of --name
-Status: Executing Phase --phase
-Last activity: 2026-04-24 -- Phase --phase execution started
+Phase: 14 — EXECUTING
+Plan: 2 of 3 completed (14-02 done; 14-03 pending — Lua + pipeline integration)
+Status: Executing Phase 14
+Last activity: 2026-04-24 — Completed 14-02-PLAN.md (Python surface for list commands)
 
-Progress: [█████████░] 90%
+Progress: [█████████░] 94%
 
 ## Performance Metrics
 
@@ -86,6 +86,7 @@ Progress: [█████████░] 90%
 | Phase 13 P01 | 3min | 2 tasks | 1 files |
 | Phase 13 P02 | 3min | 1 tasks | 2 files |
 | Phase 14 P01 | 12min | 5 tasks | 4 files |
+| Phase 14 P02 | 9min | 3 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -149,6 +150,10 @@ Recent decisions affecting current work:
 - [Phase 14] normalize_range_indices treats positive start >= n as None (empty range), not a 1-element clamp — matches redis-py LRANGE semantics
 - [Phase 14] lmove_atomic type-checks dst BEFORE popping src; narrow inner scope releases src_entry borrow before data.remove(src)
 - [Phase 14] LINSERT does NOT fire list_notify (list was already non-empty, no waiter could be newly unblocked)
+- [Phase 14] Python monkey-patch value coercion at the wrapper layer (not Rust) for LPUSH/RPUSH/LSET/LINSERT — single-application; Rust extract_bytes sees only already-coerced bytes/str
+- [Phase 14] normalize_key_list checks PyString/PyBytes BEFORE PySequence — str is a PySequence, so early-check prevents BLPOP('k', timeout=0.1) from iterating str as per-char list
+- [Phase 14] Wrap future_into_py calls in an async def inner coroutine when passing to asyncio.create_task — pyo3-async-runtimes returns a Future, not a coroutine
+- [Phase 14] Used Python::try_attach(|py| ...).ok_or_else(RuntimeError) pattern for GIL re-attach in blocking list loops — matches existing codebase convention (lib.rs lines 231, 2022)
 
 ### Pending Todos
 
@@ -192,8 +197,8 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-24T20:36:04.015Z
-Stopped at: Completed 14-01-PLAN.md; Plan 02 (Python surface) ready to start
+Last session: 2026-04-24T20:54:26.138Z
+Stopped at: Completed 14-02-PLAN.md; Plan 03 (Lua + pipeline integration) ready
 Resume file: None
 Resume point: Task 2 (checkpoint:human-verify, blocking) — verify staged_recipes_pr_url recorded in .planning/notes/phase-13-feedstock-submission.md frontmatter, then continue to Task 3 (CI iteration) + Task 4 (post-merge verify + SUMMARY)
 

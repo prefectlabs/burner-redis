@@ -256,5 +256,5 @@ Plans:
 
 Plans:
 - [x] 14-01-PLAN.md — Rust engine: ValueData::List variant, list_notify field, 13 non-blocking Store methods + blpop_poll/brpop_poll/lmove_atomic helpers, src/commands/lists.rs helpers, REQUIREMENTS.md update adding LIST-01..LIST-16 (Wave 1)
-- [ ] 14-02-PLAN.md — Python surface: 13 non-blocking #[pymethods], 3 blocking #[pymethods] (BRPOP/BLPOP/BLMOVE via future_into_py + tokio::select! + notify re-arm), value-coercion monkey-patches, tests/test_lists.py covering LIST-01..LIST-15 (Wave 2)
+- [x] 14-02-PLAN.md — Python surface: 13 non-blocking #[pymethods], 3 blocking #[pymethods] (BRPOP/BLPOP/BLMOVE via future_into_py + tokio::select! + notify re-arm), value-coercion monkey-patches, tests/test_lists.py covering LIST-01..LIST-15 (Wave 2)
 - [ ] 14-03-PLAN.md — Lua + pipeline integration: had_list_mutation flag + 13 non-blocking + 3 blocking-reject arms in scripting.rs, 13 non-blocking arms in dispatch_pipeline_command, 16 Python pipeline stubs, Python-side blocking-aware Pipeline.execute() branch, LIST-16 tests, REQUIREMENTS.md finalize (Wave 3)

@@ -61,21 +61,36 @@ Requirements for initial release. Each maps to roadmap phases.
 
 ### List Commands
 
-- [ ] **LIST-01**: User can LPUSH one or more values onto the head of a list
-- [ ] **LIST-02**: User can RPUSH one or more values onto the tail of a list
-- [ ] **LIST-03**: User can LPOP with optional count (returns bytes, list of bytes, or None)
-- [ ] **LIST-04**: User can RPOP with the same semantics as LPOP
-- [ ] **LIST-05**: User can LRANGE with negative indices to slice a list
-- [ ] **LIST-06**: User can LLEN to get the length of a list
-- [ ] **LIST-07**: User can LINDEX to read an element at an index
-- [ ] **LIST-08**: User can LINSERT BEFORE or AFTER a pivot
-- [ ] **LIST-09**: User can LREM with positive, negative, or zero count
-- [ ] **LIST-10**: User can LSET to replace an element at an index
-- [ ] **LIST-11**: User can LTRIM to clamp a list to a range
-- [ ] **LIST-12**: User can LMOVE between two lists atomically
-- [ ] **LIST-13**: User can RPOPLPUSH (legacy alias for LMOVE RIGHT LEFT)
-- [ ] **LIST-14**: User can BRPOP/BLPOP with float-seconds timeout, multi-key scan
-- [ ] **LIST-15**: User can BLMOVE with timeout, atomic src/dst semantics
+- [x] **LIST-01
+**: User can LPUSH one or more values onto the head of a list
+- [x] **LIST-02
+**: User can RPUSH one or more values onto the tail of a list
+- [x] **LIST-03
+**: User can LPOP with optional count (returns bytes, list of bytes, or None)
+- [x] **LIST-04
+**: User can RPOP with the same semantics as LPOP
+- [x] **LIST-05
+**: User can LRANGE with negative indices to slice a list
+- [x] **LIST-06
+**: User can LLEN to get the length of a list
+- [x] **LIST-07
+**: User can LINDEX to read an element at an index
+- [x] **LIST-08
+**: User can LINSERT BEFORE or AFTER a pivot
+- [x] **LIST-09
+**: User can LREM with positive, negative, or zero count
+- [x] **LIST-10
+**: User can LSET to replace an element at an index
+- [x] **LIST-11
+**: User can LTRIM to clamp a list to a range
+- [x] **LIST-12
+**: User can LMOVE between two lists atomically
+- [x] **LIST-13
+**: User can RPOPLPUSH (legacy alias for LMOVE RIGHT LEFT)
+- [x] **LIST-14
+**: User can BRPOP/BLPOP with float-seconds timeout, multi-key scan
+- [x] **LIST-15
+**: User can BLMOVE with timeout, atomic src/dst semantics
 - [ ] **LIST-16**: All list commands work in pipelines; 13 non-blocking work in Lua
 
 ### Lua Scripting
@@ -207,21 +222,21 @@ Which phases cover which requirements. Updated during roadmap creation.
 | DIST-02 | Phase 9 | Complete |
 | LOCK-01 | Phase 7 | Complete |
 | LOCK-02 | Phase 7 | Complete |
-| LIST-01 | Phase 14 | In Progress |
-| LIST-02 | Phase 14 | In Progress |
-| LIST-03 | Phase 14 | In Progress |
-| LIST-04 | Phase 14 | In Progress |
-| LIST-05 | Phase 14 | In Progress |
-| LIST-06 | Phase 14 | In Progress |
-| LIST-07 | Phase 14 | In Progress |
-| LIST-08 | Phase 14 | In Progress |
-| LIST-09 | Phase 14 | In Progress |
-| LIST-10 | Phase 14 | In Progress |
-| LIST-11 | Phase 14 | In Progress |
-| LIST-12 | Phase 14 | In Progress |
-| LIST-13 | Phase 14 | In Progress |
-| LIST-14 | Phase 14 | In Progress |
-| LIST-15 | Phase 14 | In Progress |
+| LIST-01 | Phase 14 | Complete |
+| LIST-02 | Phase 14 | Complete |
+| LIST-03 | Phase 14 | Complete |
+| LIST-04 | Phase 14 | Complete |
+| LIST-05 | Phase 14 | Complete |
+| LIST-06 | Phase 14 | Complete |
+| LIST-07 | Phase 14 | Complete |
+| LIST-08 | Phase 14 | Complete |
+| LIST-09 | Phase 14 | Complete |
+| LIST-10 | Phase 14 | Complete |
+| LIST-11 | Phase 14 | Complete |
+| LIST-12 | Phase 14 | Complete |
+| LIST-13 | Phase 14 | Complete |
+| LIST-14 | Phase 14 | Complete |
+| LIST-15 | Phase 14 | Complete |
 | LIST-16 | Phase 14 | In Progress |
 
 **Coverage:**
