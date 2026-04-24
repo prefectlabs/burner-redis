@@ -14,6 +14,7 @@ A self-hosted Prefect server can start, run flows, and manage state using this l
 
 - [x] Embedded in-process Redis engine in Rust with Python bindings (PyO3/maturin) — Validated in Phase 1
 - [x] String commands: SET (with EX, PX, NX, XX flags), GET, DELETE, EXISTS — Validated in Phase 1
+- [x] List commands: LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX, LSET, LREM, LTRIM, LINSERT, LMOVE, RPOPLPUSH, BLPOP, BRPOP, BLMOVE — Validated in Phase 14
 
 ### Active
 
@@ -89,4 +90,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-04-10 after initialization*
+*Last updated: 2026-04-24 after Phase 14 completion*
