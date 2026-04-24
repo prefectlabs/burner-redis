@@ -571,14 +571,24 @@ async def test_lua_blocking_error_does_not_include_command_name(r):
     """M-01 regression: error must NOT include the command name or a colon.
 
     Guards against the previous wording "...not allowed from scripts: BLPOP".
+    The Lua stack traceback (appended by mlua) is allowed to contain colons,
+    so we check just the first line of the message.
     """
     with pytest.raises(Exception) as excinfo:
         await r.eval("return redis.call('BLPOP', KEYS[1], 0)", 1, "k")
     msg = str(excinfo.value)
-    assert "BLPOP" not in msg, f"command name leaked into error: {msg!r}"
-    assert ": " not in msg.split("not allowed from script", 1)[1], (
-        f"unexpected colon after error wording: {msg!r}"
+    # The first line is the actual reject message we control. Subsequent
+    # lines are mlua's stack traceback (which legitimately contains colons,
+    # source paths, etc.).
+    first_line = msg.splitlines()[0]
+    assert "BLPOP" not in first_line, (
+        f"command name leaked into error: {first_line!r}"
     )
+    # No trailing colon-with-suffix after "from script"
+    assert "from script:" not in first_line and "from scripts" not in first_line, (
+        f"old plural/colon wording leaked: {first_line!r}"
+    )
+    assert "not allowed from script" in first_line
 
 
 async def test_brpop_wakes_on_lua_lpush(r):
