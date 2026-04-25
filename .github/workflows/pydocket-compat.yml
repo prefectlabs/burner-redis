@@ -44,7 +44,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: chrisguidry/docket
-          ref: replace-fakeredis-with-burner-redis
+          ref: main
           path: pydocket
 
       - name: Install pydocket dependencies

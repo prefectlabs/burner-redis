@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: chrisguidry/docket
-          ref: replace-fakeredis-with-burner-redis
+          ref: main
           path: docket
 
       - name: Install uv + Python
