@@ -2486,7 +2486,29 @@ fn dispatch_command_inner(
                 }
             }
 
-            // Type-check destination BEFORE popping source (matches Redis semantics).
+            // P2-10: determine src state FIRST (read-only). Missing or empty
+            // src is a no-op move and must return Nil without ever inspecting
+            // dst's type — matches `Store::lmove_atomic` after round-1 P2-02
+            // and real Redis. Wrongtype src is the only src-side error case.
+            match data.get(&src) {
+                None => return Ok(RedisValue::Nil),
+                Some(entry) => match &entry.data {
+                    ValueData::List(l) if l.is_empty() => return Ok(RedisValue::Nil),
+                    ValueData::List(_) => {} // src has at least one element
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                },
+            }
+
+            // Now that src has a poppable element, type-check dst BEFORE
+            // mutating src (atomicity guarantee — the data write lock spans
+            // the entire arm, so the dst type cannot change between this
+            // check and the push below). Skipped when src == dst — src's
+            // type was already validated above.
             if src != dst {
                 if let Some(dst_entry) = data.get(&dst) {
                     if !matches!(dst_entry.data, ValueData::List(_)) {
@@ -2572,6 +2594,26 @@ fn dispatch_command_inner(
                         data.remove(&dst);
                     }
                 }
+            }
+
+            // P2-10: see LMOVE arm above. Determine src state FIRST
+            // (read-only). Missing/empty src returns Nil without inspecting
+            // dst — matches Store::lmove_atomic after round-1 P2-02 and real
+            // Redis. Only validate dst's type once we know there's a value
+            // to move; the data write lock spans the whole arm, so this
+            // ordering preserves atomicity.
+            match data.get(&src) {
+                None => return Ok(RedisValue::Nil),
+                Some(entry) => match &entry.data {
+                    ValueData::List(l) if l.is_empty() => return Ok(RedisValue::Nil),
+                    ValueData::List(_) => {} // src has at least one element
+                    _ => {
+                        return Ok(RedisValue::Error(
+                            "WRONGTYPE Operation against a key holding the wrong kind of value"
+                                .to_string(),
+                        ));
+                    }
+                },
             }
 
             if src != dst {

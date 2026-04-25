@@ -1171,3 +1171,82 @@ async def test_rpoplpush_diff_keys_does_not_carry_src_ttl(r):
     # dst is a freshly created list with no TTL.
     assert await r.ttl("dst") == -1  # -1 = no expire
     assert await r.lrange("dst", 0, -1) == [b"a"]
+
+
+# ---- P2-10 regression: Lua LMOVE/RPOPLPUSH must check src for a poppable
+# element BEFORE inspecting dst's type. Missing/empty src is a no-op move
+# and must return nil regardless of dst's type — matches the direct path
+# after round-1 P2-02 and real Redis. ----
+
+
+async def test_lua_lmove_missing_src_with_string_dst_returns_nil(r):
+    """P2-10: Lua LMOVE with missing src and string dst must return nil
+    (not WRONGTYPE). The Lua arm must not inspect dst's type when there
+    is no element to move — same semantics as `Store::lmove_atomic`."""
+    await r.set("string_dst", "x")
+    result = await r.eval(
+        "return redis.call('LMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT')",
+        2,
+        "missing",
+        "string_dst",
+    )
+    assert result is None
+    # dst untouched.
+    assert await r.get("string_dst") == b"x"
+
+
+async def test_lua_rpoplpush_missing_src_with_string_dst_returns_nil(r):
+    """P2-10: Lua RPOPLPUSH mirror — missing src + string dst returns nil."""
+    await r.set("string_dst", "x")
+    result = await r.eval(
+        "return redis.call('RPOPLPUSH', KEYS[1], KEYS[2])",
+        2,
+        "missing",
+        "string_dst",
+    )
+    assert result is None
+    assert await r.get("string_dst") == b"x"
+
+
+async def test_lua_lmove_empty_src_with_string_dst_returns_nil(r):
+    """P2-10: empty-list src variant — even if src exists as a list with
+    zero elements (unusual; D-03 normally removes empties, but be
+    defensive), the move is a no-op and dst's type must not be inspected."""
+    # Build then drain a list so src is an empty-list state. After LPOP of
+    # the only element, D-03 removes the key entirely, so this collapses
+    # to the missing-src case via a different path. We exercise that path
+    # explicitly here.
+    await r.rpush("empty_src", "tmp")
+    await r.lpop("empty_src")
+    assert await r.exists("empty_src") == 0
+    await r.set("string_dst", "x")
+    result = await r.eval(
+        "return redis.call('LMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT')",
+        2,
+        "empty_src",
+        "string_dst",
+    )
+    assert result is None
+    assert await r.get("string_dst") == b"x"
+
+
+async def test_lua_lmove_nonempty_src_with_string_dst_still_wrongtype(r):
+    """P2-10 atomicity guard: when src DOES have a poppable element, the
+    dst type-check must STILL fire BEFORE the pop — mirrors the round-1
+    P2-02 atomicity test for the direct path. The data write lock spans
+    the whole Lua arm, so the dst type cannot change between check and
+    push; we just need the check to fire before any mutation so a string
+    dst aborts the move without consuming src."""
+    await r.rpush("src", "a")
+    await r.set("string_dst", "x")
+    with pytest.raises(Exception, match="WRONGTYPE"):
+        await r.eval(
+            "return redis.call('LMOVE', KEYS[1], KEYS[2], 'LEFT', 'RIGHT')",
+            2,
+            "src",
+            "string_dst",
+        )
+    # src untouched (no element popped).
+    assert await r.lrange("src", 0, -1) == [b"a"]
+    # dst untouched.
+    assert await r.get("string_dst") == b"x"
