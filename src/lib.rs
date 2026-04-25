@@ -312,6 +312,11 @@ fn normalize_key_list(keys: &Bound<'_, PyAny>) -> PyResult<Vec<Bytes>> {
 
 /// Convert a redis-py timeout value (None | 0 | positive float seconds) to milliseconds.
 /// None or 0 → 0 (block forever). Negative → PyValueError.
+///
+/// P2-03: Positive durations below 1ms previously truncated to 0 via `as u64`,
+/// which the blocking-list loops interpret as "block forever". Now we round
+/// any positive timeout up to at least one millisecond so finite sub-ms
+/// timeouts (e.g. `timeout=0.0005`) actually expire.
 fn timeout_to_ms(timeout: Option<f64>) -> PyResult<u64> {
     match timeout {
         None => Ok(0),
@@ -319,7 +324,7 @@ fn timeout_to_ms(timeout: Option<f64>) -> PyResult<u64> {
             "timeout must be a non-negative number",
         )),
         Some(t) if t == 0.0 => Ok(0),
-        Some(t) => Ok((t * 1000.0) as u64),
+        Some(t) => Ok(((t * 1000.0).ceil() as u64).max(1)),
     }
 }
 

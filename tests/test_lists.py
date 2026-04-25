@@ -830,6 +830,29 @@ async def test_pipeline_blocking_continues_on_error_then_raises_first(r):
     assert await r.get("after") == b"1"
 
 
+# ---- P2-03 regression: sub-millisecond blocking timeouts must expire ----
+
+
+async def test_blpop_sub_millisecond_timeout_expires(r):
+    """P2-03: A positive timeout below 1ms previously truncated to 0
+    (block forever). Now it rounds up to >=1ms and must return None."""
+    start = time.monotonic()
+    result = await r.blpop(["empty"], timeout=0.0005)
+    elapsed = time.monotonic() - start
+    assert result is None
+    # Generous upper bound — we just need to confirm it didn't block forever.
+    assert elapsed < 1.0
+
+
+async def test_brpop_sub_millisecond_timeout_expires(r):
+    """P2-03: BRPOP mirror — must expire instead of blocking forever."""
+    start = time.monotonic()
+    result = await r.brpop(["empty"], timeout=0.0005)
+    elapsed = time.monotonic() - start
+    assert result is None
+    assert elapsed < 1.0
+
+
 # ---- P2-02 regression: LMOVE/RPOPLPUSH return nil before dst type check ----
 
 
