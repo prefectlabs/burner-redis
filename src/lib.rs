@@ -12,7 +12,7 @@ mod commands;
 mod persistence;
 mod scripting;
 
-use commands::strings::{extract_bytes, extract_expiry};
+use commands::strings::{extract_bytes, extract_expiry, extract_token_str};
 use commands::sorted_sets::parse_score_bound;
 use commands::streams::{format_stream_id, parse_stream_id, extract_stream_fields, StreamId};
 use scripting::RedisValue;
@@ -2378,12 +2378,13 @@ impl BurnerRedis {
 
     /// LINSERT command matching redis.asyncio.Redis.linsert(name, where, refvalue, value).
     /// Returns new list length, or -1 if pivot not found, or 0 if key missing.
+    /// `where` accepts str or bytes (P3: pre-encoded bytes from redis-py / Pipeline).
     #[pyo3(signature = (name, r#where, refvalue, value))]
     fn linsert<'py>(
         &self,
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
-        r#where: &str,
+        r#where: &Bound<'py, PyAny>,
         refvalue: &Bound<'py, PyAny>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
@@ -2391,7 +2392,8 @@ impl BurnerRedis {
         let key = extract_bytes(name)?;
         let pivot = extract_bytes(refvalue)?;
         let val = extract_bytes(value)?;
-        let position = parse_linsert_where(r#where).map_err(store_err_to_py)?;
+        let where_str = extract_token_str(r#where)?;
+        let position = parse_linsert_where(&where_str).map_err(store_err_to_py)?;
         let n = self
             .store
             .linsert(&key, position, &pivot, val)
@@ -2460,20 +2462,29 @@ impl BurnerRedis {
 
     /// LMOVE command matching redis.asyncio.Redis.lmove(first_list, second_list, src="LEFT", dest="RIGHT").
     /// Atomic cross-key (or same-key) pop+push. Returns popped bytes or None.
-    #[pyo3(signature = (first_list, second_list, src="LEFT", dest="RIGHT"))]
+    /// `src` / `dest` accept str or bytes (P3: pre-encoded bytes from redis-py).
+    #[pyo3(signature = (first_list, second_list, src=None, dest=None))]
     fn lmove<'py>(
         &self,
         py: Python<'py>,
         first_list: &Bound<'py, PyAny>,
         second_list: &Bound<'py, PyAny>,
-        src: &str,
-        dest: &str,
+        src: Option<&Bound<'py, PyAny>>,
+        dest: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         use crate::commands::lists::parse_list_end;
         let src_key = extract_bytes(first_list)?;
         let dst_key = extract_bytes(second_list)?;
-        let src_end = parse_list_end(src).map_err(store_err_to_py)?;
-        let dst_end = parse_list_end(dest).map_err(store_err_to_py)?;
+        let src_str = match src {
+            Some(o) => extract_token_str(o)?,
+            None => "LEFT".to_string(),
+        };
+        let dst_str = match dest {
+            Some(o) => extract_token_str(o)?,
+            None => "RIGHT".to_string(),
+        };
+        let src_end = parse_list_end(&src_str).map_err(store_err_to_py)?;
+        let dst_end = parse_list_end(&dst_str).map_err(store_err_to_py)?;
         let result = self
             .store
             .lmove_atomic(&src_key, &dst_key, src_end, dst_end)
@@ -2746,21 +2757,30 @@ impl BurnerRedis {
 
     /// BLMOVE command matching redis.asyncio.Redis.blmove(first_list, second_list, timeout, src="LEFT", dest="RIGHT").
     /// Atomic cross-key pop+push with blocking. Returns popped bytes or None on timeout.
-    #[pyo3(signature = (first_list, second_list, timeout, src="LEFT", dest="RIGHT"))]
+    /// `src` / `dest` accept str or bytes (P3: pre-encoded bytes from redis-py).
+    #[pyo3(signature = (first_list, second_list, timeout, src=None, dest=None))]
     fn blmove<'py>(
         &self,
         py: Python<'py>,
         first_list: &Bound<'py, PyAny>,
         second_list: &Bound<'py, PyAny>,
         timeout: f64,
-        src: &str,
-        dest: &str,
+        src: Option<&Bound<'py, PyAny>>,
+        dest: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         use crate::commands::lists::parse_list_end;
         let src_key = extract_bytes(first_list)?;
         let dst_key = extract_bytes(second_list)?;
-        let src_end = parse_list_end(src).map_err(store_err_to_py)?;
-        let dst_end = parse_list_end(dest).map_err(store_err_to_py)?;
+        let src_str = match src {
+            Some(o) => extract_token_str(o)?,
+            None => "LEFT".to_string(),
+        };
+        let dst_str = match dest {
+            Some(o) => extract_token_str(o)?,
+            None => "RIGHT".to_string(),
+        };
+        let src_end = parse_list_end(&src_str).map_err(store_err_to_py)?;
+        let dst_end = parse_list_end(&dst_str).map_err(store_err_to_py)?;
         let block_ms = timeout_to_ms(Some(timeout))?;
         let store = self.store.clone();
 
@@ -3693,8 +3713,9 @@ impl BurnerRedis {
             }
             "linsert" => {
                 // redis-py signature: linsert(name, where, refvalue, value)
+                // P3: `where` accepts str OR bytes (pre-encoded by redis-py wrappers).
                 let name = &args.get_item(0)?;
-                let where_str: String = args.get_item(1)?.extract()?;
+                let where_str = extract_token_str(&args.get_item(1)?)?;
                 let refvalue = &args.get_item(2)?;
                 let value = &args.get_item(3)?;
                 let key = extract_bytes(name)?;
@@ -3742,18 +3763,19 @@ impl BurnerRedis {
             }
             "lmove" => {
                 // Pipeline stub buffers (first_list, second_list) positional + {"src", "dest"} kwargs.
+                // P3: `src` / `dest` accept str OR bytes (pre-encoded by redis-py wrappers).
                 let first = &args.get_item(0)?;
                 let second = &args.get_item(1)?;
                 let src_str: String = kwargs
                     .get_item("src")?
                     .and_then(|v| if v.is_none() { None } else { Some(v) })
-                    .map(|v| v.extract::<String>())
+                    .map(|v| extract_token_str(&v))
                     .transpose()?
                     .unwrap_or_else(|| "LEFT".to_string());
                 let dest_str: String = kwargs
                     .get_item("dest")?
                     .and_then(|v| if v.is_none() { None } else { Some(v) })
-                    .map(|v| v.extract::<String>())
+                    .map(|v| extract_token_str(&v))
                     .transpose()?
                     .unwrap_or_else(|| "RIGHT".to_string());
                 let src_key = extract_bytes(first)?;
