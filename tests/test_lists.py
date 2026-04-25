@@ -830,6 +830,36 @@ async def test_pipeline_blocking_continues_on_error_then_raises_first(r):
     assert await r.get("after") == b"1"
 
 
+# ---- P2-02 regression: LMOVE/RPOPLPUSH return nil before dst type check ----
+
+
+async def test_rpoplpush_missing_src_with_string_dst_returns_none(r):
+    """P2-02: When source is missing, the move is a no-op and must return None
+    without ever inspecting dst's type. Previously raised WRONGTYPE."""
+    await r.set("string_dst", "x")
+    assert await r.rpoplpush("missing", "string_dst") is None
+    # dst untouched
+    assert await r.get("string_dst") == b"x"
+
+
+async def test_lmove_missing_src_with_string_dst_returns_none(r):
+    """P2-02: LMOVE mirror — missing src + string dst = None, no WRONGTYPE."""
+    await r.set("string_dst", "x")
+    assert await r.lmove("missing", "string_dst", src="LEFT", dest="RIGHT") is None
+    assert await r.get("string_dst") == b"x"
+
+
+async def test_lmove_nonempty_src_with_string_dst_still_wrongtype(r):
+    """P2-02: When src DOES have a poppable element, the dst type-check still
+    fires BEFORE pop — this is the atomicity guarantee we must preserve."""
+    await r.rpush("src", "a")
+    await r.set("string_dst", "x")
+    with pytest.raises(Exception, match="WRONGTYPE"):
+        await r.lmove("src", "string_dst", src="LEFT", dest="RIGHT")
+    # src untouched (no element lost)
+    assert await r.lrange("src", 0, -1) == [b"a"]
+
+
 async def test_pipeline_blocking_no_raise_returns_exceptions_inline(r):
     """P2-01: With raise_on_error=False the slow path returns Exception objects
     inline at failed positions, matching the fast path."""

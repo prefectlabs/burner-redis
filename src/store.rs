@@ -3207,8 +3207,12 @@ impl Store {
     /// of `dst`. Single write lock, so src==dst is a valid rotation.
     ///
     /// Semantics:
-    /// - Missing/empty src → `Ok(None)`; dst is untouched and not created.
-    /// - WRONGTYPE on src or dst (dst type-checked before popping src).
+    /// - Missing/empty src → `Ok(None)`; dst is untouched and not created
+    ///   (P2-02: this short-circuits BEFORE any dst validation, matching
+    ///   real Redis: a no-op LMOVE never sees a WRONGTYPE on dst).
+    /// - WRONGTYPE on src is checked before pop.
+    /// - WRONGTYPE on dst is checked only when src had a poppable element
+    ///   (still BEFORE the destructive pop, so no element is lost).
     /// - Deletes src when empty after pop (D-03).
     /// - Fires `list_notify.notify_waiters()` after the push (D-10).
     pub fn lmove_atomic(
@@ -3235,9 +3239,24 @@ impl Store {
             }
         }
 
-        // Type-check destination BEFORE mutating source (matches Redis
-        // order — if dst is a string key we must not silently pop from src).
-        // Skipped when src == dst (rotation); src type is checked below.
+        // P2-02: Determine src state FIRST. If src is missing or holds an
+        // empty list (shouldn't happen per D-03, but be defensive) we return
+        // Nil without touching dst — a no-op move never observes dst's type.
+        // We only validate src's type here (read-only); the actual pop is
+        // deferred until after dst validation so we can keep one write lock
+        // spanning the entire pop+push (preserves atomicity).
+        match data.get(src) {
+            None => return Ok(None),
+            Some(entry) => match &entry.data {
+                ValueData::List(l) if l.is_empty() => return Ok(None),
+                ValueData::List(_) => {} // src has at least one element
+                _ => return Err(StoreError::WrongType),
+            },
+        }
+
+        // Now that we know src has a poppable element, type-check dst
+        // BEFORE mutating src — if dst is a string key we must not pop.
+        // Skipped when src == dst (rotation); src type already validated.
         if src != dst {
             if let Some(dst_entry) = data.get(dst) {
                 if !matches!(dst_entry.data, ValueData::List(_)) {
