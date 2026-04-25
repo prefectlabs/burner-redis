@@ -1025,3 +1025,65 @@ async def test_pipeline_blocking_no_raise_returns_exceptions_inline(r):
     assert isinstance(results[1], Exception)
     assert results[2] is True
     assert await r.get("after") == b"2"
+
+
+# ---- P2-08 regression: Lua list-grow notifications must fire even when the
+# script ultimately raises. Real Redis does not roll back earlier writes
+# inside a script, so any BRPOP/BLPOP waiter parked on a key that was
+# pushed-to before the error must still be woken. ----
+
+
+async def test_lua_eval_pushes_then_errors_wakes_blpop_waiter(r):
+    """P2-08: a Lua script that LPUSHes a value and THEN raises must still wake
+    a BLPOP waiter. Without the fix the waiter parks forever (timeout=0)."""
+
+    async def lua_push_then_error():
+        # Tiny delay so BLPOP is parked when the script runs.
+        await asyncio.sleep(0.05)
+        # LPUSH succeeds (real Redis commits it), then redis.call('FOO') raises.
+        # The script's overall result is an error, but the LPUSH already grew
+        # the list; BLPOP must wake on it.
+        with pytest.raises(Exception):
+            await r.eval(
+                "redis.call('LPUSH', KEYS[1], 'x'); return redis.call('FOO')",
+                1,
+                "k",
+            )
+
+    task = asyncio.create_task(lua_push_then_error())
+    start = time.monotonic()
+    # timeout=2.0 (not 0) so the test cannot hang the suite if the fix
+    # regresses; the assertion on `elapsed` proves the waiter woke promptly
+    # rather than only via the safety net.
+    result = await r.blpop(["k"], timeout=2.0)
+    elapsed = time.monotonic() - start
+    await task
+    assert elapsed < 1.0, (
+        f"BLPOP did not wake on Lua LPUSH-then-error in time: {elapsed}s "
+        "(P2-08: had_list_mutation flag dropped on script error path)"
+    )
+    assert result == (b"k", b"x")
+
+
+async def test_lua_eval_pushes_then_errors_finite_blpop_returns_value(r):
+    """P2-08: finite-timeout BLPOP variant — must return the pushed value
+    (not None) when an erroring script grew the list before raising."""
+
+    async def lua_push_then_error():
+        await asyncio.sleep(0.05)
+        with pytest.raises(Exception):
+            await r.eval(
+                "redis.call('RPUSH', KEYS[1], 'y'); return redis.call('NOPE')",
+                1,
+                "k2",
+            )
+
+    task = asyncio.create_task(lua_push_then_error())
+    start = time.monotonic()
+    result = await r.blpop(["k2"], timeout=2.0)
+    elapsed = time.monotonic() - start
+    await task
+    assert elapsed < 1.0, (
+        f"BLPOP returned None / timed out on Lua RPUSH-then-error: {elapsed}s"
+    )
+    assert result == (b"k2", b"y")

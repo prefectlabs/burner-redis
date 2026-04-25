@@ -94,6 +94,23 @@ fn lua_to_redis_value(val: LuaValue) -> RedisValue {
 
 pub struct LuaEngine;
 
+/// Outcome of a Lua script execution.
+///
+/// `result` carries the script's return value (or error string). `had_xadd` and
+/// `had_list_mutation` are *cumulative* flags: they reflect whether any
+/// `XADD` / list-grow command ran successfully BEFORE the script ended,
+/// regardless of whether the script ultimately succeeded or raised.
+///
+/// Real Redis does not roll back earlier writes when a script errors mid-way,
+/// so any waiters parked on those mutations (BRPOP / XREAD) must still be
+/// woken up. Callers (`Store::eval`/`Store::evalsha`) MUST consult these
+/// flags on both the `Ok` and `Err` branches of `result`. (P2-08)
+pub struct EvalOutcome {
+    pub result: Result<RedisValue, String>,
+    pub had_xadd: bool,
+    pub had_list_mutation: bool,
+}
+
 impl LuaEngine {
     /// Compute SHA1 hex digest of a script.
     pub fn sha1_hex(script: &str) -> String {
@@ -108,16 +125,20 @@ impl LuaEngine {
     /// `data` is the ALREADY WRITE-LOCKED store data HashMap -- the caller (Store::eval)
     /// acquires the write lock and passes the mutable reference. This ensures atomicity.
     /// `pubsub_tx` is an optional broadcast sender for PUBLISH command support in Lua scripts.
-    /// Execute a Lua script. Returns (RedisValue, had_xadd, had_list_mutation) where the
-    /// two bool flags indicate whether stream / list mutations occurred (callers use these
-    /// to fire stream_notify / list_notify waiters after dropping the data lock).
+    ///
+    /// Returns an [`EvalOutcome`] containing the script result alongside the
+    /// `had_xadd` / `had_list_mutation` flags. The flags are populated even
+    /// when the script raises mid-way — this is the P2-08 fix: a script that
+    /// pushed onto a list and THEN errored has still grown the list, and any
+    /// `BRPOP` / `BLPOP` waiters parked on that key must be woken regardless
+    /// of the script's outcome.
     pub fn execute(
         script: &str,
         keys: Vec<Bytes>,
         args: Vec<Bytes>,
         data: &mut HashMap<Bytes, ValueEntry>,
         pubsub_tx: Option<&broadcast::Sender<PubSubMessage>>,
-    ) -> Result<(RedisValue, bool, bool), String> {
+    ) -> EvalOutcome {
         // Create a fresh Lua VM per execution (isolation, no state leakage)
         let lua = Lua::new();
 
@@ -266,9 +287,15 @@ impl LuaEngine {
             Ok(lua_to_redis_value(result))
         });
 
-        scope_result
-            .map(|v| (v, had_xadd.get(), had_list_mutation.get()))
-            .map_err(|e| e.to_string())
+        // P2-08: capture the mutation flags BEFORE consuming `scope_result`.
+        // Real Redis does not roll back writes inside a script that errors
+        // mid-way, so any pushes/XADDs that already ran must wake their
+        // waiters whether the script returns normally or raises.
+        EvalOutcome {
+            result: scope_result.map_err(|e| e.to_string()),
+            had_xadd: had_xadd.get(),
+            had_list_mutation: had_list_mutation.get(),
+        }
     }
 }
 
