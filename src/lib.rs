@@ -2520,6 +2520,14 @@ impl BurnerRedis {
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let key_list = normalize_key_list(keys)?;
+        // P2-04: an empty key list previously entered a wait loop that could
+        // never be satisfied (timeout=0 → hang forever; finite → None). Real
+        // Redis treats blocking pops with no keys as a wrong-arity error.
+        if key_list.is_empty() {
+            return Err(make_response_error(
+                "ERR wrong number of arguments for 'blpop' command".to_string(),
+            ));
+        }
         let block_ms = timeout_to_ms(timeout)?;
         let store = self.store.clone();
 
@@ -2633,6 +2641,12 @@ impl BurnerRedis {
         timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let key_list = normalize_key_list(keys)?;
+        // P2-04: empty key list → wrong-arity error (matches real Redis).
+        if key_list.is_empty() {
+            return Err(make_response_error(
+                "ERR wrong number of arguments for 'brpop' command".to_string(),
+            ));
+        }
         let block_ms = timeout_to_ms(timeout)?;
         let store = self.store.clone();
 

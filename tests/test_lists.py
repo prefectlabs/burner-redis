@@ -830,6 +830,28 @@ async def test_pipeline_blocking_continues_on_error_then_raises_first(r):
     assert await r.get("after") == b"1"
 
 
+# ---- P2-04 regression: BLPOP/BRPOP must reject empty key lists ----
+
+
+async def test_blpop_empty_keys_raises_wrong_arity(r):
+    """P2-04: blpop([], timeout=0) previously hung forever; finite timeouts
+    returned None. Real Redis treats no-keys as a wrong-arity error."""
+    with pytest.raises(Exception, match="wrong number of arguments"):
+        await r.blpop([], timeout=0.1)
+
+
+async def test_brpop_empty_keys_raises_wrong_arity(r):
+    """P2-04: BRPOP mirror — empty keys list must error, not block."""
+    with pytest.raises(Exception, match="wrong number of arguments"):
+        await r.brpop([], timeout=0.1)
+
+
+async def test_blpop_empty_tuple_raises_wrong_arity(r):
+    """P2-04: tuple form is also rejected (normalize_key_list accepts both)."""
+    with pytest.raises(Exception, match="wrong number of arguments"):
+        await r.blpop((), timeout=0.1)
+
+
 # ---- P2-03 regression: sub-millisecond blocking timeouts must expire ----
 
 
