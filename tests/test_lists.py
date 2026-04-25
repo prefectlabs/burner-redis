@@ -830,6 +830,44 @@ async def test_pipeline_blocking_continues_on_error_then_raises_first(r):
     assert await r.get("after") == b"1"
 
 
+# ---- P2-07 regression: LREM value must be coerced (redis-py parity) ----
+
+
+async def test_lrem_int_value_coerced(r):
+    """P2-07: r.lrem('k', 0, 42) previously raised TypeError because the
+    PyO3 binding only accepted str/bytes. redis-py encodes ints/floats for
+    `value` like LPUSH/LSET. Now we coerce at the Python wrapper."""
+    await r.rpush("k", 42, "a", 42, "b")
+    n = await r.lrem("k", 0, 42)  # remove all matches of int 42
+    assert n == 2
+    assert await r.lrange("k", 0, -1) == [b"a", b"b"]
+
+
+async def test_lrem_float_value_coerced(r):
+    await r.rpush("k", 3.14, "a", 3.14)
+    n = await r.lrem("k", 1, 3.14)  # remove first match
+    assert n == 1
+    assert await r.lrange("k", 0, -1) == [b"a", b"3.14"]
+
+
+async def test_lrem_bool_value_raises(r):
+    """P2-07: bool is rejected (matches _coerce_value contract)."""
+    await r.rpush("k", "a")
+    with pytest.raises(TypeError):
+        await r.lrem("k", 0, True)
+
+
+async def test_pipeline_lrem_int_value_coerced(r):
+    """P2-07: pipeline LREM also coerces value (mirror of client)."""
+    await r.rpush("k", 42, "a", 42)
+    pipe = r.pipeline()
+    pipe.lrem("k", 0, 42)
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 2
+    assert results[1] == [b"a"]
+
+
 # ---- P2-06 regression: LINSERT pivot must be coerced (redis-py parity) ----
 
 

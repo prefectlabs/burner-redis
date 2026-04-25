@@ -244,7 +244,9 @@ class Pipeline:
         return self
 
     def lrem(self, name, count, value):
-        self._commands.append(("lrem", (name, count, value), {}))
+        # P2-07: coerce `value` — redis-py encodes ints/floats for LREM
+        # values just like LPUSH/LSET. Mirror of `_coerced_lrem`.
+        self._commands.append(("lrem", (name, count, _coerce_value(value)), {}))
         return self
 
     def lset(self, name, index, value):

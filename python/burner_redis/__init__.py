@@ -117,6 +117,23 @@ async def _coerced_lset(self, name, index, value):
 BurnerRedis.lset = _coerced_lset
 
 
+_original_lrem = BurnerRedis.lrem
+
+
+async def _coerced_lrem(self, name, count, value):
+    """LREM with value coercion.
+
+    P2-07: redis-py encodes ints/floats for `value` arguments via
+    Encoder.encode() just like LPUSH/LSET. The PyO3 binding only accepts
+    str/bytes, so we coerce at the Python boundary to match drop-in
+    behavior — `r.lrem('k', 0, 42)` should match the bytes b'42'.
+    """
+    return await _original_lrem(self, name, count, _coerce_value(value))
+
+
+BurnerRedis.lrem = _coerced_lrem
+
+
 _original_linsert = BurnerRedis.linsert
 
 
