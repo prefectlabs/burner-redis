@@ -121,8 +121,16 @@ _original_linsert = BurnerRedis.linsert
 
 
 async def _coerced_linsert(self, name, where, refvalue, value):
-    """LINSERT with value coercion (refvalue is a lookup pivot, not coerced — matches redis-py)."""
-    return await _original_linsert(self, name, where, refvalue, _coerce_value(value))
+    """LINSERT with value coercion.
+
+    P2-06: redis-py encodes EVERY command argument including the LINSERT
+    `refvalue` pivot, so numeric pivots are legal (they encode to bytes
+    via the same Encoder.encode() path as `value`). We coerce both to
+    match drop-in behavior.
+    """
+    return await _original_linsert(
+        self, name, where, _coerce_value(refvalue), _coerce_value(value)
+    )
 
 
 BurnerRedis.linsert = _coerced_linsert

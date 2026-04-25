@@ -235,9 +235,12 @@ class Pipeline:
         return self
 
     def linsert(self, name, where, refvalue, value):
-        # H-01: coerce only the inserted `value`. `refvalue` is a lookup
-        # pivot — matches `_coerced_linsert` in burner_redis/__init__.py.
-        self._commands.append(("linsert", (name, where, refvalue, _coerce_value(value)), {}))
+        # H-01: coerce inserted `value`.
+        # P2-06: also coerce `refvalue` — redis-py encodes every command
+        # argument including the pivot, so numeric pivots are legal.
+        self._commands.append(
+            ("linsert", (name, where, _coerce_value(refvalue), _coerce_value(value)), {})
+        )
         return self
 
     def lrem(self, name, count, value):

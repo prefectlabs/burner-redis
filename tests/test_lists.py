@@ -830,6 +830,38 @@ async def test_pipeline_blocking_continues_on_error_then_raises_first(r):
     assert await r.get("after") == b"1"
 
 
+# ---- P2-06 regression: LINSERT pivot must be coerced (redis-py parity) ----
+
+
+async def test_linsert_int_pivot_matches_bytes_pivot(r):
+    """P2-06: redis-py encodes every command argument including the
+    LINSERT pivot, so numeric pivots are legal. Previously raised
+    TypeError because the wrapper forwarded refvalue raw."""
+    await r.rpush("k", 42)
+    n = await r.linsert("k", "AFTER", 42, "x")
+    assert n == 2
+    assert await r.lrange("k", 0, -1) == [b"42", b"x"]
+
+
+async def test_linsert_float_pivot_coerced(r):
+    """P2-06: float pivots also encode to bytes."""
+    await r.rpush("k", 3.14)
+    n = await r.linsert("k", "BEFORE", 3.14, "y")
+    assert n == 2
+    assert await r.lrange("k", 0, -1) == [b"y", b"3.14"]
+
+
+async def test_pipeline_linsert_int_pivot_coerced(r):
+    """P2-06: pipeline LINSERT pivot also coerced (mirror of client)."""
+    await r.rpush("k", 7)
+    pipe = r.pipeline()
+    pipe.linsert("k", "AFTER", 7, "z")
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 2
+    assert results[1] == [b"7", b"z"]
+
+
 # ---- P2-05 regression: LPUSH/RPUSH must reject calls with no values ----
 
 
