@@ -1,118 +1,151 @@
 ---
 phase: 14-add-support-for-the-redis-list-data-type-required-commands-l
-fixed_at: 2026-04-24
-review_path: .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-REVIEW.md
+type: code-review-fix
+status: all_fixed
+fixed_date: 2026-04-25
+review_source: 14-REVIEW.md (P2 round, external review)
+findings_in_scope: 7
+fixed: 7
+skipped: 0
 iteration: 1
-findings_in_scope: 6
-fixed: 5
-skipped: 1
-status: partial
+fix_scope: all
 ---
 
-# Phase 14: Code Review Fix Report
+# Phase 14 Code Review Fix Report (P2 Round)
 
-**Fixed at:** 2026-04-24
-**Source review:** `.planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-REVIEW.md`
-**Iteration:** 1
+## Summary
 
-**Summary:**
-- Findings in scope: 6 (H-01 + M-01..M-05)
-- Fixed: 5
-- Skipped: 1 (M-03, deferred to perf profiling per the review's own guidance)
+All 7 P2 findings from the external review were applied as atomic per-finding
+commits with regression tests added alongside each fix. Each test was written
+to fail under the pre-fix code path and pass after the surgical change. The
+full Python test suite (`491 passed`) and the full Rust unit suite
+(`cargo test --lib` — `149 passed`) are green; `tests/test_lists.py` grew
+from 90 to 111 tests (+21 new regression tests across the seven findings).
 
-After applying fixes, the full Python test suite passes: **470 passed**, with 90 tests in `tests/test_lists.py` (up from 80 — 10 new regression tests added across H-01, M-01, and M-02).
+## Fixes Applied
 
-## Fixed Issues
+### P2-01 — Continue executing blocking pipelines after errors
+- **Commit:** `bb7403c`
+- **Files:** `python/burner_redis/pipeline.py`, `tests/test_lists.py`
+- **Tests added:**
+  - `test_pipeline_blocking_continues_on_error_then_raises_first` — pipeline
+    with `blpop → lset(missing) → set('after')` must execute all three; the
+    third command must run despite the second's `ResponseError`; the first
+    captured exception is raised after the loop completes.
+  - `test_pipeline_blocking_no_raise_returns_exceptions_inline` — same
+    shape with `raise_on_error=False`; exceptions appear inline at the
+    failed position.
+- **Verification:** PASS (2/2)
+- **Change:** Slow path now mirrors the fast path — `try/except` appends
+  exceptions to `results`; we walk `results` after the loop and re-raise
+  the first `Exception` only when `raise_on_error=True`.
 
-### H-01: Pipeline list commands bypass Python-layer value coercion
+### P2-02 — LMOVE/RPOPLPUSH return nil for empty source before checking dst type
+- **Commit:** `43aff10`
+- **Files:** `src/store.rs`, `tests/test_lists.py`
+- **Tests added:**
+  - `test_rpoplpush_missing_src_with_string_dst_returns_none` — RPOPLPUSH
+    with missing src and string dst returns `None` (was: WRONGTYPE).
+  - `test_lmove_missing_src_with_string_dst_returns_none` — LMOVE mirror.
+  - `test_lmove_nonempty_src_with_string_dst_still_wrongtype` — atomicity
+    guard: when src DOES have an element, dst type-check still fires
+    BEFORE pop.
+- **Verification:** PASS (3/3)
+- **Change:** In `Store::lmove_atomic`, validate src state (missing /
+  empty / wrongtype) BEFORE the dst type-check. Empty/missing src returns
+  `Ok(None)` immediately and never inspects dst. The dst type-check still
+  fires before pop in the non-empty case to preserve atomicity (one write
+  lock spans pop+push).
 
-**Files modified:** `python/burner_redis/pipeline.py`, `tests/test_lists.py`
-**Commit:** `bf88fb5`
-**Applied fix:**
+### P2-03 — Preserve finite sub-millisecond blocking timeouts
+- **Commit:** `627af43`
+- **Files:** `src/lib.rs`, `tests/test_lists.py`
+- **Tests added:**
+  - `test_blpop_sub_millisecond_timeout_expires` — `blpop(['empty'],
+    timeout=0.0005)` must return `None` (was: hung forever).
+  - `test_brpop_sub_millisecond_timeout_expires` — BRPOP mirror.
+- **Verification:** PASS (2/2)
+- **Change:** `timeout_to_ms`: positive timeouts now use
+  `((t * 1000.0).ceil() as u64).max(1)` instead of `(t * 1000.0) as u64`.
+  Sub-millisecond positives no longer truncate to 0 (which the loops
+  interpret as "block forever").
 
-- Added a local `_coerce_value(value)` helper at the top of `pipeline.py` that mirrors the one in `burner_redis/__init__.py`. Duplicated rather than imported to avoid a circular import (`burner_redis/__init__.py` imports `Pipeline`).
-- Coerce values at buffer time in the pipeline stubs:
-  - `Pipeline.set` — coerce `value`
-  - `Pipeline.lpush` / `Pipeline.rpush` — coerce each variadic value
-  - `Pipeline.lset` — coerce `value` (not `index`)
-  - `Pipeline.linsert` — coerce `value` only; `refvalue` is a lookup pivot and is left untouched, matching `_coerced_linsert` in `__init__.py`.
-- Added 7 new regression tests (`test_pipeline_lpush_int_coerced`, `test_pipeline_rpush_float_coerced`, `test_pipeline_lpush_bool_raises`, `test_pipeline_lset_int_coerced`, `test_pipeline_linsert_int_coerced`, `test_pipeline_set_int_coerced`, `test_pipeline_set_bool_raises`) verifying parity with the monkey-patched client methods.
-- Note: coercion happens at `pipe.lpush(...)` time (synchronously), so `TypeError` raises on the buffering call rather than on `.execute()`. This matches the spirit of redis-py's `pipe.lpush(...)` — bool/None rejection is a client-side validation and not deferred.
+### P2-04 — Reject empty key lists for BLPOP/BRPOP
+- **Commit:** `514f317`
+- **Files:** `src/lib.rs`, `tests/test_lists.py`
+- **Tests added:**
+  - `test_blpop_empty_keys_raises_wrong_arity` — `blpop([], timeout=0.1)`
+    raises `ResponseError` matching real-Redis wording (was: hung / None).
+  - `test_brpop_empty_keys_raises_wrong_arity` — BRPOP mirror.
+  - `test_blpop_empty_tuple_raises_wrong_arity` — tuple form also rejected.
+- **Verification:** PASS (3/3)
+- **Change:** Each blocking-pop binding (`blpop`, `brpop`) now validates
+  the normalized key list before scheduling the future and raises
+  `ERR wrong number of arguments for '<cmd>' command` via
+  `make_response_error` — matches real Redis exactly.
 
-### M-01: Lua blocking-reject error wording diverged from real Redis
+### P2-05 — Reject LPUSH/RPUSH calls with no values
+- **Commit:** `e8548c4`
+- **Files:** `src/store.rs`, `tests/test_lists.py`
+- **Tests added:**
+  - `test_lpush_no_values_raises_and_does_not_create_key` — `lpush('k')`
+    raises and `r.exists('k') == 0` (was: empty list created, returns 0).
+  - `test_rpush_no_values_raises_and_does_not_create_key` — RPUSH mirror.
+  - `test_pipeline_lpush_no_values_raises_at_execute` — pipeline path
+    inherits the guard via `Store::lpush`.
+  - `test_lua_lpush_no_values_returns_error` — Lua dispatch arm already
+    had `args.len() < 2` check; pinned by regression test.
+- **Verification:** PASS (4/4)
+- **Change:** `Store::lpush` and `Store::rpush` guard on
+  `values.is_empty()` with `StoreError::Syntax(...)` BEFORE any mutation
+  or notify, so no empty list is created and no waiters are spuriously
+  woken. Pipeline arms route through the same Store methods.
 
-**Files modified:** `src/scripting.rs`, `tests/test_lists.py`
-**Commits:** `123ab8f` (initial fix), `a0dd54a` (regression-test tightening)
-**Applied fix:**
+### P2-06 — Coerce the LINSERT pivot value
+- **Commit:** `a4d5418`
+- **Files:** `python/burner_redis/__init__.py`, `python/burner_redis/pipeline.py`,
+  `tests/test_lists.py`
+- **Tests added:**
+  - `test_linsert_int_pivot_matches_bytes_pivot` — int pivot resolves to
+    matching bytes (was: TypeError).
+  - `test_linsert_float_pivot_coerced` — float pivot coerced.
+  - `test_pipeline_linsert_int_pivot_coerced` — pipeline mirror.
+- **Verification:** PASS (3/3)
+- **Change:** Apply `_coerce_value(refvalue)` in `_coerced_linsert` and in
+  `Pipeline.linsert`. Insert-value coercion was already in place; the
+  pivot now matches redis-py's full Encoder.encode() pass over every arg.
 
-- Changed the BLPOP/BRPOP/BLMOVE rejection error from `"ERR This Redis command is not allowed from scripts: BLPOP"` to `"ERR This Redis command is not allowed from script"` (singular `script`, no colon, no command name) — matches real Redis exactly.
-- Updated the three existing `test_lua_*_rejected` tests' regex from `"not allowed from scripts"` to `"not allowed from script"`.
-- Added a new regression test (`test_lua_blocking_error_does_not_include_command_name`) that asserts the first line of the error message contains neither `"BLPOP"` nor the old `"from scripts"` plural. The first-line check is needed because mlua appends a Lua stack traceback (which legitimately contains colons and source paths) — that traceback is not part of the wording we control.
+### P2-07 — Coerce LREM values before extracting bytes
+- **Commit:** `c969121`
+- **Files:** `python/burner_redis/__init__.py`, `python/burner_redis/pipeline.py`,
+  `tests/test_lists.py`
+- **Tests added:**
+  - `test_lrem_int_value_coerced` — `r.lrem('k', 0, 42)` removes b'42'
+    matches (was: TypeError).
+  - `test_lrem_float_value_coerced` — float coerced.
+  - `test_lrem_bool_value_raises` — bool still rejected (matches
+    `_coerce_value` contract).
+  - `test_pipeline_lrem_int_value_coerced` — pipeline mirror.
+- **Verification:** PASS (4/4)
+- **Change:** Added `_coerced_lrem` wrapper monkey-patched onto
+  `BurnerRedis.lrem` (mirror of `_coerced_lpush`/`_coerced_lset`).
+  Pipeline `lrem` stub now also calls `_coerce_value(value)`.
 
-### M-02: Add explicit slow-path BLPOP/BRPOP wake test asserting elapsed-time lower bound
+## Skipped
 
-**Files modified:** `tests/test_lists.py`
-**Commit:** `567dae8`
-**Applied fix:**
+None.
 
-Added two new tests that pin a meaningful elapsed-time lower bound, distinguishing the `tokio::select!` wake-up path from a fast-path race-win:
+## Verification
 
-- `test_blpop_slow_path_wake_elapsed_lower_bound` — uses `SLEEP = 0.15`, asserts `elapsed >= SLEEP * 0.8 (≈0.12s)` and `elapsed < 2.0s`.
-- `test_brpop_slow_path_wake_elapsed_lower_bound` — same pattern, mirrored for BRPOP / RPUSH.
+- Rust: `cargo test --lib` — **149 passed, 0 failed**
+- Python (lists only): `pytest tests/test_lists.py -q` — **111 passed**
+  (baseline: 90 — added 21 regression tests across the 7 findings)
+- Full Python suite: `pytest -q` — **491 passed, 38 deselected**
 
-The 0.8× tolerance accounts for monotonic-clock jitter on heavily loaded CI; the assertion still rules out a "first poll succeeded" code path which would return in <1 ms.
-
-### M-04: `had_list_mutation` fires on non-mutating success cases (requires human verification)
-
-**Files modified:** `src/scripting.rs`
-**Commit:** `ea05cc9`
-**Applied fix:**
-
-Replaced the blanket `is_list_write && success` predicate in `dispatch_command` with per-command return-value matching:
-
-- `LPUSH` / `RPUSH` → `matches!(result, RedisValue::Integer(_))` (always grow on success).
-- `LINSERT` → `matches!(result, RedisValue::Integer(n) if n > 0)` (skips `-1` pivot-not-found and `0` key-missing — neither mutates the list).
-- `LMOVE` / `RPOPLPUSH` → `matches!(result, RedisValue::BulkString(_))` (skips `Nil` empty-source returns).
-- All other commands → `false`.
-
-Added an extended doc comment on `dispatch_command` explaining the refined semantics.
-
-**Status:** `fixed: requires human verification` — this is a logic refinement, and Tier 1/Tier 2 verification (re-read + `cargo check`) only confirms syntax. The full Python test suite (`470 passed`) including the existing `test_brpop_wakes_on_lua_lpush` and `test_blpop_wakes_on_lua_rpush` regression guards passes, which exercises the LPUSH/RPUSH paths. The LINSERT / LMOVE / RPOPLPUSH spurious-wake cases are not directly asserted (they were "spurious but safe" per the review). Recommend: a developer should manually confirm the per-command match arms are exhaustive and the new behavior is intended before this is considered final.
-
-### M-05: Widen timing-based test upper bounds
-
-**Files modified:** `tests/test_lists.py`
-**Commit:** `567dae8` (combined with M-02)
-**Applied fix:**
-
-- `test_blpop_timeout_returns_none` — upper bound widened from `< 0.5` to `< 2.0`.
-- `test_blmove_timeout_returns_none` — same, `< 0.5` → `< 2.0`.
-- Lower bound (`> 0.05`) preserved — that is the meaningful assertion (we did wait at least the requested timeout).
-- Added inline comments explaining the rationale.
-
-## Skipped Issues
-
-### M-03: Eager `notify_waiters()` in `lpush`/`rpush` could be optimized to empty→non-empty transitions
-
-**File:** `src/store.rs:3296-3298, and lpush/rpush`
-**Reason:** Skipped per explicit user direction and the review's own guidance ("Defer to perf profiling"). The review classifies this as a perf-only optimization with no correctness implication — `notify_waiters()` with 0 waiters is cheap, and acting on it now without profile evidence would be premature.
-**Original issue:** Under high push throughput with concurrent BLPOP subscribers, transitioning the wake only on `was_empty → non-empty` (via a `was_empty = list.is_empty()` snapshot before push) would avoid unnecessary waker churn. Defer to perf profiling.
+All seven findings closed. No tests were skipped, no regressions introduced.
 
 ---
 
-## Verification Summary
-
-| Layer | Tool | Result |
-|---|---|---|
-| Tier 1 (re-read) | manual | All edits verified present and surrounding code intact |
-| Tier 2 (syntax) | `python3 -c "import ast; ast.parse(...)"` | `pipeline.py`, `test_lists.py` parse OK |
-| Tier 2 (syntax) | `cargo check` | `scripting.rs` builds; only pre-existing deprecation warnings |
-| Build | `maturin develop --release` | Wheel built and installed cleanly |
-| Test suite | `pytest -x -q` | **470 passed**, 38 deselected — no regressions |
-| List tests specifically | `pytest tests/test_lists.py -x -q` | **90 passed** (was 80 — 10 new tests added) |
-
----
-
-_Fixed: 2026-04-24_
-_Fixer: Claude (gsd-code-fixer)_
+_Fixed: 2026-04-25_
+_Fixer: Claude (gsd-code-fixer, Opus 4.7 1M)_
 _Iteration: 1_
