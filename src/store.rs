@@ -3312,10 +3312,17 @@ impl Store {
             Some(v) => v,
         };
 
-        // D-03: delete src if empty. Note: if src == dst and we just popped
-        // the only element, the list is empty now; we still proceed to the
-        // push arm below, which will re-create the key if needed.
-        if src_empty {
+        // D-03: delete src if empty.
+        //
+        // P2-09: gate on `src != dst`. For same-key rotations (e.g. `LMOVE k
+        // k LEFT RIGHT`) Redis treats the operation as a pure rewrite — the
+        // key is never removed, so its TTL is preserved. If we removed the
+        // entry here, the `data.entry(dst).or_insert_with(...)` call below
+        // would re-create a fresh entry with no `expires_at`, silently
+        // clearing the user's expiry. The inner VecDeque is briefly empty
+        // between the pop and the push, but that's invisible to callers
+        // because the data-write lock spans the whole operation.
+        if src_empty && src != dst {
             data.remove(src);
         }
 

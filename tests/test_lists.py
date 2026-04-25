@@ -1087,3 +1087,87 @@ async def test_lua_eval_pushes_then_errors_finite_blpop_returns_value(r):
         f"BLPOP returned None / timed out on Lua RPUSH-then-error: {elapsed}s"
     )
     assert result == (b"k2", b"y")
+
+
+# ---- P2-09 regression: same-key list moves must preserve TTL.
+# `RPOPLPUSH k k` and `LMOVE k k LEFT RIGHT` are pure rotations — the key
+# is never removed, so its expires_at must survive. Cross-key moves must
+# NOT propagate src's TTL onto dst (that would be the opposite bug). ----
+
+
+async def test_rpoplpush_same_key_preserves_ttl(r):
+    """P2-09: `RPOPLPUSH k k` rotates a single-element list. The list briefly
+    becomes empty mid-op but the key never goes away, so its TTL must
+    survive (real Redis behavior)."""
+    await r.rpush("k", "a")
+    assert await r.expire("k", 60) is True
+    moved = await r.rpoplpush("k", "k")
+    assert moved == b"a"
+    ttl = await r.ttl("k")
+    # We just set 60s; allow a generous floor. Pre-fix: ttl == -1 (cleared).
+    assert ttl > 50, f"TTL not preserved across same-key RPOPLPUSH: ttl={ttl}"
+    # And the rotation actually happened (single element list cycles to itself).
+    assert await r.lrange("k", 0, -1) == [b"a"]
+
+
+async def test_lmove_same_key_preserves_ttl(r):
+    """P2-09: LMOVE rotation mirror — `LMOVE k k LEFT RIGHT` on a
+    single-element list must preserve TTL. Single-element ensures the
+    list briefly becomes empty between pop and push, exercising the
+    `data.remove(src)` branch that was clearing TTL pre-fix."""
+    await r.rpush("k", "a")
+    assert await r.expire("k", 60) is True
+    moved = await r.lmove("k", "k", src="LEFT", dest="RIGHT")
+    assert moved == b"a"
+    ttl = await r.ttl("k")
+    # Pre-fix: ttl == -1 (cleared by remove → or_insert_with).
+    assert ttl > 50, f"TTL not preserved across same-key LMOVE: ttl={ttl}"
+    assert await r.lrange("k", 0, -1) == [b"a"]
+
+
+async def test_lua_lmove_same_key_preserves_ttl(r):
+    """P2-09: same-key LMOVE invoked via EVAL must also preserve TTL —
+    the Lua dispatch arm has its own remove/recreate code that mirrors
+    the direct path's bug pre-fix. Single-element list to exercise the
+    `src_empty` branch."""
+    await r.rpush("k", "a")
+    assert await r.expire("k", 60) is True
+    moved = await r.eval(
+        "return redis.call('LMOVE', KEYS[1], KEYS[1], 'LEFT', 'RIGHT')",
+        1,
+        "k",
+    )
+    assert moved == b"a"
+    ttl = await r.ttl("k")
+    assert ttl > 50, f"TTL not preserved across Lua same-key LMOVE: ttl={ttl}"
+    assert await r.lrange("k", 0, -1) == [b"a"]
+
+
+async def test_lua_rpoplpush_same_key_preserves_ttl(r):
+    """P2-09: same-key RPOPLPUSH via EVAL — Lua arm must preserve TTL."""
+    await r.rpush("k", "a")
+    assert await r.expire("k", 60) is True
+    moved = await r.eval(
+        "return redis.call('RPOPLPUSH', KEYS[1], KEYS[1])",
+        1,
+        "k",
+    )
+    assert moved == b"a"
+    ttl = await r.ttl("k")
+    assert ttl > 50, f"TTL not preserved across Lua same-key RPOPLPUSH: ttl={ttl}"
+    assert await r.lrange("k", 0, -1) == [b"a"]
+
+
+async def test_rpoplpush_diff_keys_does_not_carry_src_ttl(r):
+    """P2-09 negative control: cross-key RPOPLPUSH must NOT propagate src's
+    TTL onto dst. Guards against an over-eager fix that special-cased TTL
+    on the destination."""
+    await r.rpush("src", "a")
+    assert await r.expire("src", 60) is True
+    moved = await r.rpoplpush("src", "dst")
+    assert moved == b"a"
+    # src is now empty → key removed, TTL gone.
+    assert await r.ttl("src") == -2  # -2 = key does not exist
+    # dst is a freshly created list with no TTL.
+    assert await r.ttl("dst") == -1  # -1 = no expire
+    assert await r.lrange("dst", 0, -1) == [b"a"]

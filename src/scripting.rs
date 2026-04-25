@@ -2525,7 +2525,13 @@ fn dispatch_command_inner(
                 Some(v) => v,
             };
 
-            if src_empty {
+            // P2-09: same-key rotations must preserve TTL. Removing the
+            // entry here would clear `expires_at`; the entry is re-created
+            // by the `or_insert_with` below with no expiry. For `LMOVE k k
+            // ...` we leave the (briefly empty) entry in place — the push
+            // arm immediately re-fills it. Cross-key moves keep the
+            // existing D-03 behavior of deleting an empty src.
+            if src_empty && src != dst {
                 data.remove(&src);
             }
 
@@ -2602,7 +2608,10 @@ fn dispatch_command_inner(
                 Some(v) => v,
             };
 
-            if src_empty {
+            // P2-09: see LMOVE arm above. Same-key `RPOPLPUSH k k` must
+            // preserve TTL — removing the entry here clears `expires_at`
+            // and the `or_insert_with` below re-creates it without one.
+            if src_empty && src != dst {
                 data.remove(&src);
             }
 
