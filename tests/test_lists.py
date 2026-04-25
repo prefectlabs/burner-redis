@@ -1250,3 +1250,100 @@ async def test_lua_lmove_nonempty_src_with_string_dst_still_wrongtype(r):
     assert await r.lrange("src", 0, -1) == [b"a"]
     # dst untouched.
     assert await r.get("string_dst") == b"x"
+
+
+# ---- 260425-ftl: bytes-token compatibility (P3) ----
+# Verifies linsert/lmove/blmove + their dispatch_pipeline_command arms accept
+# pre-encoded bytes for option tokens (where, src, dest), not just str.
+# Real Redis + redis-py accept either; redis-py's Encoder pre-encodes str→bytes
+# before dispatch, so a Pipeline / execute_command consumer that pre-encodes
+# tokens previously hit a TypeError at the PyO3 boundary.
+
+
+async def test_linsert_bytes_where_before(r):
+    await r.rpush("k", "a", "c")
+    n = await r.linsert("k", b"BEFORE", "c", "b")
+    assert n == 3
+    assert await r.lrange("k", 0, -1) == [b"a", b"b", b"c"]
+
+
+async def test_linsert_bytes_where_after(r):
+    await r.rpush("k", "a", "c")
+    n = await r.linsert("k", b"AFTER", "a", "b")
+    assert n == 3
+    assert await r.lrange("k", 0, -1) == [b"a", b"b", b"c"]
+
+
+async def test_linsert_bytes_where_lowercase(r):
+    # Case-insensitive parity with the str path (parse_linsert_where is case-insensitive).
+    await r.rpush("k", "a", "c")
+    n = await r.linsert("k", b"before", "c", "b")
+    assert n == 3
+    assert await r.lrange("k", 0, -1) == [b"a", b"b", b"c"]
+
+
+async def test_linsert_bytes_where_unknown_token(r):
+    await r.rpush("k", "a")
+    with pytest.raises(Exception, match="syntax"):
+        await r.linsert("k", b"SIDEWAYS", "a", "b")
+
+
+async def test_linsert_bytes_where_invalid_utf8(r):
+    await r.rpush("k", "a")
+    # Invalid UTF-8 bytes must surface as a syntax error (same path as unknown
+    # token), NOT a TypeError leak from the helper. extract_token_str feeds the
+    # lossy decode into parse_linsert_where which then emits StoreError::Syntax
+    # → ResponseError, matching real-Redis unknown-token semantics.
+    with pytest.raises(Exception, match="syntax"):
+        await r.linsert("k", b"\xff", "a", "b")
+
+
+async def test_lmove_bytes_tokens_cross_key(r):
+    await r.rpush("src", "a", "b", "c")
+    moved = await r.lmove("src", "dst", src=b"LEFT", dest=b"RIGHT")
+    assert moved == b"a"
+    assert await r.lrange("src", 0, -1) == [b"b", b"c"]
+    assert await r.lrange("dst", 0, -1) == [b"a"]
+
+
+async def test_lmove_bytes_tokens_same_key_rotation(r):
+    await r.rpush("k", "a", "b", "c")
+    moved = await r.lmove("k", "k", src=b"RIGHT", dest=b"LEFT")
+    assert moved == b"c"
+    assert await r.lrange("k", 0, -1) == [b"c", b"a", b"b"]
+
+
+async def test_lmove_bytes_tokens_lowercase(r):
+    await r.rpush("src", "a", "b", "c")
+    moved = await r.lmove("src", "dst", src=b"left", dest=b"right")
+    assert moved == b"a"
+
+
+async def test_blmove_bytes_tokens(r):
+    await r.rpush("src", "a", "b", "c")
+    moved = await r.blmove("src", "dst", timeout=1.0, src=b"LEFT", dest=b"RIGHT")
+    assert moved == b"a"
+    assert await r.lrange("dst", 0, -1) == [b"a"]
+
+
+# Pipeline dispatch path — covers the dispatch_pipeline_command linsert/lmove arms.
+
+
+async def test_pipeline_linsert_bytes_where(r):
+    await r.rpush("k", "a", "c")
+    pipe = r.pipeline()
+    pipe.linsert("k", b"BEFORE", "c", "b")
+    pipe.lrange("k", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 3
+    assert results[1] == [b"a", b"b", b"c"]
+
+
+async def test_pipeline_lmove_bytes_tokens(r):
+    await r.rpush("src", "a", "b", "c")
+    pipe = r.pipeline()
+    pipe.lmove("src", "dst", src=b"LEFT", dest=b"RIGHT")
+    pipe.lrange("dst", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == b"a"
+    assert results[1] == [b"a"]
