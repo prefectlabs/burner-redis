@@ -830,6 +830,43 @@ async def test_pipeline_blocking_continues_on_error_then_raises_first(r):
     assert await r.get("after") == b"1"
 
 
+# ---- P2-05 regression: LPUSH/RPUSH must reject calls with no values ----
+
+
+async def test_lpush_no_values_raises_and_does_not_create_key(r):
+    """P2-05: lpush('k') previously created an empty list and returned 0.
+    Real Redis rejects with wrong-arity and leaves the key absent."""
+    with pytest.raises(Exception, match="wrong number of arguments"):
+        await r.lpush("k")
+    # Key must remain absent (no empty list created).
+    assert await r.exists("k") == 0
+
+
+async def test_rpush_no_values_raises_and_does_not_create_key(r):
+    with pytest.raises(Exception, match="wrong number of arguments"):
+        await r.rpush("k")
+    assert await r.exists("k") == 0
+
+
+async def test_pipeline_lpush_no_values_raises_at_execute(r):
+    """P2-05: pipeline must mirror the client — empty values raises on
+    execute (the dispatch hits the same Store::lpush guard)."""
+    pipe = r.pipeline()
+    pipe.lpush("k")
+    with pytest.raises(Exception, match="wrong number of arguments"):
+        await pipe.execute()
+    assert await r.exists("k") == 0
+
+
+async def test_lua_lpush_no_values_returns_error(r):
+    """P2-05: Lua dispatch must also reject — keep parity with direct call."""
+    # The Lua dispatch arm already does `args.len() < 2`, so this exercises
+    # the existing code path (regression guard against future drift).
+    with pytest.raises(Exception, match="wrong number of arguments"):
+        await r.eval("return redis.call('LPUSH', KEYS[1])", 1, "k")
+    assert await r.exists("k") == 0
+
+
 # ---- P2-04 regression: BLPOP/BRPOP must reject empty key lists ----
 
 

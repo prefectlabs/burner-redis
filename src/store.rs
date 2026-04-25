@@ -2766,7 +2766,16 @@ impl Store {
     /// the head, so the resulting order is `[c, b, a]` (last-pushed first).
     /// Creates the list if it does not exist. Returns the new length.
     /// Fires `list_notify.notify_waiters()` inside the write lock.
+    ///
+    /// P2-05: Rejects empty `values` with a wrong-arity error BEFORE any
+    /// mutation or notify — real Redis does not create an empty list when
+    /// LPUSH is called with only a key.
     pub fn lpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError> {
+        if values.is_empty() {
+            return Err(StoreError::Syntax(
+                "ERR wrong number of arguments for 'lpush' command".to_string(),
+            ));
+        }
         let mut data = self.data.write();
 
         // Passive expiration
@@ -2795,7 +2804,14 @@ impl Store {
     ///
     /// Order is preserved: `RPUSH k a b c` → `[a, b, c]`. Creates the list
     /// if it does not exist. Returns the new length. Fires list_notify.
+    ///
+    /// P2-05: Empty `values` → wrong-arity error, no mutation or notify.
     pub fn rpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError> {
+        if values.is_empty() {
+            return Err(StoreError::Syntax(
+                "ERR wrong number of arguments for 'rpush' command".to_string(),
+            ));
+        }
         let mut data = self.data.write();
 
         if let Some(entry) = data.get(&key) {
