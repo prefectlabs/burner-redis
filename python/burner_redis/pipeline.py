@@ -87,6 +87,12 @@ class Pipeline:
         # SLOW PATH: iterate + await individual awaitables on the client.
         # Keeps Rust execute_pipeline purely synchronous; no Python-coroutine
         # awaiting from inside a single Rust future.
+        #
+        # P2-01: mirror fast-path semantics — capture per-command exceptions
+        # into the results list, then raise the first one AFTER all commands
+        # have been attempted (when raise_on_error=True). Previously the slow
+        # path raised on the first failure and skipped subsequent commands,
+        # which diverged from redis-py / fast-path behavior.
         results: list = []
         commands = self._commands
         self._commands = []
@@ -96,9 +102,11 @@ class Pipeline:
                 result = await method(*args, **kwargs)
                 results.append(result)
             except Exception as e:
-                if raise_on_error:
-                    raise
                 results.append(e)
+        if raise_on_error:
+            for r in results:
+                if isinstance(r, Exception):
+                    raise r
         return results
 
     async def __aenter__(self):

@@ -801,3 +801,45 @@ async def test_pipeline_set_bool_raises(r):
     pipe = r.pipeline()
     with pytest.raises(TypeError):
         pipe.set("k", True)
+
+
+# ---- P2-01 regression: blocking pipelines must execute all commands before raising ----
+
+
+async def test_pipeline_blocking_continues_on_error_then_raises_first(r):
+    """P2-01: Slow path (pipeline contains blocking commands) must mirror the
+    fast path — capture per-command errors and raise only the first one AFTER
+    all commands have been attempted. Previously the slow path raised on the
+    first error, leaving subsequent commands un-executed (e.g. `set('after')`
+    was never run).
+    """
+    # Pre-populate "k" so blpop succeeds quickly.
+    await r.rpush("k", "v")
+    pipe = r.pipeline()
+    pipe.blpop(["k"], timeout=1)            # succeeds
+    pipe.lset("missing", 0, "x")            # raises ResponseError ("no such key")
+    pipe.set("after", "1")                  # MUST execute despite prior error
+
+    # Default raise_on_error=True: should raise the captured ResponseError after
+    # all three commands have been attempted.
+    with pytest.raises(Exception, match="no such key"):
+        await pipe.execute()
+
+    # Critical assertion: the third command DID execute, even though the second
+    # failed — matches redis-py / fast-path semantics.
+    assert await r.get("after") == b"1"
+
+
+async def test_pipeline_blocking_no_raise_returns_exceptions_inline(r):
+    """P2-01: With raise_on_error=False the slow path returns Exception objects
+    inline at failed positions, matching the fast path."""
+    await r.rpush("k", "v")
+    pipe = r.pipeline()
+    pipe.blpop(["k"], timeout=1)
+    pipe.lset("missing", 0, "x")
+    pipe.set("after", "2")
+    results = await pipe.execute(raise_on_error=False)
+    assert results[0] == (b"k", b"v")
+    assert isinstance(results[1], Exception)
+    assert results[2] is True
+    assert await r.get("after") == b"2"
