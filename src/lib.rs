@@ -290,11 +290,22 @@ fn build_xinfo_stream_dict<'py>(
 /// redis-py's `blpop` / `brpop` accept either a single str/bytes key or a list/tuple of keys.
 /// This mirrors that behavior at the PyO3 binding layer.
 fn normalize_key_list(keys: &Bound<'_, PyAny>) -> PyResult<Vec<Bytes>> {
-    // str / bytes are sequences too — handle them as a single-key case first.
+    // Bytes-like SCALARS: handle as single-key BEFORE PySequence dispatch.
+    // redis-py's Encoder accepts str / bytes / bytearray / memoryview as
+    // a single key. All four are also valid Python sequences, so without
+    // this guard the PySequence branch below would iterate them per byte
+    // (yielding `int`s) and crash in extract_bytes.
     if keys.is_instance_of::<pyo3::types::PyString>()
         || keys.is_instance_of::<pyo3::types::PyBytes>()
+        || keys.is_instance_of::<pyo3::types::PyByteArray>()
     {
         return Ok(vec![extract_bytes(keys)?]);
+    }
+    // memoryview: materialize via .tobytes() for safety against
+    // non-contiguous / non-byte-format buffers, then extract.
+    if keys.is_instance_of::<pyo3::types::PyMemoryView>() {
+        let bytes_obj = keys.call_method0("tobytes")?;
+        return Ok(vec![extract_bytes(&bytes_obj)?]);
     }
     // Try list/tuple via sequence protocol.
     if let Ok(seq) = keys.downcast::<pyo3::types::PySequence>() {
@@ -306,7 +317,7 @@ fn normalize_key_list(keys: &Bound<'_, PyAny>) -> PyResult<Vec<Bytes>> {
         }
         return Ok(out);
     }
-    // Fallback: treat as a single key (will error if not str/bytes).
+    // Fallback: treat as a single key (will error if not str/bytes-like).
     Ok(vec![extract_bytes(keys)?])
 }
 

@@ -1067,6 +1067,55 @@ async def test_blpop_empty_tuple_raises_wrong_arity(r):
         await r.blpop((), timeout=0.1)
 
 
+# ---- P2 regression (260425-sjc): BLPOP/BRPOP single bytes-like scalar keys ----
+# Before this fix, normalize_key_list only special-cased PyString and PyBytes
+# before falling through to the PySequence protocol. memoryview and bytearray
+# are sequences too — iterating them yielded `int`s (per-byte) and crashed
+# extract_bytes with TypeError. redis-py's Encoder accepts bytes/bytearray/
+# memoryview as scalar bytes-likes; we now match that.
+
+
+async def test_blpop_accepts_single_bytes_scalar(r):
+    """260425-sjc: bytes scalar (regression guard — already worked pre-fix)."""
+    assert await r.blpop(b"empty_k", timeout=0.05) is None
+
+
+async def test_blpop_accepts_single_str_scalar(r):
+    """260425-sjc: str scalar (regression guard — already worked pre-fix)."""
+    assert await r.blpop("empty_k", timeout=0.05) is None
+
+
+async def test_blpop_accepts_single_memoryview_scalar(r):
+    """260425-sjc: memoryview scalar — primary failing case before fix.
+    Previously iterated as int sequence and raised TypeError."""
+    assert await r.blpop(memoryview(b"empty_k"), timeout=0.05) is None
+
+
+async def test_blpop_accepts_single_bytearray_scalar(r):
+    """260425-sjc: bytearray scalar — companion failing case before fix."""
+    assert await r.blpop(bytearray(b"empty_k"), timeout=0.05) is None
+
+
+async def test_blpop_accepts_list_keys_regression(r):
+    """260425-sjc: multi-key list path must still iterate (regression guard)."""
+    assert await r.blpop([b"k1", b"k2"], timeout=0.05) is None
+
+
+async def test_blpop_accepts_tuple_keys_regression(r):
+    """260425-sjc: multi-key tuple path must still iterate (regression guard)."""
+    assert await r.blpop((b"k1", b"k2"), timeout=0.05) is None
+
+
+async def test_brpop_accepts_single_memoryview_scalar(r):
+    """260425-sjc: BRPOP mirror — memoryview scalar must not be iterated."""
+    assert await r.brpop(memoryview(b"empty_k"), timeout=0.05) is None
+
+
+async def test_brpop_accepts_single_bytearray_scalar(r):
+    """260425-sjc: BRPOP mirror — bytearray scalar must not be iterated."""
+    assert await r.brpop(bytearray(b"empty_k"), timeout=0.05) is None
+
+
 # ---- P2-03 regression: sub-millisecond blocking timeouts must expire ----
 
 
