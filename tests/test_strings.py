@@ -6,6 +6,7 @@ import asyncio
 from datetime import timedelta
 
 import pytest
+import redis.exceptions
 from burner_redis import BurnerRedis
 
 
@@ -397,3 +398,41 @@ async def test_mget_all_missing(r):
     """mget() returns all None for nonexistent keys."""
     result = await r.mget("a", "b", "c")
     assert result == [None, None, None]
+
+
+# --- P2-FIX: GET WRONGTYPE on non-string keys ---
+
+
+async def test_get_on_list_key_raises_wrongtype(r):
+    """P2-FIX: GET on a list-typed key raises WRONGTYPE (matches real Redis)."""
+    await r.lpush("k", "v")
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        await r.get("k")
+
+
+async def test_get_on_hash_key_raises_wrongtype(r):
+    """P2-FIX: GET on a hash-typed key raises WRONGTYPE."""
+    await r.hset("h", "f", "v")
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        await r.get("h")
+
+
+async def test_get_on_set_key_raises_wrongtype(r):
+    """P2-FIX: GET on a set-typed key raises WRONGTYPE."""
+    await r.sadd("s", "m")
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        await r.get("s")
+
+
+async def test_get_on_sorted_set_key_raises_wrongtype(r):
+    """P2-FIX: GET on a sorted-set-typed key raises WRONGTYPE."""
+    await r.zadd("z", {"m": 1.0})
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        await r.get("z")
+
+
+async def test_get_on_stream_key_raises_wrongtype(r):
+    """P2-FIX: GET on a stream-typed key raises WRONGTYPE."""
+    await r.xadd("x", {"f": "v"})
+    with pytest.raises(redis.exceptions.ResponseError, match="WRONGTYPE"):
+        await r.get("x")

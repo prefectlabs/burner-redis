@@ -466,14 +466,14 @@ impl BurnerRedis {
     }
 
     /// GET command matching redis.asyncio.Redis.get() signature.
-    /// Returns bytes or None.
+    /// Returns bytes or None. Raises WRONGTYPE if the key holds a non-string type.
     fn get<'py>(
         &self,
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let key = extract_bytes(name)?;
-        let result = self.store.get(&key);
+        let result = self.store.get(&key).map_err(store_err_to_py)?;
         let py_result = match result {
             Some(b) => PyBytes::new(py, &b).into_any().unbind(),
             None => py.None(),
@@ -2936,7 +2936,7 @@ impl BurnerRedis {
             "get" => {
                 let name = &args.get_item(0)?;
                 let key = extract_bytes(name)?;
-                match self.store.get(&key) {
+                match self.store.get(&key).map_err(store_err_to_py)? {
                     Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
                     None => Ok(py.None()),
                 }

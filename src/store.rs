@@ -195,7 +195,7 @@ impl ValueEntry {
 }
 
 /// Errors that can occur during store operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
@@ -380,22 +380,26 @@ impl Store {
         self.scripts.write()
     }
 
-    /// GET: Returns the value for a String-typed key, or None if missing/expired/wrong type.
-    /// Passive expiration: removes expired keys on access.
-    /// Returns None for Hash/Set keys (matches Redis behavior where GET on non-string returns error,
-    /// but the WRONGTYPE error is raised at the Python layer).
-    pub fn get(&self, key: &Bytes) -> Option<Bytes> {
+    /// GET: Returns the value for a String-typed key.
+    ///
+    /// Returns `Ok(Some(bytes))` for a live String key, `Ok(None)` for a missing
+    /// or expired key (passive expiration removes the entry), and
+    /// `Err(StoreError::WrongType)` for any non-String type (List/Hash/Set/
+    /// SortedSet/Stream) — matching Redis canonical behavior where
+    /// `GET <non-string-key>` raises
+    /// `WRONGTYPE Operation against a key holding the wrong kind of value`.
+    pub fn get(&self, key: &Bytes) -> Result<Option<Bytes>, StoreError> {
         // First check with a read lock
         {
             let data = self.data.read();
             match data.get(key) {
-                None => return None,
+                None => return Ok(None),
                 Some(entry) if !entry.is_expired() => {
                     if let ValueData::String(ref v) = entry.data {
-                        return Some(v.clone());
+                        return Ok(Some(v.clone()));
                     }
-                    // Non-string type: return None (WRONGTYPE handled at Python layer)
-                    return None;
+                    // Non-string type: surface WRONGTYPE (matches real Redis).
+                    return Err(StoreError::WrongType);
                 }
                 Some(_) => {} // expired, fall through to remove
             }
@@ -407,7 +411,7 @@ impl Store {
                 data.remove(key);
             }
         }
-        None
+        Ok(None)
     }
 
     /// SET: Stores a key-value pair with optional TTL and conditional flags.
@@ -3740,13 +3744,13 @@ mod tests {
         let key = Bytes::from("key");
         let value = Bytes::from("value");
         assert!(store.set(key.clone(), value.clone(), None, false, false));
-        assert_eq!(store.get(&key), Some(value));
+        assert_eq!(store.get(&key), Ok(Some(value)));
     }
 
     #[test]
     fn test_get_missing_key() {
         let store = Store::new();
-        assert_eq!(store.get(&Bytes::from("missing")), None);
+        assert_eq!(store.get(&Bytes::from("missing")), Ok(None));
     }
 
     #[test]
@@ -3755,7 +3759,7 @@ mod tests {
         let key = Bytes::from("key");
         store.set(key.clone(), Bytes::from("v1"), None, false, false);
         assert!(!store.set(key.clone(), Bytes::from("v2"), None, true, false));
-        assert_eq!(store.get(&key), Some(Bytes::from("v1")));
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("v1"))));
     }
 
     #[test]
@@ -3763,7 +3767,7 @@ mod tests {
         let store = Store::new();
         let key = Bytes::from("key");
         assert!(!store.set(key.clone(), Bytes::from("v1"), None, false, true));
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Ok(None));
     }
 
     #[test]
@@ -3778,7 +3782,7 @@ mod tests {
             false,
         );
         std::thread::sleep(Duration::from_millis(1));
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Ok(None));
     }
 
     #[test]
@@ -3799,25 +3803,33 @@ mod tests {
         assert_eq!(count, 2);
     }
 
-    // ── GET on non-string types returns None ─────────────────────────
+    // ── GET on non-string types returns WRONGTYPE ────────────────────
 
     #[test]
-    fn test_get_on_hash_key_returns_none() {
+    fn test_get_on_hash_key_returns_wrongtype() {
         let store = Store::new();
         let key = Bytes::from("myhash");
         store
             .hset(key.clone(), vec![(Bytes::from("f"), Bytes::from("v"))])
             .unwrap();
-        // GET on a hash key returns None (WRONGTYPE handling is at Python layer)
-        assert_eq!(store.get(&key), None);
+        // GET on a hash key surfaces WRONGTYPE (matches real Redis).
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
     }
 
     #[test]
-    fn test_get_on_set_key_returns_none() {
+    fn test_get_on_set_key_returns_wrongtype() {
         let store = Store::new();
         let key = Bytes::from("myset");
         store.sadd(key.clone(), vec![Bytes::from("m")]).unwrap();
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn test_get_on_list_key_returns_wrongtype() {
+        let store = Store::new();
+        let key = Bytes::from("mylist");
+        store.lpush(key.clone(), vec![Bytes::from("v")]).unwrap();
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
     }
 
     // ── SET overwrites any type ──────────────────────────────────────
@@ -3830,7 +3842,7 @@ mod tests {
             .hset(key.clone(), vec![(Bytes::from("f"), Bytes::from("v"))])
             .unwrap();
         assert!(store.set(key.clone(), Bytes::from("string_val"), None, false, false));
-        assert_eq!(store.get(&key), Some(Bytes::from("string_val")));
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("string_val"))));
     }
 
     #[test]
@@ -3839,7 +3851,7 @@ mod tests {
         let key = Bytes::from("mykey");
         store.sadd(key.clone(), vec![Bytes::from("m")]).unwrap();
         assert!(store.set(key.clone(), Bytes::from("string_val"), None, false, false));
-        assert_eq!(store.get(&key), Some(Bytes::from("string_val")));
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("string_val"))));
     }
 
     // ── Hash Tests ───────────────────────────────────────────────────
@@ -4681,16 +4693,16 @@ mod tests {
         assert!(matches!(result, Err(StoreError::WrongType)));
     }
 
-    // ── GET on SortedSet returns None ───────────────────────────────
+    // ── GET on SortedSet returns WRONGTYPE ──────────────────────────
 
     #[test]
-    fn test_get_on_sorted_set_returns_none() {
+    fn test_get_on_sorted_set_returns_wrongtype() {
         let store = Store::new();
         let key = Bytes::from("myzset");
         store
             .zadd(key.clone(), vec![(1.0, Bytes::from("a"))], false, false, false, false, false)
             .unwrap();
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
     }
 
     // ── Passive Expiration for Sorted Sets ──────────────────────────
@@ -4741,10 +4753,13 @@ mod tests {
         assert_eq!(removed, 2);
 
         // Persistent key still exists
-        assert_eq!(store.get(&Bytes::from("persist")), Some(Bytes::from("v3")));
+        assert_eq!(
+            store.get(&Bytes::from("persist")),
+            Ok(Some(Bytes::from("v3")))
+        );
         // Expired keys are gone
-        assert_eq!(store.get(&Bytes::from("exp1")), None);
-        assert_eq!(store.get(&Bytes::from("exp2")), None);
+        assert_eq!(store.get(&Bytes::from("exp1")), Ok(None));
+        assert_eq!(store.get(&Bytes::from("exp2")), Ok(None));
     }
 
     #[test]
