@@ -4,6 +4,7 @@ LINSERT, LREM, LSET, LTRIM, LMOVE, RPOPLPUSH, BRPOP, BLPOP, BLMOVE.
 Covers requirements: LIST-01 through LIST-15. LIST-16 (Lua + pipeline) lives in Plan 03.
 """
 import asyncio
+import inspect
 import time
 
 import pytest
@@ -385,6 +386,113 @@ async def test_blmove_wakes_on_push(r):
     result = await r.blmove("src", "dst", timeout=2.0, src="LEFT", dest="RIGHT")
     await task
     assert result == b"v"
+    assert await r.lrange("dst", 0, -1) == [b"v"]
+
+
+# P2: Blocking-list coroutine semantics (redis.asyncio compat)
+# The Rust bindings return asyncio.Future eagerly. Python async-def wrappers
+# in burner_redis/__init__.py must convert them back into coroutines so
+# that (a) asyncio.create_task(r.blpop(...)) accepts them and
+# (b) the blocking pop does not begin until the coroutine is awaited.
+
+async def test_blpop_is_coroutine_function(r):
+    from burner_redis import BurnerRedis
+    assert inspect.iscoroutinefunction(BurnerRedis.blpop)
+    assert inspect.iscoroutinefunction(BurnerRedis.brpop)
+    assert inspect.iscoroutinefunction(BurnerRedis.blmove)
+
+
+async def test_blpop_returns_coroutine(r):
+    coro = r.blpop(["never"], timeout=0.05)
+    assert inspect.iscoroutine(coro)
+    # Must await (or close) — never leak an un-awaited coroutine.
+    result = await coro
+    assert result is None
+
+
+async def test_brpop_returns_coroutine(r):
+    coro = r.brpop(["never"], timeout=0.05)
+    assert inspect.iscoroutine(coro)
+    result = await coro
+    assert result is None
+
+
+async def test_blmove_returns_coroutine(r):
+    coro = r.blmove("empty", "dst", timeout=0.05, src="LEFT", dest="RIGHT")
+    assert inspect.iscoroutine(coro)
+    result = await coro
+    assert result is None
+
+
+async def test_blpop_create_task_accepts_coroutine(r):
+    # Before fix: raised TypeError "expected a coroutine".
+    task = asyncio.create_task(r.blpop(["empty"], timeout=0.1))
+    result = await task
+    assert result is None
+
+
+async def test_brpop_create_task_accepts_coroutine(r):
+    task = asyncio.create_task(r.brpop(["empty"], timeout=0.1))
+    result = await task
+    assert result is None
+
+
+async def test_blmove_create_task_accepts_coroutine(r):
+    task = asyncio.create_task(
+        r.blmove("empty", "dst", timeout=0.1, src="LEFT", dest="RIGHT")
+    )
+    result = await task
+    assert result is None
+
+
+async def test_blpop_deferred_execution_does_not_pop_before_await(r):
+    # Pre-populate the list, then create the coroutine WITHOUT awaiting.
+    # If the blocking pop started eagerly (the bug), the pre-populated
+    # value would be consumed before our subsequent observation. With the
+    # async-def wrapper, the pop runs only when we await the coroutine.
+    await r.lpush("k", "v")
+    coro = r.blpop(["k"], timeout=1.0)
+
+    # Yield control briefly. Any eagerly-started Tokio future would have
+    # had ample time to drain "k" by now.
+    await asyncio.sleep(0.05)
+
+    # Confirm the value is still there — the pop has not run yet.
+    assert await r.lrange("k", 0, -1) == [b"v"]
+
+    # Now actually await the coroutine; it should pop the value.
+    result = await coro
+    assert result == (b"k", b"v")
+    assert await r.lrange("k", 0, -1) == []
+
+
+async def test_brpop_deferred_execution_does_not_pop_before_await(r):
+    await r.rpush("k", "v")
+    coro = r.brpop(["k"], timeout=1.0)
+
+    await asyncio.sleep(0.05)
+
+    assert await r.lrange("k", 0, -1) == [b"v"]
+
+    result = await coro
+    assert result == (b"k", b"v")
+    assert await r.lrange("k", 0, -1) == []
+
+
+async def test_blmove_deferred_execution_does_not_move_before_await(r):
+    await r.rpush("src", "v")
+    coro = r.blmove("src", "dst", timeout=1.0, src="LEFT", dest="RIGHT")
+
+    await asyncio.sleep(0.05)
+
+    # If blmove had started eagerly, "src" would be empty and "dst" would
+    # already contain the value.
+    assert await r.lrange("src", 0, -1) == [b"v"]
+    assert await r.lrange("dst", 0, -1) == []
+
+    result = await coro
+    assert result == b"v"
+    assert await r.lrange("src", 0, -1) == []
     assert await r.lrange("dst", 0, -1) == [b"v"]
 
 
