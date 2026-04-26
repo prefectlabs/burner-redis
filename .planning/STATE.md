@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 14
 Plan: Not started
 Status: Milestone complete
-Last activity: 2026-04-26 - Completed quick task 260425-tlk: Fix P2: LREM count i64::MIN overflows in parse_lrem_count (src/commands/lists.rs:69)
+Last activity: 2026-04-26 - Completed quick task 260425-u84: Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE
 
 Progress: [██████████] 97%
 
@@ -205,6 +205,7 @@ None yet.
 | 260425-r3r | Fix P2: Wrap blocking list methods (BLPOP, BRPOP, BLMOVE) in async def wrappers for redis.asyncio coroutine semantics | 2026-04-26 | 62c2b36 | [260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-](./quick/260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-/) |
 | 260425-sjc | Fix P2: normalize_key_list rejects single memoryview/bytearray keys (BLPOP/BRPOP) | 2026-04-26 | 1b25790 | [260425-sjc-fix-p2-normalize-key-list-rejects-single](./quick/260425-sjc-fix-p2-normalize-key-list-rejects-single/) |
 | 260425-tlk | Fix P2: LREM count i64::MIN overflows in parse_lrem_count (src/commands/lists.rs:69) | 2026-04-26 | 51a0451 | [260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p](./quick/260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p/) |
+| 260425-u84 | Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE | 2026-04-26 | acdae17 | [260425-u84-fix-p2-get-on-non-string-keys-list-hash-](./quick/260425-u84-fix-p2-get-on-non-string-keys-list-hash-/) |
 
 ## Session Continuity
 
