@@ -66,7 +66,7 @@ pub fn parse_linsert_where(s: &str) -> Result<InsertPosition, StoreError> {
 pub fn parse_lrem_count(count: i64) -> LremDirection {
     match count.cmp(&0) {
         std::cmp::Ordering::Greater => LremDirection::Head(count as usize),
-        std::cmp::Ordering::Less => LremDirection::Tail((-count) as usize),
+        std::cmp::Ordering::Less => LremDirection::Tail(count.unsigned_abs() as usize),
         std::cmp::Ordering::Equal => LremDirection::All,
     }
 }
@@ -140,6 +140,24 @@ mod tests {
         assert_eq!(parse_lrem_count(3), LremDirection::Head(3));
         assert_eq!(parse_lrem_count(-2), LremDirection::Tail(2));
         assert_eq!(parse_lrem_count(0), LremDirection::All);
+    }
+
+    #[test]
+    fn parse_lrem_count_i64_min_no_overflow() {
+        // Regression: -i64::MIN overflows in i64; use unsigned_abs() instead.
+        // This test runs under cargo test (debug profile, overflow-checks ON)
+        // and proves we never compute -i64::MIN as i64.
+        let result = parse_lrem_count(i64::MIN);
+        assert_eq!(
+            result,
+            LremDirection::Tail(i64::MIN.unsigned_abs() as usize)
+        );
+        // Also verify the magnitude is the expected 2^63.
+        if let LremDirection::Tail(n) = result {
+            assert_eq!(n as u64, 9_223_372_036_854_775_808_u64);
+        } else {
+            panic!("expected LremDirection::Tail, got {:?}", result);
+        }
     }
 
     #[test]

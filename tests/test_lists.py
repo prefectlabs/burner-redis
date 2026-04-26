@@ -168,6 +168,13 @@ async def test_lrem_missing_key(r):
     assert await r.lrem("missing", 0, "v") == 0
 
 
+async def test_lrem_count_i64_min_no_panic(r):
+    # P2 regression: count = i64::MIN previously overflowed inside
+    # parse_lrem_count via `-count`. Must return 0 cleanly on a
+    # missing key, not panic.
+    assert await r.lrem("missing", -9223372036854775808, b"v") == 0
+
+
 # LIST-10: LSET
 async def test_lset(r):
     await r.rpush("k", "a", "b", "c")
