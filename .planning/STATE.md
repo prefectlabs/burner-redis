@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 14
 Plan: Not started
 Status: Milestone complete
-Last activity: 2026-04-26 - Completed quick task 260425-sjc: Fix P2: normalize_key_list rejects single memoryview/bytearray keys (BLPOP/BRPOP)
+Last activity: 2026-04-26 - Completed quick task 260425-tlk: Fix P2: LREM count i64::MIN overflows in parse_lrem_count (src/commands/lists.rs:69)
 
 Progress: [██████████] 97%
 
@@ -204,6 +204,7 @@ None yet.
 | 260425-ftl | Fix P3: Accept bytes for list option tokens (LINSERT where, LMOVE/BLMOVE directions) in src/lib.rs | 2026-04-25 | 3ec5e8c | [260425-ftl-fix-p3-accept-bytes-for-list-option-toke](./quick/260425-ftl-fix-p3-accept-bytes-for-list-option-toke/) |
 | 260425-r3r | Fix P2: Wrap blocking list methods (BLPOP, BRPOP, BLMOVE) in async def wrappers for redis.asyncio coroutine semantics | 2026-04-26 | 62c2b36 | [260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-](./quick/260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-/) |
 | 260425-sjc | Fix P2: normalize_key_list rejects single memoryview/bytearray keys (BLPOP/BRPOP) | 2026-04-26 | 1b25790 | [260425-sjc-fix-p2-normalize-key-list-rejects-single](./quick/260425-sjc-fix-p2-normalize-key-list-rejects-single/) |
+| 260425-tlk | Fix P2: LREM count i64::MIN overflows in parse_lrem_count (src/commands/lists.rs:69) | 2026-04-26 | 51a0451 | [260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p](./quick/260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p/) |
 
 ## Session Continuity
 
