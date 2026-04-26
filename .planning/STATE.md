@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-10)
 Phase: 14
 Plan: Not started
 Status: Milestone complete
-Last activity: 2026-04-25 - Completed quick task 260425-ftl: Fix P3: Accept bytes for list option tokens (LINSERT where, LMOVE/BLMOVE directions) in src/lib.rs
+Last activity: 2026-04-26 - Completed quick task 260425-r3r: Fix P2: Wrap blocking list methods (BLPOP, BRPOP, BLMOVE) in async def wrappers for redis.asyncio coroutine semantics
 
 Progress: [██████████] 97%
 
@@ -202,6 +202,7 @@ None yet.
 | 260416-hbn | Add test-passing gates to the release workflow | 2026-04-16 | dd34627 | [260416-hbn-add-test-passing-gates-to-the-release-wo](./quick/260416-hbn-add-test-passing-gates-to-the-release-wo/) |
 | 260416-k68 | Add tag↔Cargo.toml version guard to .github/workflows/release.yml | 2026-04-16 | 3512c2d | [260416-k68-add-tag-cargo-toml-version-guard-to-gith](./quick/260416-k68-add-tag-cargo-toml-version-guard-to-gith/) |
 | 260425-ftl | Fix P3: Accept bytes for list option tokens (LINSERT where, LMOVE/BLMOVE directions) in src/lib.rs | 2026-04-25 | 3ec5e8c | [260425-ftl-fix-p3-accept-bytes-for-list-option-toke](./quick/260425-ftl-fix-p3-accept-bytes-for-list-option-toke/) |
+| 260425-r3r | Fix P2: Wrap blocking list methods (BLPOP, BRPOP, BLMOVE) in async def wrappers for redis.asyncio coroutine semantics | 2026-04-26 | 62c2b36 | [260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-](./quick/260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-/) |
 
 ## Session Continuity
 
