@@ -153,6 +153,67 @@ async def _coerced_linsert(self, name, where, refvalue, value):
 BurnerRedis.linsert = _coerced_linsert
 
 
+# ---- Blocking List Commands: coroutine wrappers (redis-py parity) ----
+#
+# PyO3's pyo3_async_runtimes::tokio::future_into_py(...) schedules the
+# returned future onto the Tokio runtime *immediately at call time* and
+# returns an asyncio.Future. redis.asyncio.Redis blocking commands must
+# instead be coroutines so that:
+#   1. asyncio.create_task(r.blpop(...)) accepts them (create_task requires
+#      a coroutine, not a Future).
+#   2. The blocking pop only begins when the coroutine is awaited /
+#      scheduled — not when r.blpop(...) is called.
+# The async-def wrappers below capture the underlying Rust binding and
+# defer its invocation until the wrapper coroutine itself is awaited.
+
+_original_blpop = BurnerRedis.blpop
+
+
+async def _async_blpop(self, keys, timeout=None):
+    """BLPOP wrapped as a coroutine for redis.asyncio.Redis compatibility.
+
+    The underlying Rust binding returns an asyncio.Future eagerly; wrapping
+    it in `async def` defers the call until the coroutine is awaited and
+    makes asyncio.create_task(r.blpop(...)) accept it.
+    """
+    return await _original_blpop(self, keys, timeout=timeout)
+
+
+BurnerRedis.blpop = _async_blpop
+
+
+_original_brpop = BurnerRedis.brpop
+
+
+async def _async_brpop(self, keys, timeout=None):
+    """BRPOP wrapped as a coroutine for redis.asyncio.Redis compatibility.
+
+    See _async_blpop docstring for rationale.
+    """
+    return await _original_brpop(self, keys, timeout=timeout)
+
+
+BurnerRedis.brpop = _async_brpop
+
+
+_original_blmove = BurnerRedis.blmove
+
+
+async def _async_blmove(self, first_list, second_list, timeout, src="LEFT", dest="RIGHT"):
+    """BLMOVE wrapped as a coroutine for redis.asyncio.Redis compatibility.
+
+    Signature mirrors redis.asyncio.Redis.blmove (src/dest default to
+    "LEFT"/"RIGHT"). Values are forwarded through to the Rust binding,
+    which is the single source of truth for default handling.
+
+    See _async_blpop docstring for rationale.
+    """
+    return await _original_blmove(self, first_list, second_list, timeout, src=src, dest=dest)
+
+
+BurnerRedis.blmove = _async_blmove
+
+
 async def _scan_iter(self, match=None, count=None, _type=None):
     """Async iterator over keys matching a glob pattern.
 
