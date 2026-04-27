@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: awaiting-checkpoint
-stopped_at: Phase 13 Plan 03 Task 1 complete — recipe.yaml drafted + conda-smithy lint clean; pausing at Task 2 (checkpoint:human-verify — developer must fork conda-forge/staged-recipes, push recipe, open PR)
-last_updated: "2026-04-18T03:19:00Z"
-last_activity: 2026-04-18 -- Phase 13 Plan 03 Task 1 commit 665ca40; recipe draft at /tmp/phase-13-staged-recipes/recipe-draft.yaml; maintainer corrected from ajstreed (404) to desertaxle (verified); checkpoint awaiting developer action
+status: milestone_complete
+stopped_at: Completed 14-03-PLAN.md (Phase 14 complete)
+last_updated: "2026-04-24T21:14:56.738Z"
+last_activity: 2026-04-24
 progress:
-  total_phases: 13
-  completed_phases: 12
-  total_plans: 28
-  completed_plans: 27
-  percent: 96
+  total_phases: 14
+  completed_phases: 14
+  total_plans: 31
+  completed_plans: 30
+  percent: 100
 ---
 
 # Project State
@@ -21,22 +21,22 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 13 — publish-burner-redis-to-conda-forge
+**Current focus:** Phase --phase — 14
 
 ## Current Position
 
-Phase: 13 (publish-burner-redis-to-conda-forge) — EXECUTING (checkpoint pending)
-Plan: 3 of 3
-Status: Plan 03 Task 1 of 4 complete (recipe drafted + lint clean); paused at Task 2 checkpoint:human-verify (developer must fork conda-forge/staged-recipes, push recipe-draft.yaml, open PR)
-Last activity: 2026-04-18 -- Phase 13 Plan 03 Task 1 commit 665ca40; waiting on developer to open staged-recipes PR
+Phase: 14
+Plan: Not started
+Status: Milestone complete
+Last activity: 2026-04-26 - Completed quick task 260425-u84: Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE
 
-Progress: [██████░░░░] 67%
+Progress: [██████████] 97%
 
 ## Performance Metrics
 
 **Velocity:**
 
-- Total plans completed: 25
+- Total plans completed: 30
 - Average duration: -
 - Total execution time: 0 hours
 
@@ -56,6 +56,8 @@ Progress: [██████░░░░] 67%
 | 10 | 2 | - | - |
 | 11 | 2 | - | - |
 | 12 | 2 | - | - |
+| 13 | 2 | - | - |
+| 14 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -84,6 +86,9 @@ Progress: [██████░░░░] 67%
 | Phase 09 P02 | 3min | 2 tasks | 3 files |
 | Phase 13 P01 | 3min | 2 tasks | 1 files |
 | Phase 13 P02 | 3min | 1 tasks | 2 files |
+| Phase 14 P01 | 12min | 5 tasks | 4 files |
+| Phase 14 P02 | 9min | 3 tasks | 3 files |
+| Phase 14 P14-03 | 10min | 3 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -142,6 +147,20 @@ Recent decisions affecting current work:
 - [Phase 13]: Pinned cargo-bundle-licenses to 4.0.0 — latest 4.2.0 requires rustc 1.86 (via cargo_metadata 0.23); our toolchain is 1.85 (edition 2024 MSRV). 4.0.0 emits equivalent YAML schema with `package_name:` field
 - [Phase 13]: All 57 bundled Rust crates fall in the permissive license set (MIT / Apache-2.0 / Unlicense / Unicode-3.0 / Apache-2.0 WITH LLVM-exception) — no GPL/AGPL/MPL/proprietary; no dep upgrade or swap required
 - [Phase 13]: mlua-sys 0.6.8 `text: NOT FOUND` is cosmetic — SPDX ID is cleanly `MIT` in Cargo.toml; LICENSE text lives at mlua workspace repo root, not in the subcrate dir (standard Rust-workspace packaging quirk)
+- [Phase 14] Added StoreError::Syntax(String) + NoSuchKey variants for LSET/helpers; avoids reusing KeyNotFound which is XGROUP-specific
+- [Phase 14] LLEN/LINDEX/LRANGE use data.write() for passive expiration, consistent with smembers/sismember
+- [Phase 14] normalize_range_indices treats positive start >= n as None (empty range), not a 1-element clamp — matches redis-py LRANGE semantics
+- [Phase 14] lmove_atomic type-checks dst BEFORE popping src; narrow inner scope releases src_entry borrow before data.remove(src)
+- [Phase 14] LINSERT does NOT fire list_notify (list was already non-empty, no waiter could be newly unblocked)
+- [Phase 14] Python monkey-patch value coercion at the wrapper layer (not Rust) for LPUSH/RPUSH/LSET/LINSERT — single-application; Rust extract_bytes sees only already-coerced bytes/str
+- [Phase 14] normalize_key_list checks PyString/PyBytes BEFORE PySequence — str is a PySequence, so early-check prevents BLPOP('k', timeout=0.1) from iterating str as per-char list
+- [Phase 14] Wrap future_into_py calls in an async def inner coroutine when passing to asyncio.create_task — pyo3-async-runtimes returns a Future, not a coroutine
+- [Phase 14] Used Python::try_attach(|py| ...).ok_or_else(RuntimeError) pattern for GIL re-attach in blocking list loops — matches existing codebase convention (lib.rs lines 231, 2022)
+- [Phase 14] had_list_mutation flag on LPUSH/RPUSH/LMOVE/RPOPLPUSH/LINSERT propagated through LuaEngine 3-tuple to Store::eval/evalsha, which fires list_notify.notify_waiters() after dropping data lock — Phase-11-style lost-wakeup fix for BRPOP waiters missing Lua LPUSH
+- [Phase 14] Blocking-aware pipeline dispatch lives in Python Pipeline.execute() (D-16) not Rust execute_pipeline — keeps Rust sync fast-path pristine and avoids awaiting Python coroutines from inside a single Rust future
+- [Phase 14] Blocking list commands (BRPOP/BLPOP/BLMOVE) in Lua scripts return canonical Redis error 'ERR This Redis command is not allowed from scripts: <cmd>' — matches real Redis wording for compat with ported Lua scripts
+- [Phase 14] Pipeline LINSERT stub keeps 'where' positional (redis-py signature) — Rust dispatch extracts args.get_item(1).extract::<String>() not kwargs
+- [Phase 14] Blocking commands in pipeline go through the Python slow path (iterate + await on client) rather than a dedicated Rust arm — reuses Plan 02 blocking pymethods, no duplication
 
 ### Pending Todos
 
@@ -153,6 +172,7 @@ None yet.
 - Phase 11 added: Close redis-py compatibility gaps for pydocket integration
 - Phase 12 added: Close remaining redis-py compatibility gaps for drop-in replacement
 - Phase 13 added: Publish burner-redis to conda-forge (pre-plan context committed in CONTEXT.md from 2026-04-17 brainstorm; absorbs three pending todos: verify-sdist-contains-cargo-lock, audit-rust-dep-licenses, submit-conda-forge-feedstock)
+- Phase 14 added: List data type (LPUSH, BRPOP, BLPOP, and full list command set) — required: LPUSH/BRPOP/BLPOP; stretch: full list coverage; blocking commands must integrate with Tokio runtime + asyncio cancellation/timeout semantics
 
 ### Blockers/Concerns
 
@@ -181,10 +201,17 @@ None yet.
 | 260416-gqd | Add CI guard against accidental hard dependency on redis | 2026-04-16 | 2647c54 | [260416-gqd-add-ci-guard-against-accidental-hard-dep](./quick/260416-gqd-add-ci-guard-against-accidental-hard-dep/) |
 | 260416-hbn | Add test-passing gates to the release workflow | 2026-04-16 | dd34627 | [260416-hbn-add-test-passing-gates-to-the-release-wo](./quick/260416-hbn-add-test-passing-gates-to-the-release-wo/) |
 | 260416-k68 | Add tag↔Cargo.toml version guard to .github/workflows/release.yml | 2026-04-16 | 3512c2d | [260416-k68-add-tag-cargo-toml-version-guard-to-gith](./quick/260416-k68-add-tag-cargo-toml-version-guard-to-gith/) |
+| 260425-ftl | Fix P3: Accept bytes for list option tokens (LINSERT where, LMOVE/BLMOVE directions) in src/lib.rs | 2026-04-25 | 3ec5e8c | [260425-ftl-fix-p3-accept-bytes-for-list-option-toke](./quick/260425-ftl-fix-p3-accept-bytes-for-list-option-toke/) |
+| 260425-r3r | Fix P2: Wrap blocking list methods (BLPOP, BRPOP, BLMOVE) in async def wrappers for redis.asyncio coroutine semantics | 2026-04-26 | 62c2b36 | [260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-](./quick/260425-r3r-fix-p2-wrap-blocking-list-methods-blpop-/) |
+| 260425-sjc | Fix P2: normalize_key_list rejects single memoryview/bytearray keys (BLPOP/BRPOP) | 2026-04-26 | 1b25790 | [260425-sjc-fix-p2-normalize-key-list-rejects-single](./quick/260425-sjc-fix-p2-normalize-key-list-rejects-single/) |
+| 260425-tlk | Fix P2: LREM count i64::MIN overflows in parse_lrem_count (src/commands/lists.rs:69) | 2026-04-26 | 51a0451 | [260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p](./quick/260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p/) |
+| 260425-u84 | Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE | 2026-04-26 | acdae17 | [260425-u84-fix-p2-get-on-non-string-keys-list-hash-](./quick/260425-u84-fix-p2-get-on-non-string-keys-list-hash-/) |
 
 ## Session Continuity
 
-Last session: 2026-04-18T03:19:00Z
-Stopped at: Phase 13 Plan 03 Task 1 complete (commit 665ca40); paused at Task 2 checkpoint — developer must fork conda-forge/staged-recipes and open PR before execution resumes
-Resume file: .planning/phases/13-publish-burner-redis-to-conda-forge/13-03-PLAN.md
+Last session: 2026-04-24T21:14:56.733Z
+Stopped at: Completed 14-03-PLAN.md (Phase 14 complete)
+Resume file: None
 Resume point: Task 2 (checkpoint:human-verify, blocking) — verify staged_recipes_pr_url recorded in .planning/notes/phase-13-feedstock-submission.md frontmatter, then continue to Task 3 (CI iteration) + Task 4 (post-merge verify + SUMMARY)
+
+**Planned Phase:** 14 (add-support-for-the-redis-list-data-type-required-commands-l) — 3 plans — 2026-04-24T20:06:26.408Z

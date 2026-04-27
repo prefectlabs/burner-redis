@@ -5,6 +5,34 @@ and executes them sequentially against a BurnerRedis instance.
 """
 
 
+def _coerce_value(value):
+    """Coerce a value to str or bytes, matching redis-py's Encoder.encode() behavior.
+
+    Mirror of burner_redis._coerce_value — duplicated here to avoid a circular
+    import (burner_redis.__init__ imports Pipeline). Pipeline list/string stubs
+    must apply the same coercion as the monkey-patched client methods so that
+    `pipe.lpush("k", 42).execute()` matches `r.lpush("k", 42)` (H-01).
+
+    Accepts: bytes, memoryview, int, float, str.
+    Rejects: bool (redis-py rejects bools with TypeError since bool is subclass of int).
+    """
+    if isinstance(value, (bytes, memoryview)):
+        return value
+    if isinstance(value, bool):
+        raise TypeError(
+            "Invalid input of type: 'bool'. "
+            "Convert to a bytes, string, int or float first."
+        )
+    if isinstance(value, (int, float)):
+        return repr(value).encode()
+    if isinstance(value, str):
+        return value
+    raise TypeError(
+        f"Invalid input of type: '{type(value).__name__}'. "
+        "Convert to a bytes, string, int or float first."
+    )
+
+
 class Pipeline:
     """Buffers commands and executes them as a batch.
 
@@ -20,9 +48,17 @@ class Pipeline:
     async def execute(self, raise_on_error: bool = True) -> list:
         """Execute all queued commands and return results in order.
 
-        Uses native Rust pipeline execution: a single Python-to-Rust
-        boundary crossing executes all commands synchronously in a tight
-        loop, eliminating per-command async overhead.
+        Fast path (no blocking commands in the queue): uses native Rust
+        pipeline execution — a single Python-to-Rust boundary crossing
+        executes all commands synchronously in a tight loop, eliminating
+        per-command async overhead (quick task 260415-an2).
+
+        Slow path (at least one of brpop/blpop/blmove in the queue): iterate
+        commands in Python and await each one individually on self._client.
+        Blocking commands respect their per-command timeouts; subsequent
+        commands execute after the block resolves. Pipeline semantics in
+        redis-py are sequential — blocking one command really does block
+        the rest (D-15/D-16).
 
         Matches redis-py behavior: all commands execute regardless of
         individual failures. When raise_on_error is True (default, matching
@@ -33,9 +69,40 @@ class Pipeline:
         """
         if not self._commands:
             return []
-        results = await self._client.execute_pipeline(self._commands)
+
+        blocking_cmds = {"brpop", "blpop", "blmove"}
+        has_blocking = any(c[0] in blocking_cmds for c in self._commands)
+
+        if not has_blocking:
+            # FAST PATH: single-boundary Rust dispatch (preserves 260415-an2 perf).
+            results = await self._client.execute_pipeline(self._commands)
+            self._commands = []
+            results = list(results)
+            if raise_on_error:
+                for r in results:
+                    if isinstance(r, Exception):
+                        raise r
+            return results
+
+        # SLOW PATH: iterate + await individual awaitables on the client.
+        # Keeps Rust execute_pipeline purely synchronous; no Python-coroutine
+        # awaiting from inside a single Rust future.
+        #
+        # P2-01: mirror fast-path semantics — capture per-command exceptions
+        # into the results list, then raise the first one AFTER all commands
+        # have been attempted (when raise_on_error=True). Previously the slow
+        # path raised on the first failure and skipped subsequent commands,
+        # which diverged from redis-py / fast-path behavior.
+        results: list = []
+        commands = self._commands
         self._commands = []
-        results = list(results)
+        for (method_name, args, kwargs) in commands:
+            try:
+                method = getattr(self._client, method_name)
+                result = await method(*args, **kwargs)
+                results.append(result)
+            except Exception as e:
+                results.append(e)
         if raise_on_error:
             for r in results:
                 if isinstance(r, Exception):
@@ -53,7 +120,10 @@ class Pipeline:
     # ---- String Commands ----
 
     def set(self, name, value, ex=None, px=None, nx=False, xx=False):
-        self._commands.append(("set", (name, value), {"ex": ex, "px": px, "nx": nx, "xx": xx}))
+        # H-01: apply value coercion at buffer time so the pipeline matches
+        # the monkey-patched client (`r.set` runs `_coerced_set` first).
+        coerced = _coerce_value(value)
+        self._commands.append(("set", (name, coerced), {"ex": ex, "px": px, "nx": nx, "xx": xx}))
         return self
 
     def get(self, name):
@@ -128,6 +198,84 @@ class Pipeline:
 
     def zremrangebyscore(self, name, min, max):
         self._commands.append(("zremrangebyscore", (name, min, max), {}))
+        return self
+
+    # ---- List Commands ----
+
+    def lpush(self, name, *values):
+        # H-01: per-value coercion mirrors the monkey-patched `_coerced_lpush`.
+        coerced = tuple(_coerce_value(v) for v in values)
+        self._commands.append(("lpush", (name, *coerced), {}))
+        return self
+
+    def rpush(self, name, *values):
+        # H-01: per-value coercion mirrors the monkey-patched `_coerced_rpush`.
+        coerced = tuple(_coerce_value(v) for v in values)
+        self._commands.append(("rpush", (name, *coerced), {}))
+        return self
+
+    def lpop(self, name, count=None):
+        self._commands.append(("lpop", (name,), {"count": count}))
+        return self
+
+    def rpop(self, name, count=None):
+        self._commands.append(("rpop", (name,), {"count": count}))
+        return self
+
+    def lrange(self, name, start, end):
+        self._commands.append(("lrange", (name, start, end), {}))
+        return self
+
+    def llen(self, name):
+        self._commands.append(("llen", (name,), {}))
+        return self
+
+    def lindex(self, name, index):
+        self._commands.append(("lindex", (name, index), {}))
+        return self
+
+    def linsert(self, name, where, refvalue, value):
+        # H-01: coerce inserted `value`.
+        # P2-06: also coerce `refvalue` — redis-py encodes every command
+        # argument including the pivot, so numeric pivots are legal.
+        self._commands.append(
+            ("linsert", (name, where, _coerce_value(refvalue), _coerce_value(value)), {})
+        )
+        return self
+
+    def lrem(self, name, count, value):
+        # P2-07: coerce `value` — redis-py encodes ints/floats for LREM
+        # values just like LPUSH/LSET. Mirror of `_coerced_lrem`.
+        self._commands.append(("lrem", (name, count, _coerce_value(value)), {}))
+        return self
+
+    def lset(self, name, index, value):
+        # H-01: coerce inserted value (mirror of `_coerced_lset`).
+        self._commands.append(("lset", (name, index, _coerce_value(value)), {}))
+        return self
+
+    def ltrim(self, name, start, end):
+        self._commands.append(("ltrim", (name, start, end), {}))
+        return self
+
+    def lmove(self, first_list, second_list, src="LEFT", dest="RIGHT"):
+        self._commands.append(("lmove", (first_list, second_list), {"src": src, "dest": dest}))
+        return self
+
+    def rpoplpush(self, src, dst):
+        self._commands.append(("rpoplpush", (src, dst), {}))
+        return self
+
+    def blpop(self, keys, timeout=0):
+        self._commands.append(("blpop", (keys,), {"timeout": timeout}))
+        return self
+
+    def brpop(self, keys, timeout=0):
+        self._commands.append(("brpop", (keys,), {"timeout": timeout}))
+        return self
+
+    def blmove(self, first_list, second_list, timeout, src="LEFT", dest="RIGHT"):
+        self._commands.append(("blmove", (first_list, second_list, timeout), {"src": src, "dest": dest}))
         return self
 
     # ---- Stream Commands ----

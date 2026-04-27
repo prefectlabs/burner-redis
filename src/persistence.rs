@@ -187,13 +187,13 @@ mod tests {
         // Verify string
         assert_eq!(
             new_store.get(&Bytes::from("str_key")),
-            Some(Bytes::from("str_value"))
+            Ok(Some(Bytes::from("str_value")))
         );
 
         // Verify string with TTL still exists (not expired)
         assert_eq!(
             new_store.get(&Bytes::from("str_ttl")),
-            Some(Bytes::from("expires_later"))
+            Ok(Some(Bytes::from("expires_later")))
         );
 
         // Verify hash

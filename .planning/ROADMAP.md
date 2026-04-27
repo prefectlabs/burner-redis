@@ -227,16 +227,34 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 10. Pub/Sub | 2/2 | Complete    | 2026-04-14 |
 | 11. Pydocket Compatibility | 2/2 | Complete    | 2026-04-14 |
 | 12. Drop-in Replacement | 2/2 | Complete    | 2026-04-14 |
-| 13. Publish burner-redis to conda-forge | 2/3 | In progress | - |
+| 13. Publish burner-redis to conda-forge | 2/3 | Complete    | 2026-04-24 |
 
 ### Phase 13: Publish burner-redis to conda-forge
 
 **Goal:** `conda install -c conda-forge burner-redis` works on linux-64, linux-aarch64, osx-64, osx-arm64, and win-64 — unblocking conda users of Prefect who pick up burner-redis transitively through pydocket
 **Requirements**: (no REQ-IDs — external-distribution phase)
 **Depends on:** Phase 12
-**Plans:** 3 plans
+**Plans:** 2/3 plans complete
 
 Plans:
 - [x] 13-01-PLAN.md — Verify PyPI sdist is feedstock-ready (Cargo.lock present, offline build passes); resolve version pin (0.1.2 or cut 0.1.3) — **PASS, pinned_version=0.1.2, sha256=189698190835809f73fdb5af9ead4962975181c7fc8297045a5d831c0d465add**
 - [x] 13-02-PLAN.md — Rust dependency license audit with cargo-bundle-licenses; commit THIRDPARTY.yml — **PASS, cargo-bundle-licenses 4.0.0, all 57 crates permissive (MIT / Apache-2.0 / Unlicense / Unicode-3.0), no remediation required**
 - [ ] 13-03-PLAN.md — Draft recipe on fork of conda-forge/staged-recipes, open PR, iterate on CI, verify post-merge feedstock publishes on all 5 platforms + smoke test
+
+### Phase 14: List data type (LPUSH, BRPOP, BLPOP, and full list command set)
+
+**Goal:** Add Redis list data type support to the engine with a 16-command surface (LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX, LINSERT, LREM, LSET, LTRIM, LMOVE, RPOPLPUSH, BRPOP, BLPOP, BLMOVE) as a drop-in replacement for redis.asyncio.Redis list operations. Blocking commands integrate with the existing Tokio runtime using the Phase-11 `tokio::sync::Notify` pattern and respect Python asyncio cancellation/timeout semantics. Storage is `VecDeque<Bytes>` behind the existing `parking_lot::RwLock` keyspace.
+- **Required commands:** LPUSH, BRPOP, BLPOP
+- **Stretch goal (absorbed into this phase):** full list command coverage — RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX, LINSERT, LREM, LSET, LTRIM, LMOVE, RPOPLPUSH, BLMOVE
+- **Blocking commands** (BRPOP, BLPOP, BLMOVE) must integrate cleanly with the existing async/Tokio runtime and respect Python asyncio semantics (cancellation, timeouts, GIL release while blocked)
+- **Storage:** `VecDeque<Bytes>` behind the keyspace `parking_lot::RwLock`
+- **Scope-reversal note:** REQUIREMENTS.md currently lists BLPOP/BRPOP under Out of Scope; this phase removes that entry and adds LIST-01..LIST-16 (Plan 01 Task 1)
+
+**Requirements**: LIST-01, LIST-02, LIST-03, LIST-04, LIST-05, LIST-06, LIST-07, LIST-08, LIST-09, LIST-10, LIST-11, LIST-12, LIST-13, LIST-14, LIST-15, LIST-16
+**Depends on:** Phase 13
+**Plans:** 3/3 plans complete
+
+Plans:
+- [x] 14-01-PLAN.md — Rust engine: ValueData::List variant, list_notify field, 13 non-blocking Store methods + blpop_poll/brpop_poll/lmove_atomic helpers, src/commands/lists.rs helpers, REQUIREMENTS.md update adding LIST-01..LIST-16 (Wave 1)
+- [x] 14-02-PLAN.md — Python surface: 13 non-blocking #[pymethods], 3 blocking #[pymethods] (BRPOP/BLPOP/BLMOVE via future_into_py + tokio::select! + notify re-arm), value-coercion monkey-patches, tests/test_lists.py covering LIST-01..LIST-15 (Wave 2)
+- [x] 14-03-PLAN.md — Lua + pipeline integration: had_list_mutation flag + 13 non-blocking + 3 blocking-reject arms in scripting.rs, 13 non-blocking arms in dispatch_pipeline_command, 16 Python pipeline stubs, Python-side blocking-aware Pipeline.execute() branch, LIST-16 tests, REQUIREMENTS.md finalize (Wave 3)

@@ -2,7 +2,7 @@ use bytes::Bytes;
 use ordered_float::OrderedFloat;
 use parking_lot::RwLock;
 use serde::{Serialize, Deserialize};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Bound;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -126,6 +126,8 @@ pub enum ValueData {
     SortedSet(SortedSet),
     /// Redis stream value (ordered log of field-value entries).
     Stream(Stream),
+    /// Redis list value (ordered sequence of byte values; head is index 0).
+    List(VecDeque<Bytes>),
 }
 
 /// A value entry in the store, containing typed data and optional expiration.
@@ -177,6 +179,14 @@ impl ValueEntry {
         }
     }
 
+    /// Create a new empty List-typed entry with no expiration.
+    pub fn new_list() -> Self {
+        ValueEntry {
+            data: ValueData::List(VecDeque::new()),
+            expires_at: None,
+        }
+    }
+
     pub fn is_expired(&self) -> bool {
         self.expires_at
             .map(|exp| Instant::now() >= exp)
@@ -185,7 +195,7 @@ impl ValueEntry {
 }
 
 /// Errors that can occur during store operations.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
@@ -201,6 +211,14 @@ pub enum StoreError {
     BusyGroup,
     #[error("ERR The XGROUP subcommand requires the key to exist")]
     KeyNotFound,
+    /// Generic ERR-prefixed message used for list helper parsing errors
+    /// (e.g. LMOVE LEFT/RIGHT, LINSERT BEFORE/AFTER) and LSET index-out-of-range.
+    /// The payload IS the full wire-format error message.
+    #[error("{0}")]
+    Syntax(String),
+    /// ERR no such key — used by LSET when the target key does not exist.
+    #[error("ERR no such key")]
+    NoSuchKey,
 }
 
 /// A pub/sub message delivered through the broadcast channel.
@@ -273,6 +291,7 @@ pub struct Store {
     scripts: RwLock<HashMap<String, String>>,
     pub(crate) pubsub: RwLock<PubSubRegistry>,
     stream_notify: Arc<Notify>,
+    list_notify: Arc<Notify>,
     shutdown: AtomicBool,
 }
 
@@ -283,6 +302,7 @@ impl Store {
             scripts: RwLock::new(HashMap::new()),
             pubsub: RwLock::new(PubSubRegistry::new()),
             stream_notify: Arc::new(Notify::new()),
+            list_notify: Arc::new(Notify::new()),
             shutdown: AtomicBool::new(false),
         }
     }
@@ -290,6 +310,12 @@ impl Store {
     /// Get a reference to the stream notification handle for async waiting.
     pub fn stream_notify(&self) -> Arc<Notify> {
         self.stream_notify.clone()
+    }
+
+    /// Get a reference to the list notification handle for async waiting.
+    /// Used by BRPOP/BLPOP/BLMOVE to wait for LPUSH/RPUSH/LMOVE mutations.
+    pub fn list_notify(&self) -> Arc<Notify> {
+        self.list_notify.clone()
     }
 
     /// Signal graceful shutdown: wake all blocking stream waiters so their
@@ -300,6 +326,9 @@ impl Store {
 
         // Wake all blocking xread/xreadgroup waiters so they see the flag
         self.stream_notify.notify_waiters();
+
+        // Wake all blocking brpop/blpop/blmove waiters so they see the flag
+        self.list_notify.notify_waiters();
 
         // Stop all pubsub listeners — collect IDs first, then stop each
         let ids: Vec<u64> = {
@@ -351,22 +380,26 @@ impl Store {
         self.scripts.write()
     }
 
-    /// GET: Returns the value for a String-typed key, or None if missing/expired/wrong type.
-    /// Passive expiration: removes expired keys on access.
-    /// Returns None for Hash/Set keys (matches Redis behavior where GET on non-string returns error,
-    /// but the WRONGTYPE error is raised at the Python layer).
-    pub fn get(&self, key: &Bytes) -> Option<Bytes> {
+    /// GET: Returns the value for a String-typed key.
+    ///
+    /// Returns `Ok(Some(bytes))` for a live String key, `Ok(None)` for a missing
+    /// or expired key (passive expiration removes the entry), and
+    /// `Err(StoreError::WrongType)` for any non-String type (List/Hash/Set/
+    /// SortedSet/Stream) — matching Redis canonical behavior where
+    /// `GET <non-string-key>` raises
+    /// `WRONGTYPE Operation against a key holding the wrong kind of value`.
+    pub fn get(&self, key: &Bytes) -> Result<Option<Bytes>, StoreError> {
         // First check with a read lock
         {
             let data = self.data.read();
             match data.get(key) {
-                None => return None,
+                None => return Ok(None),
                 Some(entry) if !entry.is_expired() => {
                     if let ValueData::String(ref v) = entry.data {
-                        return Some(v.clone());
+                        return Ok(Some(v.clone()));
                     }
-                    // Non-string type: return None (WRONGTYPE handled at Python layer)
-                    return None;
+                    // Non-string type: surface WRONGTYPE (matches real Redis).
+                    return Err(StoreError::WrongType);
                 }
                 Some(_) => {} // expired, fall through to remove
             }
@@ -378,7 +411,7 @@ impl Store {
                 data.remove(key);
             }
         }
-        None
+        Ok(None)
     }
 
     /// SET: Stores a key-value pair with optional TTL and conditional flags.
@@ -2392,16 +2425,25 @@ impl Store {
         // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
         let pubsub_tx = self.pubsub_sender();
 
-        let (result, had_xadd) = {
+        let outcome = {
             // Acquire write lock on data -- held for entire script execution
             let mut data = self.data.write();
-            LuaEngine::execute(script, keys, args, &mut *data, Some(&pubsub_tx))?
+            LuaEngine::execute(script, keys, args, &mut *data, Some(&pubsub_tx))
             // data write lock drops here
         };
-        if had_xadd {
+        // P2-08: fire notifications based on the cumulative mutation flags
+        // BEFORE inspecting `outcome.result`. Scripts that pushed onto a list
+        // and then errored mid-way must still wake parked BRPOP/BLPOP waiters
+        // — Redis never rolls back earlier writes inside a script.
+        if outcome.had_xadd {
             self.stream_notify.notify_waiters();
         }
-        Ok(result)
+        if outcome.had_list_mutation {
+            // Phase-11-style lost-wakeup fix: BRPOP waiters must be woken when
+            // a Lua LPUSH/RPUSH/LMOVE/RPOPLPUSH/LINSERT grows a list.
+            self.list_notify.notify_waiters();
+        }
+        outcome.result
     }
 
     /// EVALSHA: Execute a cached Lua script by SHA1 hash.
@@ -2420,16 +2462,21 @@ impl Store {
         // Clone broadcast sender BEFORE acquiring data write lock (deadlock prevention)
         let pubsub_tx = self.pubsub_sender();
 
-        let (result, had_xadd) = {
+        let outcome = {
             // Acquire write lock on data -- held for entire script execution
             let mut data = self.data.write();
-            LuaEngine::execute(&script, keys, args, &mut *data, Some(&pubsub_tx))?
+            LuaEngine::execute(&script, keys, args, &mut *data, Some(&pubsub_tx))
             // data write lock drops here
         };
-        if had_xadd {
+        // P2-08: see `eval` above — flags must be honored on both Ok and Err
+        // paths so a script that mutated then raised still wakes its waiters.
+        if outcome.had_xadd {
             self.stream_notify.notify_waiters();
         }
-        Ok(result)
+        if outcome.had_list_mutation {
+            self.list_notify.notify_waiters();
+        }
+        outcome.result
     }
 
     // -- Pub/Sub Methods --
@@ -2711,6 +2758,690 @@ impl Store {
             .map(|s| s.len() as i64)
             .sum()
     }
+
+    // ── List Commands ────────────────────────────────────────────────
+    //
+    // All list mutators that GROW a list (LPUSH, RPUSH, LMOVE-dst,
+    // RPOPLPUSH-dst) call `self.list_notify.notify_waiters()` inside the
+    // write lock after the mutation — this mirrors the XADD notify pattern
+    // and is what unblocks BRPOP/BLPOP/BLMOVE waiters in the async layer.
+    //
+    // All list mutators that SHRINK a list (LPOP, RPOP, LREM, LTRIM,
+    // BRPOP/BLPOP pop, LMOVE-src) delete the key when the list becomes
+    // empty (D-03), matching Redis's standard behavior.
+
+    /// LPUSH: Push one or more values onto the head of a list.
+    ///
+    /// For a single call `LPUSH k a b c`, each value is pushed in turn to
+    /// the head, so the resulting order is `[c, b, a]` (last-pushed first).
+    /// Creates the list if it does not exist. Returns the new length.
+    /// Fires `list_notify.notify_waiters()` inside the write lock.
+    ///
+    /// P2-05: Rejects empty `values` with a wrong-arity error BEFORE any
+    /// mutation or notify — real Redis does not create an empty list when
+    /// LPUSH is called with only a key.
+    pub fn lpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError> {
+        if values.is_empty() {
+            return Err(StoreError::Syntax(
+                "ERR wrong number of arguments for 'lpush' command".to_string(),
+            ));
+        }
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(&key) {
+            if entry.is_expired() {
+                data.remove(&key);
+            }
+        }
+
+        let entry = data.entry(key).or_insert_with(ValueEntry::new_list);
+        match entry.data {
+            ValueData::List(ref mut list) => {
+                for v in values {
+                    list.push_front(v);
+                }
+                let len = list.len() as i64;
+                // Wake blocking BRPOP/BLPOP waiters (D-10) — inside write lock.
+                self.list_notify.notify_waiters();
+                Ok(len)
+            }
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
+    /// RPUSH: Push one or more values onto the tail of a list.
+    ///
+    /// Order is preserved: `RPUSH k a b c` → `[a, b, c]`. Creates the list
+    /// if it does not exist. Returns the new length. Fires list_notify.
+    ///
+    /// P2-05: Empty `values` → wrong-arity error, no mutation or notify.
+    pub fn rpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError> {
+        if values.is_empty() {
+            return Err(StoreError::Syntax(
+                "ERR wrong number of arguments for 'rpush' command".to_string(),
+            ));
+        }
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(&key) {
+            if entry.is_expired() {
+                data.remove(&key);
+            }
+        }
+
+        let entry = data.entry(key).or_insert_with(ValueEntry::new_list);
+        match entry.data {
+            ValueData::List(ref mut list) => {
+                for v in values {
+                    list.push_back(v);
+                }
+                let len = list.len() as i64;
+                self.list_notify.notify_waiters();
+                Ok(len)
+            }
+            _ => Err(StoreError::WrongType),
+        }
+    }
+
+    /// LLEN: Return the length of a list. Missing key → 0; WRONGTYPE on
+    /// a non-list key.
+    pub fn llen(&self, key: &Bytes) -> Result<i64, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        match data.get(key) {
+            None => Ok(0),
+            Some(entry) => match &entry.data {
+                ValueData::List(list) => Ok(list.len() as i64),
+                _ => Err(StoreError::WrongType),
+            },
+        }
+    }
+
+    /// LINDEX: Read an element at a (possibly negative) index. Missing key
+    /// or out-of-range → None; WRONGTYPE on non-list.
+    pub fn lindex(&self, key: &Bytes, index: i64) -> Result<Option<Bytes>, StoreError> {
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(None);
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => return Ok(None),
+            Some(e) => e,
+        };
+        let list = match &entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let n = list.len() as i64;
+        let actual = if index < 0 { index + n } else { index };
+        if actual < 0 || actual >= n {
+            return Ok(None);
+        }
+        Ok(list.get(actual as usize).cloned())
+    }
+
+    /// LRANGE: Return elements in a (possibly negative) inclusive range.
+    /// Missing key or empty range → empty Vec; WRONGTYPE on non-list.
+    pub fn lrange(&self, key: &Bytes, start: i64, stop: i64) -> Result<Vec<Bytes>, StoreError> {
+        use crate::commands::lists::normalize_range_indices;
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(Vec::new());
+            }
+        }
+
+        let entry = match data.get(key) {
+            None => return Ok(Vec::new()),
+            Some(e) => e,
+        };
+        let list = match &entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let (s, e) = match normalize_range_indices(start, stop, list.len()) {
+            None => return Ok(Vec::new()),
+            Some(pair) => pair,
+        };
+        // inclusive on both ends
+        Ok(list.iter().skip(s).take(e - s + 1).cloned().collect())
+    }
+
+    /// LPOP: Pop from the head of a list.
+    ///
+    /// - `count = None`  → `Single(bytes)` on non-empty, `Nil` on missing/empty
+    /// - `count = Some(n)` → `Array(vec)` (possibly empty for n=0 or missing key → Nil)
+    ///
+    /// Deletes the key when the list becomes empty (D-03). WRONGTYPE on
+    /// non-list. Type-check happens BEFORE the count=0 fast-return so that
+    /// `LPOP strkey 0` returns WRONGTYPE rather than `[]` (Pitfall 4).
+    pub fn lpop(&self, key: &Bytes, count: Option<usize>) -> Result<LPopResult, StoreError> {
+        let mut data = self.data.write();
+
+        // Passive expiration
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+            }
+        }
+
+        // Type-check against the existing entry (if any) BEFORE any early
+        // return for count=0. A WRONGTYPE against a string key must
+        // propagate even for LPOP k 0.
+        match data.get(key) {
+            None => return Ok(LPopResult::Nil),
+            Some(entry) => match &entry.data {
+                ValueData::List(_) => {} // proceed
+                _ => return Err(StoreError::WrongType),
+            },
+        }
+
+        // Type-confirmed. Handle count=0 fast-return.
+        if count == Some(0) {
+            return Ok(LPopResult::Array(Vec::new()));
+        }
+
+        let entry = data.get_mut(key).expect("entry exists (checked above)");
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => unreachable!(),
+        };
+
+        let result = match count {
+            None => match list.pop_front() {
+                Some(v) => LPopResult::Single(v),
+                None => LPopResult::Nil,
+            },
+            Some(n) => {
+                let actual = n.min(list.len());
+                let popped: Vec<Bytes> = (0..actual)
+                    .map(|_| list.pop_front().expect("len checked"))
+                    .collect();
+                LPopResult::Array(popped)
+            }
+        };
+
+        // D-03: delete key if the list is now empty.
+        if let Some(entry) = data.get(key) {
+            if let ValueData::List(l) = &entry.data {
+                if l.is_empty() {
+                    data.remove(key);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// RPOP: Pop from the tail of a list — mirror of lpop().
+    pub fn rpop(&self, key: &Bytes, count: Option<usize>) -> Result<LPopResult, StoreError> {
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+            }
+        }
+
+        match data.get(key) {
+            None => return Ok(LPopResult::Nil),
+            Some(entry) => match &entry.data {
+                ValueData::List(_) => {}
+                _ => return Err(StoreError::WrongType),
+            },
+        }
+
+        if count == Some(0) {
+            return Ok(LPopResult::Array(Vec::new()));
+        }
+
+        let entry = data.get_mut(key).expect("entry exists (checked above)");
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => unreachable!(),
+        };
+
+        let result = match count {
+            None => match list.pop_back() {
+                Some(v) => LPopResult::Single(v),
+                None => LPopResult::Nil,
+            },
+            Some(n) => {
+                let actual = n.min(list.len());
+                let popped: Vec<Bytes> = (0..actual)
+                    .map(|_| list.pop_back().expect("len checked"))
+                    .collect();
+                LPopResult::Array(popped)
+            }
+        };
+
+        if let Some(entry) = data.get(key) {
+            if let ValueData::List(l) = &entry.data {
+                if l.is_empty() {
+                    data.remove(key);
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// LREM: Remove up to `count` copies of `value` from a list.
+    ///
+    /// - count > 0: scan head→tail, remove up to `count` matches
+    /// - count < 0: scan tail→head, remove up to `|count|` matches
+    /// - count = 0: remove all matches
+    ///
+    /// Returns the number of elements removed. Deletes the key if the list
+    /// becomes empty (D-03). Missing key → 0. WRONGTYPE on non-list.
+    pub fn lrem(&self, key: &Bytes, count: i64, value: Bytes) -> Result<i64, StoreError> {
+        use crate::commands::lists::{LremDirection, parse_lrem_count};
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Ok(0),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+
+        let mut removed: i64 = 0;
+        match parse_lrem_count(count) {
+            LremDirection::Head(target) => {
+                list.retain(|v| {
+                    if (removed as usize) < target && v == &value {
+                        removed += 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            LremDirection::Tail(target) => {
+                // Walk from the tail. Collect matching indices in descending
+                // order so later `remove(idx)` calls don't shift subsequent
+                // indices we still need to visit.
+                let indices: Vec<usize> = list
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .filter_map(|(i, v)| if v == &value { Some(i) } else { None })
+                    .take(target)
+                    .collect();
+                for i in indices {
+                    list.remove(i);
+                    removed += 1;
+                }
+            }
+            LremDirection::All => {
+                let before = list.len();
+                list.retain(|v| v != &value);
+                removed = (before - list.len()) as i64;
+            }
+        }
+
+        if list.is_empty() {
+            data.remove(key);
+        }
+        Ok(removed)
+    }
+
+    /// LSET: Replace the element at `index` with `value`.
+    ///
+    /// Returns `Err(NoSuchKey)` on missing key, `Err(Syntax(...))` on
+    /// out-of-range index (matching `ERR index out of range` Redis wording),
+    /// `Err(WrongType)` on non-list. Does NOT fire list_notify (mutation
+    /// doesn't grow the list, so no waiters are unblocked).
+    pub fn lset(&self, key: &Bytes, index: i64, value: Bytes) -> Result<(), StoreError> {
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Err(StoreError::NoSuchKey);
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Err(StoreError::NoSuchKey),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let n = list.len() as i64;
+        let actual = if index < 0 { index + n } else { index };
+        if actual < 0 || actual >= n {
+            return Err(StoreError::Syntax("ERR index out of range".to_string()));
+        }
+        list[actual as usize] = value;
+        Ok(())
+    }
+
+    /// LTRIM: Clamp a list to an inclusive range. Out-of-range → empty
+    /// list, which deletes the key (D-03). Missing key → no-op (Ok(())).
+    /// WRONGTYPE on non-list.
+    pub fn ltrim(&self, key: &Bytes, start: i64, stop: i64) -> Result<(), StoreError> {
+        use crate::commands::lists::normalize_range_indices;
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(());
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Ok(()),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let len = list.len();
+        match normalize_range_indices(start, stop, len) {
+            None => {
+                // Empty result: delete the key (D-03).
+                data.remove(key);
+            }
+            Some((s, e)) => {
+                let new_list: VecDeque<Bytes> =
+                    list.iter().skip(s).take(e - s + 1).cloned().collect();
+                *list = new_list;
+                if list.is_empty() {
+                    data.remove(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// LINSERT: Insert `value` immediately before or after the first
+    /// occurrence of `pivot`. Returns:
+    /// - the new length on success,
+    /// - -1 when the pivot is not found,
+    /// - 0 when the key is missing.
+    ///
+    /// Does NOT fire list_notify — redis-py's LINSERT is documented as not
+    /// waking BRPOP waiters in real Redis, since the list must already
+    /// exist to match a pivot. If we later observe a pydocket need for
+    /// wake-up here, revisit.
+    pub fn linsert(
+        &self,
+        key: &Bytes,
+        where_: crate::commands::lists::InsertPosition,
+        pivot: &Bytes,
+        value: Bytes,
+    ) -> Result<i64, StoreError> {
+        use crate::commands::lists::InsertPosition;
+        let mut data = self.data.write();
+
+        if let Some(entry) = data.get(key) {
+            if entry.is_expired() {
+                data.remove(key);
+                return Ok(0);
+            }
+        }
+
+        let entry = match data.get_mut(key) {
+            None => return Ok(0),
+            Some(e) => e,
+        };
+        let list = match &mut entry.data {
+            ValueData::List(l) => l,
+            _ => return Err(StoreError::WrongType),
+        };
+        let pos = match list.iter().position(|v| v == pivot) {
+            None => return Ok(-1),
+            Some(p) => p,
+        };
+        let insert_at = match where_ {
+            InsertPosition::Before => pos,
+            InsertPosition::After => pos + 1,
+        };
+        list.insert(insert_at, value);
+        Ok(list.len() as i64)
+    }
+
+    /// LMOVE (atomic): Pop an element from one end of `src`, push to one end
+    /// of `dst`. Single write lock, so src==dst is a valid rotation.
+    ///
+    /// Semantics:
+    /// - Missing/empty src → `Ok(None)`; dst is untouched and not created
+    ///   (P2-02: this short-circuits BEFORE any dst validation, matching
+    ///   real Redis: a no-op LMOVE never sees a WRONGTYPE on dst).
+    /// - WRONGTYPE on src is checked before pop.
+    /// - WRONGTYPE on dst is checked only when src had a poppable element
+    ///   (still BEFORE the destructive pop, so no element is lost).
+    /// - Deletes src when empty after pop (D-03).
+    /// - Fires `list_notify.notify_waiters()` after the push (D-10).
+    pub fn lmove_atomic(
+        &self,
+        src: &Bytes,
+        dst: &Bytes,
+        src_from: crate::commands::lists::ListEnd,
+        dst_to: crate::commands::lists::ListEnd,
+    ) -> Result<Option<Bytes>, StoreError> {
+        use crate::commands::lists::ListEnd;
+        let mut data = self.data.write();
+
+        // Passive expiration for both keys.
+        if let Some(e) = data.get(src) {
+            if e.is_expired() {
+                data.remove(src);
+            }
+        }
+        if src != dst {
+            if let Some(e) = data.get(dst) {
+                if e.is_expired() {
+                    data.remove(dst);
+                }
+            }
+        }
+
+        // P2-02: Determine src state FIRST. If src is missing or holds an
+        // empty list (shouldn't happen per D-03, but be defensive) we return
+        // Nil without touching dst — a no-op move never observes dst's type.
+        // We only validate src's type here (read-only); the actual pop is
+        // deferred until after dst validation so we can keep one write lock
+        // spanning the entire pop+push (preserves atomicity).
+        match data.get(src) {
+            None => return Ok(None),
+            Some(entry) => match &entry.data {
+                ValueData::List(l) if l.is_empty() => return Ok(None),
+                ValueData::List(_) => {} // src has at least one element
+                _ => return Err(StoreError::WrongType),
+            },
+        }
+
+        // Now that we know src has a poppable element, type-check dst
+        // BEFORE mutating src — if dst is a string key we must not pop.
+        // Skipped when src == dst (rotation); src type already validated.
+        if src != dst {
+            if let Some(dst_entry) = data.get(dst) {
+                if !matches!(dst_entry.data, ValueData::List(_)) {
+                    return Err(StoreError::WrongType);
+                }
+            }
+        }
+
+        // Pop from source. Compute (popped_value, src_empty) in a narrow
+        // scope so the mutable borrow on src_entry ends before we may
+        // need to data.remove(src).
+        let (popped_opt, src_empty) = {
+            let src_entry = match data.get_mut(src) {
+                None => return Ok(None),
+                Some(e) => e,
+            };
+            let src_list = match &mut src_entry.data {
+                ValueData::List(l) => l,
+                _ => return Err(StoreError::WrongType),
+            };
+            let val = match src_from {
+                ListEnd::Left => src_list.pop_front(),
+                ListEnd::Right => src_list.pop_back(),
+            };
+            let empty = src_list.is_empty();
+            (val, empty)
+        };
+
+        let popped = match popped_opt {
+            None => return Ok(None),
+            Some(v) => v,
+        };
+
+        // D-03: delete src if empty.
+        //
+        // P2-09: gate on `src != dst`. For same-key rotations (e.g. `LMOVE k
+        // k LEFT RIGHT`) Redis treats the operation as a pure rewrite — the
+        // key is never removed, so its TTL is preserved. If we removed the
+        // entry here, the `data.entry(dst).or_insert_with(...)` call below
+        // would re-create a fresh entry with no `expires_at`, silently
+        // clearing the user's expiry. The inner VecDeque is briefly empty
+        // between the pop and the push, but that's invisible to callers
+        // because the data-write lock spans the whole operation.
+        if src_empty && src != dst {
+            data.remove(src);
+        }
+
+        // Push onto destination.
+        let dst_entry = data
+            .entry(dst.clone())
+            .or_insert_with(ValueEntry::new_list);
+        match &mut dst_entry.data {
+            ValueData::List(l) => match dst_to {
+                ListEnd::Left => l.push_front(popped.clone()),
+                ListEnd::Right => l.push_back(popped.clone()),
+            },
+            _ => {
+                // Unreachable given the pre-check above, but keep defensive.
+                return Err(StoreError::WrongType);
+            }
+        }
+
+        // Wake BRPOP/BLPOP waiters (D-10).
+        self.list_notify.notify_waiters();
+        Ok(Some(popped))
+    }
+
+    /// RPOPLPUSH (legacy): `LMOVE src dst RIGHT LEFT`. Kept as a distinct
+    /// method to match redis-py's `rpoplpush()` signature.
+    pub fn rpoplpush_atomic(
+        &self,
+        src: &Bytes,
+        dst: &Bytes,
+    ) -> Result<Option<Bytes>, StoreError> {
+        use crate::commands::lists::ListEnd;
+        self.lmove_atomic(src, dst, ListEnd::Right, ListEnd::Left)
+    }
+
+    /// BLPOP helper: one non-blocking scan of `keys` LEFT-TO-RIGHT, popping
+    /// from the HEAD of the first non-empty list. Used by the async BLPOP
+    /// loop in Plan 02.
+    ///
+    /// - Returns `Ok(Some((key, value)))` on first hit,
+    /// - `Ok(None)` if all keys were missing/empty,
+    /// - `Err(WrongType)` as soon as a non-list key is encountered (abort scan).
+    ///
+    /// Deletes a key after the pop if its list becomes empty (D-03).
+    pub fn blpop_poll(
+        &self,
+        keys: &[Bytes],
+    ) -> Result<Option<(Bytes, Bytes)>, StoreError> {
+        let mut data = self.data.write();
+        for k in keys {
+            // Passive expiration
+            if let Some(e) = data.get(k) {
+                if e.is_expired() {
+                    data.remove(k);
+                }
+            }
+            let entry = match data.get_mut(k) {
+                None => continue,
+                Some(e) => e,
+            };
+            let list = match &mut entry.data {
+                ValueData::List(l) => l,
+                _ => return Err(StoreError::WrongType),
+            };
+            if let Some(v) = list.pop_front() {
+                let empty = list.is_empty();
+                if empty {
+                    data.remove(k);
+                }
+                return Ok(Some((k.clone(), v)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// BRPOP helper: mirror of blpop_poll, but pops from the TAIL.
+    pub fn brpop_poll(
+        &self,
+        keys: &[Bytes],
+    ) -> Result<Option<(Bytes, Bytes)>, StoreError> {
+        let mut data = self.data.write();
+        for k in keys {
+            if let Some(e) = data.get(k) {
+                if e.is_expired() {
+                    data.remove(k);
+                }
+            }
+            let entry = match data.get_mut(k) {
+                None => continue,
+                Some(e) => e,
+            };
+            let list = match &mut entry.data {
+                ValueData::List(l) => l,
+                _ => return Err(StoreError::WrongType),
+            };
+            if let Some(v) = list.pop_back() {
+                let empty = list.is_empty();
+                if empty {
+                    data.remove(k);
+                }
+                return Ok(Some((k.clone(), v)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Return variants for LPOP/RPOP mirroring redis-py semantics:
+/// - `Nil`: missing key (with or without count)
+/// - `Single`: count was None and a single element was popped
+/// - `Array`: count was Some(n), possibly empty (count=0 → empty array)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LPopResult {
+    Nil,
+    Single(Bytes),
+    Array(Vec<Bytes>),
 }
 
 // ── Persistable Snapshot Types ──────────────────────────────────────────
@@ -2742,6 +3473,9 @@ pub enum PersistableValueData {
     Set(Vec<Vec<u8>>),
     SortedSet(PersistableSortedSet),
     Stream(PersistableStream),
+    /// Serialized as Vec<Vec<u8>> (same shape as Set); order is preserved
+    /// by virtue of being a Vec. Deserialized back into a VecDeque<Bytes>.
+    List(Vec<Vec<u8>>),
 }
 
 /// Persistable version of SortedSet.
@@ -2861,6 +3595,9 @@ impl PersistableStore {
                                 .collect(),
                         })
                     }
+                    ValueData::List(list) => {
+                        PersistableValueData::List(list.iter().map(|b| b.to_vec()).collect())
+                    }
                 };
 
                 (key.to_vec(), PersistableEntry {
@@ -2973,6 +3710,11 @@ impl PersistableStore {
                         groups,
                     })
                 }
+                PersistableValueData::List(items) => {
+                    let deque: VecDeque<Bytes> =
+                        items.into_iter().map(Bytes::from).collect();
+                    ValueData::List(deque)
+                }
             };
 
             data.insert(
@@ -3002,13 +3744,13 @@ mod tests {
         let key = Bytes::from("key");
         let value = Bytes::from("value");
         assert!(store.set(key.clone(), value.clone(), None, false, false));
-        assert_eq!(store.get(&key), Some(value));
+        assert_eq!(store.get(&key), Ok(Some(value)));
     }
 
     #[test]
     fn test_get_missing_key() {
         let store = Store::new();
-        assert_eq!(store.get(&Bytes::from("missing")), None);
+        assert_eq!(store.get(&Bytes::from("missing")), Ok(None));
     }
 
     #[test]
@@ -3017,7 +3759,7 @@ mod tests {
         let key = Bytes::from("key");
         store.set(key.clone(), Bytes::from("v1"), None, false, false);
         assert!(!store.set(key.clone(), Bytes::from("v2"), None, true, false));
-        assert_eq!(store.get(&key), Some(Bytes::from("v1")));
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("v1"))));
     }
 
     #[test]
@@ -3025,7 +3767,7 @@ mod tests {
         let store = Store::new();
         let key = Bytes::from("key");
         assert!(!store.set(key.clone(), Bytes::from("v1"), None, false, true));
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Ok(None));
     }
 
     #[test]
@@ -3040,7 +3782,7 @@ mod tests {
             false,
         );
         std::thread::sleep(Duration::from_millis(1));
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Ok(None));
     }
 
     #[test]
@@ -3061,25 +3803,33 @@ mod tests {
         assert_eq!(count, 2);
     }
 
-    // ── GET on non-string types returns None ─────────────────────────
+    // ── GET on non-string types returns WRONGTYPE ────────────────────
 
     #[test]
-    fn test_get_on_hash_key_returns_none() {
+    fn test_get_on_hash_key_returns_wrongtype() {
         let store = Store::new();
         let key = Bytes::from("myhash");
         store
             .hset(key.clone(), vec![(Bytes::from("f"), Bytes::from("v"))])
             .unwrap();
-        // GET on a hash key returns None (WRONGTYPE handling is at Python layer)
-        assert_eq!(store.get(&key), None);
+        // GET on a hash key surfaces WRONGTYPE (matches real Redis).
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
     }
 
     #[test]
-    fn test_get_on_set_key_returns_none() {
+    fn test_get_on_set_key_returns_wrongtype() {
         let store = Store::new();
         let key = Bytes::from("myset");
         store.sadd(key.clone(), vec![Bytes::from("m")]).unwrap();
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn test_get_on_list_key_returns_wrongtype() {
+        let store = Store::new();
+        let key = Bytes::from("mylist");
+        store.lpush(key.clone(), vec![Bytes::from("v")]).unwrap();
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
     }
 
     // ── SET overwrites any type ──────────────────────────────────────
@@ -3092,7 +3842,7 @@ mod tests {
             .hset(key.clone(), vec![(Bytes::from("f"), Bytes::from("v"))])
             .unwrap();
         assert!(store.set(key.clone(), Bytes::from("string_val"), None, false, false));
-        assert_eq!(store.get(&key), Some(Bytes::from("string_val")));
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("string_val"))));
     }
 
     #[test]
@@ -3101,7 +3851,7 @@ mod tests {
         let key = Bytes::from("mykey");
         store.sadd(key.clone(), vec![Bytes::from("m")]).unwrap();
         assert!(store.set(key.clone(), Bytes::from("string_val"), None, false, false));
-        assert_eq!(store.get(&key), Some(Bytes::from("string_val")));
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("string_val"))));
     }
 
     // ── Hash Tests ───────────────────────────────────────────────────
@@ -3943,16 +4693,16 @@ mod tests {
         assert!(matches!(result, Err(StoreError::WrongType)));
     }
 
-    // ── GET on SortedSet returns None ───────────────────────────────
+    // ── GET on SortedSet returns WRONGTYPE ──────────────────────────
 
     #[test]
-    fn test_get_on_sorted_set_returns_none() {
+    fn test_get_on_sorted_set_returns_wrongtype() {
         let store = Store::new();
         let key = Bytes::from("myzset");
         store
             .zadd(key.clone(), vec![(1.0, Bytes::from("a"))], false, false, false, false, false)
             .unwrap();
-        assert_eq!(store.get(&key), None);
+        assert_eq!(store.get(&key), Err(StoreError::WrongType));
     }
 
     // ── Passive Expiration for Sorted Sets ──────────────────────────
@@ -4003,10 +4753,13 @@ mod tests {
         assert_eq!(removed, 2);
 
         // Persistent key still exists
-        assert_eq!(store.get(&Bytes::from("persist")), Some(Bytes::from("v3")));
+        assert_eq!(
+            store.get(&Bytes::from("persist")),
+            Ok(Some(Bytes::from("v3")))
+        );
         // Expired keys are gone
-        assert_eq!(store.get(&Bytes::from("exp1")), None);
-        assert_eq!(store.get(&Bytes::from("exp2")), None);
+        assert_eq!(store.get(&Bytes::from("exp1")), Ok(None));
+        assert_eq!(store.get(&Bytes::from("exp2")), Ok(None));
     }
 
     #[test]
@@ -4240,5 +4993,496 @@ mod tests {
 
         // stop_flag set by shutdown -> stop_subscriber_listener
         assert!(stop_flag.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    // ── List scaffolding tests (Phase 14, Plan 01, Task 1) ──────────
+
+    #[test]
+    fn list_variant_constructs() {
+        let entry = ValueEntry::new_list();
+        assert!(matches!(entry.data, ValueData::List(_)));
+        if let ValueData::List(ref list) = entry.data {
+            assert_eq!(list.len(), 0);
+        }
+    }
+
+    #[test]
+    fn list_notify_accessor_works() {
+        let store = Store::new();
+        // Must compile and return Arc<Notify>
+        let _notify: Arc<Notify> = store.list_notify();
+    }
+
+    #[test]
+    fn shutdown_wakes_list_waiters() {
+        // Smoke test — just call shutdown and verify flag set.
+        // Full wake behavior is covered indirectly by list_notify accessor above
+        // and by Phase 14 Plan 02 integration tests.
+        let store = Store::new();
+        store.shutdown();
+        assert!(store.is_shutdown());
+    }
+
+    // ── List foundational tests (Phase 14, Plan 01, Task 3) ─────────
+
+    #[test]
+    fn lpush_creates_and_reverses_order() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        let n = store
+            .lpush(
+                key.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        let elems = store.lrange(&key, 0, -1).unwrap();
+        assert_eq!(
+            elems,
+            vec![
+                Bytes::from_static(b"c"),
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"a")
+            ]
+        );
+    }
+
+    #[test]
+    fn rpush_creates_and_preserves_order() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        let n = store
+            .rpush(
+                key.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(n, 3);
+        let elems = store.lrange(&key, 0, -1).unwrap();
+        assert_eq!(
+            elems,
+            vec![
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"c")
+            ]
+        );
+    }
+
+    #[test]
+    fn llen_missing_is_zero() {
+        let store = Store::new();
+        assert_eq!(
+            store.llen(&Bytes::from_static(b"missing")).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn lindex_negative_and_out_of_range() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        store
+            .rpush(
+                key.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            store.lindex(&key, 0).unwrap(),
+            Some(Bytes::from_static(b"a"))
+        );
+        assert_eq!(
+            store.lindex(&key, -1).unwrap(),
+            Some(Bytes::from_static(b"c"))
+        );
+        assert_eq!(store.lindex(&key, 100).unwrap(), None);
+        assert_eq!(store.lindex(&key, -100).unwrap(), None);
+    }
+
+    #[test]
+    fn lpush_on_string_key_returns_wrongtype() {
+        let store = Store::new();
+        let key = Bytes::from_static(b"strkey");
+        // store.set returns bool; arity is (key, value, ttl, nx, xx).
+        store.set(key.clone(), Bytes::from_static(b"val"), None, false, false);
+        let err = store.lpush(key, vec![Bytes::from_static(b"a")]).unwrap_err();
+        assert!(matches!(err, StoreError::WrongType));
+    }
+
+    #[test]
+    fn lpush_notifies_waiters() {
+        // Smoke: call lpush and verify the list was populated. The notify
+        // itself is observed via async BRPOP in Plan 02 integration tests.
+        let store = Store::new();
+        let key = Bytes::from_static(b"k");
+        store
+            .lpush(key.clone(), vec![Bytes::from_static(b"v")])
+            .unwrap();
+        assert_eq!(store.llen(&key).unwrap(), 1);
+    }
+
+    // ── List mutating-op tests (Phase 14, Plan 01, Task 4) ──────────
+
+    #[test]
+    fn lpop_no_count_single() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+            )
+            .unwrap();
+        match store.lpop(&k, None).unwrap() {
+            LPopResult::Single(v) => assert_eq!(v, Bytes::from_static(b"a")),
+            other => panic!("expected Single, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lpop_count_zero_returns_empty_array() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(k.clone(), vec![Bytes::from_static(b"a")])
+            .unwrap();
+        match store.lpop(&k, Some(0)).unwrap() {
+            LPopResult::Array(v) => assert_eq!(v.len(), 0),
+            _ => panic!("expected empty Array for count=0"),
+        }
+    }
+
+    #[test]
+    fn lpop_missing_key_is_nil() {
+        let store = Store::new();
+        assert!(matches!(
+            store
+                .lpop(&Bytes::from_static(b"missing"), None)
+                .unwrap(),
+            LPopResult::Nil
+        ));
+        assert!(matches!(
+            store
+                .lpop(&Bytes::from_static(b"missing"), Some(5))
+                .unwrap(),
+            LPopResult::Nil
+        ));
+    }
+
+    #[test]
+    fn lpop_deletes_key_when_empty() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(k.clone(), vec![Bytes::from_static(b"a")])
+            .unwrap();
+        store.lpop(&k, None).unwrap();
+        assert_eq!(store.llen(&k).unwrap(), 0);
+        // Verify key is actually deleted, not just empty:
+        assert!(matches!(
+            store.lpop(&k, None).unwrap(),
+            LPopResult::Nil
+        ));
+    }
+
+    #[test]
+    fn lrem_head_negative_all() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        let a = Bytes::from_static(b"a");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    a.clone(),
+                    Bytes::from_static(b"b"),
+                    a.clone(),
+                    Bytes::from_static(b"c"),
+                    a.clone(),
+                ],
+            )
+            .unwrap();
+        // count=2 (head→tail): remove first 2 'a's → [b, c, a]
+        assert_eq!(store.lrem(&k, 2, a.clone()).unwrap(), 2);
+        assert_eq!(
+            store.lrange(&k, 0, -1).unwrap(),
+            vec![
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"c"),
+                a.clone()
+            ]
+        );
+        // count=-1 (tail→head): remove last remaining 'a'
+        assert_eq!(store.lrem(&k, -1, a.clone()).unwrap(), 1);
+        // count=0 on clean list: remove all 'z's (none found → 0)
+        assert_eq!(store.lrem(&k, 0, Bytes::from_static(b"z")).unwrap(), 0);
+    }
+
+    #[test]
+    fn lset_out_of_range() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(k.clone(), vec![Bytes::from_static(b"a")])
+            .unwrap();
+        let err = store.lset(&k, 5, Bytes::from_static(b"v")).unwrap_err();
+        assert!(format!("{}", err).contains("index out of range"));
+    }
+
+    #[test]
+    fn ltrim_empty_result_deletes_key() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        store.ltrim(&k, 5, 10).unwrap(); // out-of-range → empty
+        assert_eq!(store.llen(&k).unwrap(), 0);
+    }
+
+    #[test]
+    fn linsert_pivot_behavior() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![Bytes::from_static(b"a"), Bytes::from_static(b"c")],
+            )
+            .unwrap();
+        // Insert BEFORE "c" → [a, b, c]
+        assert_eq!(
+            store
+                .linsert(
+                    &k,
+                    crate::commands::lists::InsertPosition::Before,
+                    &Bytes::from_static(b"c"),
+                    Bytes::from_static(b"b"),
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store.lrange(&k, 0, -1).unwrap(),
+            vec![
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"b"),
+                Bytes::from_static(b"c")
+            ]
+        );
+        // Pivot not found → -1
+        assert_eq!(
+            store
+                .linsert(
+                    &k,
+                    crate::commands::lists::InsertPosition::Before,
+                    &Bytes::from_static(b"z"),
+                    Bytes::from_static(b"w"),
+                )
+                .unwrap(),
+            -1
+        );
+        // Missing key → 0
+        assert_eq!(
+            store
+                .linsert(
+                    &Bytes::from_static(b"missing"),
+                    crate::commands::lists::InsertPosition::After,
+                    &Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    // ── List cross-key + blocking-helper tests (Task 5) ─────────────
+
+    #[test]
+    fn lmove_cross_key_atomic() {
+        let store = Store::new();
+        let src = Bytes::from_static(b"src");
+        let dst = Bytes::from_static(b"dst");
+        store
+            .rpush(
+                src.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        let moved = store
+            .lmove_atomic(
+                &src,
+                &dst,
+                crate::commands::lists::ListEnd::Left,
+                crate::commands::lists::ListEnd::Right,
+            )
+            .unwrap();
+        assert_eq!(moved, Some(Bytes::from_static(b"a")));
+        assert_eq!(
+            store.lrange(&src, 0, -1).unwrap(),
+            vec![Bytes::from_static(b"b"), Bytes::from_static(b"c")]
+        );
+        assert_eq!(
+            store.lrange(&dst, 0, -1).unwrap(),
+            vec![Bytes::from_static(b"a")]
+        );
+    }
+
+    #[test]
+    fn lmove_same_key_rotation() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        // RIGHT → LEFT rotates tail to head: [c, a, b]
+        let moved = store
+            .lmove_atomic(
+                &k,
+                &k,
+                crate::commands::lists::ListEnd::Right,
+                crate::commands::lists::ListEnd::Left,
+            )
+            .unwrap();
+        assert_eq!(moved, Some(Bytes::from_static(b"c")));
+        assert_eq!(
+            store.lrange(&k, 0, -1).unwrap(),
+            vec![
+                Bytes::from_static(b"c"),
+                Bytes::from_static(b"a"),
+                Bytes::from_static(b"b")
+            ]
+        );
+    }
+
+    #[test]
+    fn lmove_empty_source_returns_none() {
+        let store = Store::new();
+        assert_eq!(
+            store
+                .lmove_atomic(
+                    &Bytes::from_static(b"missing"),
+                    &Bytes::from_static(b"dst"),
+                    crate::commands::lists::ListEnd::Left,
+                    crate::commands::lists::ListEnd::Right,
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn rpoplpush_equivalent_to_lmove() {
+        let store = Store::new();
+        let src = Bytes::from_static(b"src");
+        let dst = Bytes::from_static(b"dst");
+        store
+            .rpush(
+                src.clone(),
+                vec![Bytes::from_static(b"a"), Bytes::from_static(b"b")],
+            )
+            .unwrap();
+        // RPOPLPUSH = LMOVE src dst RIGHT LEFT → pops "b" from tail of src.
+        let moved = store.rpoplpush_atomic(&src, &dst).unwrap();
+        assert_eq!(moved, Some(Bytes::from_static(b"b")));
+        assert_eq!(
+            store.lrange(&dst, 0, -1).unwrap(),
+            vec![Bytes::from_static(b"b")]
+        );
+    }
+
+    #[test]
+    fn blpop_poll_scans_left_to_right() {
+        let store = Store::new();
+        store
+            .rpush(Bytes::from_static(b"k2"), vec![Bytes::from_static(b"v2")])
+            .unwrap();
+        store
+            .rpush(Bytes::from_static(b"k4"), vec![Bytes::from_static(b"v4")])
+            .unwrap();
+        let keys = vec![
+            Bytes::from_static(b"k1"),
+            Bytes::from_static(b"k2"),
+            Bytes::from_static(b"k3"),
+            Bytes::from_static(b"k4"),
+        ];
+        let result = store.blpop_poll(&keys).unwrap();
+        assert_eq!(
+            result,
+            Some((Bytes::from_static(b"k2"), Bytes::from_static(b"v2")))
+        );
+        // k4 must still have its value — scan stopped at the first hit.
+        assert_eq!(store.llen(&Bytes::from_static(b"k4")).unwrap(), 1);
+    }
+
+    #[test]
+    fn blpop_poll_all_empty_returns_none() {
+        let store = Store::new();
+        let keys = vec![Bytes::from_static(b"k1"), Bytes::from_static(b"k2")];
+        assert_eq!(store.blpop_poll(&keys).unwrap(), None);
+    }
+
+    #[test]
+    fn brpop_poll_pops_from_tail() {
+        let store = Store::new();
+        let k = Bytes::from_static(b"k");
+        store
+            .rpush(
+                k.clone(),
+                vec![
+                    Bytes::from_static(b"a"),
+                    Bytes::from_static(b"b"),
+                    Bytes::from_static(b"c"),
+                ],
+            )
+            .unwrap();
+        let result = store.brpop_poll(&[k.clone()]).unwrap();
+        assert_eq!(result, Some((k, Bytes::from_static(b"c"))));
+    }
+
+    #[test]
+    fn blpop_poll_wrongtype_aborts_scan() {
+        let store = Store::new();
+        store.set(
+            Bytes::from_static(b"s"),
+            Bytes::from_static(b"v"),
+            None,
+            false,
+            false,
+        );
+        let keys = vec![Bytes::from_static(b"s"), Bytes::from_static(b"k")];
+        let err = store.blpop_poll(&keys).unwrap_err();
+        assert!(matches!(err, StoreError::WrongType));
     }
 }

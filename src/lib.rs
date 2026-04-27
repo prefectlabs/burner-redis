@@ -12,7 +12,7 @@ mod commands;
 mod persistence;
 mod scripting;
 
-use commands::strings::{extract_bytes, extract_expiry};
+use commands::strings::{extract_bytes, extract_expiry, extract_token_str};
 use commands::sorted_sets::parse_score_bound;
 use commands::streams::{format_stream_id, parse_stream_id, extract_stream_fields, StreamId};
 use scripting::RedisValue;
@@ -285,6 +285,60 @@ fn build_xinfo_stream_dict<'py>(
     Ok(dict)
 }
 
+/// Normalize a Python `keys` argument (str, bytes, list, or tuple) into Vec<Bytes>.
+///
+/// redis-py's `blpop` / `brpop` accept either a single str/bytes key or a list/tuple of keys.
+/// This mirrors that behavior at the PyO3 binding layer.
+fn normalize_key_list(keys: &Bound<'_, PyAny>) -> PyResult<Vec<Bytes>> {
+    // Bytes-like SCALARS: handle as single-key BEFORE PySequence dispatch.
+    // redis-py's Encoder accepts str / bytes / bytearray / memoryview as
+    // a single key. All four are also valid Python sequences, so without
+    // this guard the PySequence branch below would iterate them per byte
+    // (yielding `int`s) and crash in extract_bytes.
+    if keys.is_instance_of::<pyo3::types::PyString>()
+        || keys.is_instance_of::<pyo3::types::PyBytes>()
+        || keys.is_instance_of::<pyo3::types::PyByteArray>()
+    {
+        return Ok(vec![extract_bytes(keys)?]);
+    }
+    // memoryview: materialize via .tobytes() for safety against
+    // non-contiguous / non-byte-format buffers, then extract.
+    if keys.is_instance_of::<pyo3::types::PyMemoryView>() {
+        let bytes_obj = keys.call_method0("tobytes")?;
+        return Ok(vec![extract_bytes(&bytes_obj)?]);
+    }
+    // Try list/tuple via sequence protocol.
+    if let Ok(seq) = keys.downcast::<pyo3::types::PySequence>() {
+        let len = seq.len()?;
+        let mut out = Vec::with_capacity(len);
+        for i in 0..len {
+            let item = seq.get_item(i)?;
+            out.push(extract_bytes(&item)?);
+        }
+        return Ok(out);
+    }
+    // Fallback: treat as a single key (will error if not str/bytes-like).
+    Ok(vec![extract_bytes(keys)?])
+}
+
+/// Convert a redis-py timeout value (None | 0 | positive float seconds) to milliseconds.
+/// None or 0 → 0 (block forever). Negative → PyValueError.
+///
+/// P2-03: Positive durations below 1ms previously truncated to 0 via `as u64`,
+/// which the blocking-list loops interpret as "block forever". Now we round
+/// any positive timeout up to at least one millisecond so finite sub-ms
+/// timeouts (e.g. `timeout=0.0005`) actually expire.
+fn timeout_to_ms(timeout: Option<f64>) -> PyResult<u64> {
+    match timeout {
+        None => Ok(0),
+        Some(t) if t < 0.0 => Err(pyo3::exceptions::PyValueError::new_err(
+            "timeout must be a non-negative number",
+        )),
+        Some(t) if t == 0.0 => Ok(0),
+        Some(t) => Ok(((t * 1000.0).ceil() as u64).max(1)),
+    }
+}
+
 #[pyclass]
 pub struct BurnerRedis {
     store: Arc<Store>,
@@ -412,14 +466,14 @@ impl BurnerRedis {
     }
 
     /// GET command matching redis.asyncio.Redis.get() signature.
-    /// Returns bytes or None.
+    /// Returns bytes or None. Raises WRONGTYPE if the key holds a non-string type.
     fn get<'py>(
         &self,
         py: Python<'py>,
         name: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let key = extract_bytes(name)?;
-        let result = self.store.get(&key);
+        let result = self.store.get(&key).map_err(store_err_to_py)?;
         let py_result = match result {
             Some(b) => PyBytes::new(py, &b).into_any().unbind(),
             None => py.None(),
@@ -2176,6 +2230,654 @@ impl BurnerRedis {
         resolved(py, dict.into_any().unbind())
     }
 
+    // -- List Commands ----
+
+    /// LPUSH command matching redis.asyncio.Redis.lpush() signature.
+    /// Accepts variadic values, returns new list length.
+    #[pyo3(signature = (name, *values))]
+    fn lpush<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        values: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let vals: Vec<Bytes> = values
+            .iter()
+            .map(|obj| extract_bytes(&obj))
+            .collect::<PyResult<Vec<_>>>()?;
+        let len = self.store.lpush(key, vals).map_err(store_err_to_py)?;
+        resolved(py, len.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// RPUSH command matching redis.asyncio.Redis.rpush() signature.
+    /// Accepts variadic values, returns new list length.
+    #[pyo3(signature = (name, *values))]
+    fn rpush<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        values: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let vals: Vec<Bytes> = values
+            .iter()
+            .map(|obj| extract_bytes(&obj))
+            .collect::<PyResult<Vec<_>>>()?;
+        let len = self.store.rpush(key, vals).map_err(store_err_to_py)?;
+        resolved(py, len.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LPOP command matching redis.asyncio.Redis.lpop() signature.
+    /// Without count: returns bytes or None (single element).
+    /// With count=N: returns list[bytes] of up to N elements, or None if key missing.
+    /// With count=0 on an existing list: returns [].
+    #[pyo3(signature = (name, count=None))]
+    fn lpop<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        count: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let count_opt: Option<usize> = match count {
+            None => None,
+            Some(n) if n < 0 => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "count must be non-negative",
+                ));
+            }
+            Some(n) => Some(n as usize),
+        };
+        let result = self.store.lpop(&key, count_opt).map_err(store_err_to_py)?;
+        let py_result = match result {
+            crate::store::LPopResult::Nil => py.None(),
+            crate::store::LPopResult::Single(b) => {
+                pyo3::types::PyBytes::new(py, &b).into_any().unbind()
+            }
+            crate::store::LPopResult::Array(vs) => {
+                let py_list = pyo3::types::PyList::empty(py);
+                for v in vs {
+                    py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+                }
+                py_list.into_any().unbind()
+            }
+        };
+        resolved(py, py_result)
+    }
+
+    /// RPOP command matching redis.asyncio.Redis.rpop() signature.
+    /// Mirror of LPOP from the tail.
+    #[pyo3(signature = (name, count=None))]
+    fn rpop<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        count: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let count_opt: Option<usize> = match count {
+            None => None,
+            Some(n) if n < 0 => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "count must be non-negative",
+                ));
+            }
+            Some(n) => Some(n as usize),
+        };
+        let result = self.store.rpop(&key, count_opt).map_err(store_err_to_py)?;
+        let py_result = match result {
+            crate::store::LPopResult::Nil => py.None(),
+            crate::store::LPopResult::Single(b) => {
+                pyo3::types::PyBytes::new(py, &b).into_any().unbind()
+            }
+            crate::store::LPopResult::Array(vs) => {
+                let py_list = pyo3::types::PyList::empty(py);
+                for v in vs {
+                    py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+                }
+                py_list.into_any().unbind()
+            }
+        };
+        resolved(py, py_result)
+    }
+
+    /// LRANGE command matching redis.asyncio.Redis.lrange() signature.
+    /// Returns list[bytes] (empty list for missing key).
+    #[pyo3(signature = (name, start, end))]
+    fn lrange<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        start: i64,
+        end: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let elems = self.store.lrange(&key, start, end).map_err(store_err_to_py)?;
+        let py_list = pyo3::types::PyList::empty(py);
+        for v in elems {
+            py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+        }
+        resolved(py, py_list.into_any().unbind())
+    }
+
+    /// LLEN command matching redis.asyncio.Redis.llen() signature.
+    /// Returns int (0 for missing key).
+    fn llen<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let n = self.store.llen(&key).map_err(store_err_to_py)?;
+        resolved(py, n.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LINDEX command matching redis.asyncio.Redis.lindex() signature.
+    /// Returns bytes or None.
+    #[pyo3(signature = (name, index))]
+    fn lindex<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        index: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let result = self.store.lindex(&key, index).map_err(store_err_to_py)?;
+        let py_result = match result {
+            Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
+    }
+
+    /// LINSERT command matching redis.asyncio.Redis.linsert(name, where, refvalue, value).
+    /// Returns new list length, or -1 if pivot not found, or 0 if key missing.
+    /// `where` accepts str or bytes (P3: pre-encoded bytes from redis-py / Pipeline).
+    #[pyo3(signature = (name, r#where, refvalue, value))]
+    fn linsert<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        r#where: &Bound<'py, PyAny>,
+        refvalue: &Bound<'py, PyAny>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::commands::lists::parse_linsert_where;
+        let key = extract_bytes(name)?;
+        let pivot = extract_bytes(refvalue)?;
+        let val = extract_bytes(value)?;
+        let where_str = extract_token_str(r#where)?;
+        let position = parse_linsert_where(&where_str).map_err(store_err_to_py)?;
+        let n = self
+            .store
+            .linsert(&key, position, &pivot, val)
+            .map_err(store_err_to_py)?;
+        resolved(py, n.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LREM command matching redis.asyncio.Redis.lrem(name, count, value).
+    /// Returns count removed. count>0 removes head-to-tail, count<0 tail-to-head, 0=all.
+    #[pyo3(signature = (name, count, value))]
+    fn lrem<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        count: i64,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let val = extract_bytes(value)?;
+        let n = self.store.lrem(&key, count, val).map_err(store_err_to_py)?;
+        resolved(py, n.into_pyobject(py)?.into_any().unbind())
+    }
+
+    /// LSET command matching redis.asyncio.Redis.lset(name, index, value).
+    /// Returns True on success; raises ResponseError on out-of-range or missing key.
+    #[pyo3(signature = (name, index, value))]
+    fn lset<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        index: i64,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        let val = extract_bytes(value)?;
+        self.store.lset(&key, index, val).map_err(store_err_to_py)?;
+        resolved(
+            py,
+            pyo3::types::PyBool::new(py, true)
+                .to_owned()
+                .into_any()
+                .unbind(),
+        )
+    }
+
+    /// LTRIM command matching redis.asyncio.Redis.ltrim(name, start, end).
+    /// Returns True.
+    #[pyo3(signature = (name, start, end))]
+    fn ltrim<'py>(
+        &self,
+        py: Python<'py>,
+        name: &Bound<'py, PyAny>,
+        start: i64,
+        end: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key = extract_bytes(name)?;
+        self.store.ltrim(&key, start, end).map_err(store_err_to_py)?;
+        resolved(
+            py,
+            pyo3::types::PyBool::new(py, true)
+                .to_owned()
+                .into_any()
+                .unbind(),
+        )
+    }
+
+    /// LMOVE command matching redis.asyncio.Redis.lmove(first_list, second_list, src="LEFT", dest="RIGHT").
+    /// Atomic cross-key (or same-key) pop+push. Returns popped bytes or None.
+    /// `src` / `dest` accept str or bytes (P3: pre-encoded bytes from redis-py).
+    #[pyo3(signature = (first_list, second_list, src=None, dest=None))]
+    fn lmove<'py>(
+        &self,
+        py: Python<'py>,
+        first_list: &Bound<'py, PyAny>,
+        second_list: &Bound<'py, PyAny>,
+        src: Option<&Bound<'py, PyAny>>,
+        dest: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::commands::lists::parse_list_end;
+        let src_key = extract_bytes(first_list)?;
+        let dst_key = extract_bytes(second_list)?;
+        let src_str = match src {
+            Some(o) => extract_token_str(o)?,
+            None => "LEFT".to_string(),
+        };
+        let dst_str = match dest {
+            Some(o) => extract_token_str(o)?,
+            None => "RIGHT".to_string(),
+        };
+        let src_end = parse_list_end(&src_str).map_err(store_err_to_py)?;
+        let dst_end = parse_list_end(&dst_str).map_err(store_err_to_py)?;
+        let result = self
+            .store
+            .lmove_atomic(&src_key, &dst_key, src_end, dst_end)
+            .map_err(store_err_to_py)?;
+        let py_result = match result {
+            Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
+    }
+
+    /// RPOPLPUSH command matching redis.asyncio.Redis.rpoplpush(src, dst).
+    /// Atomic pop-from-tail-of-src + push-to-head-of-dst. Returns popped bytes or None.
+    #[pyo3(signature = (src, dst))]
+    fn rpoplpush<'py>(
+        &self,
+        py: Python<'py>,
+        src: &Bound<'py, PyAny>,
+        dst: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let src_key = extract_bytes(src)?;
+        let dst_key = extract_bytes(dst)?;
+        let result = self
+            .store
+            .rpoplpush_atomic(&src_key, &dst_key)
+            .map_err(store_err_to_py)?;
+        let py_result = match result {
+            Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+            None => py.None(),
+        };
+        resolved(py, py_result)
+    }
+
+    // -- Blocking List Commands ----
+
+    /// BLPOP command matching redis.asyncio.Redis.blpop(keys, timeout=0) signature.
+    /// Scans keys left-to-right; returns first (key, value) tuple found, or None on timeout.
+    /// timeout=None or 0 → block forever. timeout as float seconds (int auto-converts).
+    #[pyo3(signature = (keys, timeout=None))]
+    fn blpop<'py>(
+        &self,
+        py: Python<'py>,
+        keys: &Bound<'py, PyAny>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key_list = normalize_key_list(keys)?;
+        // P2-04: an empty key list previously entered a wait loop that could
+        // never be satisfied (timeout=0 → hang forever; finite → None). Real
+        // Redis treats blocking pops with no keys as a wrong-arity error.
+        if key_list.is_empty() {
+            return Err(make_response_error(
+                "ERR wrong number of arguments for 'blpop' command".to_string(),
+            ));
+        }
+        let block_ms = timeout_to_ms(timeout)?;
+        let store = self.store.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.list_notify();
+            let mut waiter = Box::pin(notify.notified());
+            waiter.as_mut().enable(); // arm permit BEFORE first poll
+
+            // First non-blocking attempt
+            if let Some((k, v)) = store.blpop_poll(&key_list).map_err(store_err_to_py)? {
+                return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                    let tup = pyo3::types::PyTuple::new(
+                        py,
+                        &[
+                            pyo3::types::PyBytes::new(py, &k).into_any(),
+                            pyo3::types::PyBytes::new(py, &v).into_any(),
+                        ],
+                    )?;
+                    Ok(tup.into_any().unbind())
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?;
+            }
+
+            // block_ms == 0 means block forever; otherwise enforce a deadline.
+            let deadline_opt = if block_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_ms))
+            };
+
+            loop {
+                // Graceful shutdown: return None so the future completes cleanly.
+                if store.is_shutdown() {
+                    return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?;
+                }
+
+                let remaining = match deadline_opt {
+                    Some(d) => {
+                        let r = d.saturating_duration_since(tokio::time::Instant::now());
+                        if r.is_zero() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(py.None())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        r
+                    }
+                    None => Duration::from_secs(3600),
+                };
+
+                tokio::select! {
+                    _ = waiter.as_mut() => {
+                        // Re-arm (Phase 11 critical fix)
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
+                        if let Some((k, v)) = store.blpop_poll(&key_list).map_err(store_err_to_py)? {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                let tup = pyo3::types::PyTuple::new(
+                                    py,
+                                    &[
+                                        pyo3::types::PyBytes::new(py, &k).into_any(),
+                                        pyo3::types::PyBytes::new(py, &v).into_any(),
+                                    ],
+                                )?;
+                                Ok(tup.into_any().unbind())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        // else: spurious wake / unrelated key — keep looping
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        if deadline_opt.is_some() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                                .ok_or_else(|| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                        "failed to attach to Python interpreter",
+                                    )
+                                })?;
+                        }
+                        // block=0: long slice expired; keep looping
+                    }
+                }
+            }
+        })
+    }
+
+    /// BRPOP command matching redis.asyncio.Redis.brpop(keys, timeout=0) signature.
+    /// Same as BLPOP but pops from the tail (right) of each list.
+    #[pyo3(signature = (keys, timeout=None))]
+    fn brpop<'py>(
+        &self,
+        py: Python<'py>,
+        keys: &Bound<'py, PyAny>,
+        timeout: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let key_list = normalize_key_list(keys)?;
+        // P2-04: empty key list → wrong-arity error (matches real Redis).
+        if key_list.is_empty() {
+            return Err(make_response_error(
+                "ERR wrong number of arguments for 'brpop' command".to_string(),
+            ));
+        }
+        let block_ms = timeout_to_ms(timeout)?;
+        let store = self.store.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.list_notify();
+            let mut waiter = Box::pin(notify.notified());
+            waiter.as_mut().enable();
+
+            if let Some((k, v)) = store.brpop_poll(&key_list).map_err(store_err_to_py)? {
+                return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                    let tup = pyo3::types::PyTuple::new(
+                        py,
+                        &[
+                            pyo3::types::PyBytes::new(py, &k).into_any(),
+                            pyo3::types::PyBytes::new(py, &v).into_any(),
+                        ],
+                    )?;
+                    Ok(tup.into_any().unbind())
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?;
+            }
+
+            let deadline_opt = if block_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_ms))
+            };
+
+            loop {
+                if store.is_shutdown() {
+                    return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?;
+                }
+
+                let remaining = match deadline_opt {
+                    Some(d) => {
+                        let r = d.saturating_duration_since(tokio::time::Instant::now());
+                        if r.is_zero() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(py.None())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        r
+                    }
+                    None => Duration::from_secs(3600),
+                };
+
+                tokio::select! {
+                    _ = waiter.as_mut() => {
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
+                        if let Some((k, v)) = store.brpop_poll(&key_list).map_err(store_err_to_py)? {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                let tup = pyo3::types::PyTuple::new(
+                                    py,
+                                    &[
+                                        pyo3::types::PyBytes::new(py, &k).into_any(),
+                                        pyo3::types::PyBytes::new(py, &v).into_any(),
+                                    ],
+                                )?;
+                                Ok(tup.into_any().unbind())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        if deadline_opt.is_some() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                                .ok_or_else(|| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                        "failed to attach to Python interpreter",
+                                    )
+                                })?;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
+    /// BLMOVE command matching redis.asyncio.Redis.blmove(first_list, second_list, timeout, src="LEFT", dest="RIGHT").
+    /// Atomic cross-key pop+push with blocking. Returns popped bytes or None on timeout.
+    /// `src` / `dest` accept str or bytes (P3: pre-encoded bytes from redis-py).
+    #[pyo3(signature = (first_list, second_list, timeout, src=None, dest=None))]
+    fn blmove<'py>(
+        &self,
+        py: Python<'py>,
+        first_list: &Bound<'py, PyAny>,
+        second_list: &Bound<'py, PyAny>,
+        timeout: f64,
+        src: Option<&Bound<'py, PyAny>>,
+        dest: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        use crate::commands::lists::parse_list_end;
+        let src_key = extract_bytes(first_list)?;
+        let dst_key = extract_bytes(second_list)?;
+        let src_str = match src {
+            Some(o) => extract_token_str(o)?,
+            None => "LEFT".to_string(),
+        };
+        let dst_str = match dest {
+            Some(o) => extract_token_str(o)?,
+            None => "RIGHT".to_string(),
+        };
+        let src_end = parse_list_end(&src_str).map_err(store_err_to_py)?;
+        let dst_end = parse_list_end(&dst_str).map_err(store_err_to_py)?;
+        let block_ms = timeout_to_ms(Some(timeout))?;
+        let store = self.store.clone();
+
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let notify = store.list_notify();
+            let mut waiter = Box::pin(notify.notified());
+            waiter.as_mut().enable();
+
+            if let Some(v) = store
+                .lmove_atomic(&src_key, &dst_key, src_end, dst_end)
+                .map_err(store_err_to_py)?
+            {
+                return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                    Ok(pyo3::types::PyBytes::new(py, &v).into_any().unbind())
+                })
+                .ok_or_else(|| {
+                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                        "failed to attach to Python interpreter",
+                    )
+                })?;
+            }
+
+            let deadline_opt = if block_ms == 0 {
+                None
+            } else {
+                Some(tokio::time::Instant::now() + Duration::from_millis(block_ms))
+            };
+
+            loop {
+                if store.is_shutdown() {
+                    return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                        .ok_or_else(|| {
+                            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                "failed to attach to Python interpreter",
+                            )
+                        })?;
+                }
+
+                let remaining = match deadline_opt {
+                    Some(d) => {
+                        let r = d.saturating_duration_since(tokio::time::Instant::now());
+                        if r.is_zero() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(py.None())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                        r
+                    }
+                    None => Duration::from_secs(3600),
+                };
+
+                tokio::select! {
+                    _ = waiter.as_mut() => {
+                        waiter.set(notify.notified());
+                        waiter.as_mut().enable();
+                        if let Some(v) = store.lmove_atomic(&src_key, &dst_key, src_end, dst_end).map_err(store_err_to_py)? {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> {
+                                Ok(pyo3::types::PyBytes::new(py, &v).into_any().unbind())
+                            })
+                            .ok_or_else(|| {
+                                PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                    "failed to attach to Python interpreter",
+                                )
+                            })?;
+                        }
+                    }
+                    _ = tokio::time::sleep(remaining) => {
+                        if deadline_opt.is_some() {
+                            return Python::try_attach(|py| -> PyResult<Py<PyAny>> { Ok(py.None()) })
+                                .ok_or_else(|| {
+                                    PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                                        "failed to attach to Python interpreter",
+                                    )
+                                })?;
+                        }
+                    }
+                }
+            }
+        })
+    }
+
     /// Execute a batch of pipeline commands in a single Rust call.
     /// Accepts a list of (method_name, args_tuple, kwargs_dict) tuples.
     /// Returns a list of results (with errors as exception objects at the failed position).
@@ -2234,7 +2936,7 @@ impl BurnerRedis {
             "get" => {
                 let name = &args.get_item(0)?;
                 let key = extract_bytes(name)?;
-                match self.store.get(&key) {
+                match self.store.get(&key).map_err(store_err_to_py)? {
                     Some(b) => Ok(PyBytes::new(py, &b).into_any().unbind()),
                     None => Ok(py.None()),
                 }
@@ -2901,6 +3603,222 @@ impl BurnerRedis {
                 }
                 dict.set_item("consumers", consumer_list)?;
                 Ok(dict.into_any().unbind())
+            }
+            // ---- List Commands (non-blocking) ----
+            "lpush" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let vals: Vec<Bytes> = args
+                    .iter()
+                    .skip(1)
+                    .map(|obj| extract_bytes(&obj))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.lpush(name_bytes, vals).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "rpush" => {
+                let name = &args.get_item(0)?;
+                let name_bytes = extract_bytes(name)?;
+                let vals: Vec<Bytes> = args
+                    .iter()
+                    .skip(1)
+                    .map(|obj| extract_bytes(&obj))
+                    .collect::<PyResult<Vec<_>>>()?;
+                let count = self.store.rpush(name_bytes, vals).map_err(store_err_to_py)?;
+                Ok(count.into_pyobject(py)?.into_any().unbind())
+            }
+            "lpop" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let count: Option<i64> = kwargs
+                    .get_item("count")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| v.extract::<i64>())
+                    .transpose()?;
+                let count_opt: Option<usize> = match count {
+                    None => None,
+                    Some(n) if n < 0 => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "count must be non-negative",
+                        ));
+                    }
+                    Some(n) => Some(n as usize),
+                };
+                let result = self.store.lpop(&key, count_opt).map_err(store_err_to_py)?;
+                let py_result = match result {
+                    crate::store::LPopResult::Nil => py.None(),
+                    crate::store::LPopResult::Single(b) => {
+                        PyBytes::new(py, &b).into_any().unbind()
+                    }
+                    crate::store::LPopResult::Array(vs) => {
+                        let py_list = pyo3::types::PyList::empty(py);
+                        for v in vs {
+                            py_list.append(PyBytes::new(py, &v))?;
+                        }
+                        py_list.into_any().unbind()
+                    }
+                };
+                Ok(py_result)
+            }
+            "rpop" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let count: Option<i64> = kwargs
+                    .get_item("count")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| v.extract::<i64>())
+                    .transpose()?;
+                let count_opt: Option<usize> = match count {
+                    None => None,
+                    Some(n) if n < 0 => {
+                        return Err(pyo3::exceptions::PyValueError::new_err(
+                            "count must be non-negative",
+                        ));
+                    }
+                    Some(n) => Some(n as usize),
+                };
+                let result = self.store.rpop(&key, count_opt).map_err(store_err_to_py)?;
+                let py_result = match result {
+                    crate::store::LPopResult::Nil => py.None(),
+                    crate::store::LPopResult::Single(b) => {
+                        PyBytes::new(py, &b).into_any().unbind()
+                    }
+                    crate::store::LPopResult::Array(vs) => {
+                        let py_list = pyo3::types::PyList::empty(py);
+                        for v in vs {
+                            py_list.append(PyBytes::new(py, &v))?;
+                        }
+                        py_list.into_any().unbind()
+                    }
+                };
+                Ok(py_result)
+            }
+            "lrange" => {
+                let name = &args.get_item(0)?;
+                let start: i64 = args.get_item(1)?.extract()?;
+                let end: i64 = args.get_item(2)?.extract()?;
+                let key = extract_bytes(name)?;
+                let elems = self.store.lrange(&key, start, end).map_err(store_err_to_py)?;
+                let py_list = pyo3::types::PyList::empty(py);
+                for v in elems {
+                    py_list.append(PyBytes::new(py, &v))?;
+                }
+                Ok(py_list.into_any().unbind())
+            }
+            "llen" => {
+                let name = &args.get_item(0)?;
+                let key = extract_bytes(name)?;
+                let n = self.store.llen(&key).map_err(store_err_to_py)?;
+                Ok(n.into_pyobject(py)?.into_any().unbind())
+            }
+            "lindex" => {
+                let name = &args.get_item(0)?;
+                let index: i64 = args.get_item(1)?.extract()?;
+                let key = extract_bytes(name)?;
+                let result = self.store.lindex(&key, index).map_err(store_err_to_py)?;
+                let py_result = match result {
+                    Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+                    None => py.None(),
+                };
+                Ok(py_result)
+            }
+            "linsert" => {
+                // redis-py signature: linsert(name, where, refvalue, value)
+                // P3: `where` accepts str OR bytes (pre-encoded by redis-py wrappers).
+                let name = &args.get_item(0)?;
+                let where_str = extract_token_str(&args.get_item(1)?)?;
+                let refvalue = &args.get_item(2)?;
+                let value = &args.get_item(3)?;
+                let key = extract_bytes(name)?;
+                let pivot = extract_bytes(refvalue)?;
+                let val = extract_bytes(value)?;
+                let position = crate::commands::lists::parse_linsert_where(&where_str)
+                    .map_err(store_err_to_py)?;
+                let n = self
+                    .store
+                    .linsert(&key, position, &pivot, val)
+                    .map_err(store_err_to_py)?;
+                Ok(n.into_pyobject(py)?.into_any().unbind())
+            }
+            "lrem" => {
+                let name = &args.get_item(0)?;
+                let count: i64 = args.get_item(1)?.extract()?;
+                let value = &args.get_item(2)?;
+                let key = extract_bytes(name)?;
+                let val = extract_bytes(value)?;
+                let n = self.store.lrem(&key, count, val).map_err(store_err_to_py)?;
+                Ok(n.into_pyobject(py)?.into_any().unbind())
+            }
+            "lset" => {
+                let name = &args.get_item(0)?;
+                let index: i64 = args.get_item(1)?.extract()?;
+                let value = &args.get_item(2)?;
+                let key = extract_bytes(name)?;
+                let val = extract_bytes(value)?;
+                self.store.lset(&key, index, val).map_err(store_err_to_py)?;
+                Ok(pyo3::types::PyBool::new(py, true)
+                    .to_owned()
+                    .into_any()
+                    .unbind())
+            }
+            "ltrim" => {
+                let name = &args.get_item(0)?;
+                let start: i64 = args.get_item(1)?.extract()?;
+                let end: i64 = args.get_item(2)?.extract()?;
+                let key = extract_bytes(name)?;
+                self.store.ltrim(&key, start, end).map_err(store_err_to_py)?;
+                Ok(pyo3::types::PyBool::new(py, true)
+                    .to_owned()
+                    .into_any()
+                    .unbind())
+            }
+            "lmove" => {
+                // Pipeline stub buffers (first_list, second_list) positional + {"src", "dest"} kwargs.
+                // P3: `src` / `dest` accept str OR bytes (pre-encoded by redis-py wrappers).
+                let first = &args.get_item(0)?;
+                let second = &args.get_item(1)?;
+                let src_str: String = kwargs
+                    .get_item("src")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| extract_token_str(&v))
+                    .transpose()?
+                    .unwrap_or_else(|| "LEFT".to_string());
+                let dest_str: String = kwargs
+                    .get_item("dest")?
+                    .and_then(|v| if v.is_none() { None } else { Some(v) })
+                    .map(|v| extract_token_str(&v))
+                    .transpose()?
+                    .unwrap_or_else(|| "RIGHT".to_string());
+                let src_key = extract_bytes(first)?;
+                let dst_key = extract_bytes(second)?;
+                let src_end = crate::commands::lists::parse_list_end(&src_str)
+                    .map_err(store_err_to_py)?;
+                let dst_end = crate::commands::lists::parse_list_end(&dest_str)
+                    .map_err(store_err_to_py)?;
+                let result = self
+                    .store
+                    .lmove_atomic(&src_key, &dst_key, src_end, dst_end)
+                    .map_err(store_err_to_py)?;
+                let py_result = match result {
+                    Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+                    None => py.None(),
+                };
+                Ok(py_result)
+            }
+            "rpoplpush" => {
+                let src = &args.get_item(0)?;
+                let dst = &args.get_item(1)?;
+                let src_key = extract_bytes(src)?;
+                let dst_key = extract_bytes(dst)?;
+                let result = self
+                    .store
+                    .rpoplpush_atomic(&src_key, &dst_key)
+                    .map_err(store_err_to_py)?;
+                let py_result = match result {
+                    Some(b) => PyBytes::new(py, &b).into_any().unbind(),
+                    None => py.None(),
+                };
+                Ok(py_result)
             }
             _ => {
                 Err(pyo3::exceptions::PyException::new_err(format!("Unknown pipeline command: {}", method)))

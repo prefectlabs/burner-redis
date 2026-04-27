@@ -18,6 +18,28 @@ pub fn extract_bytes(obj: &Bound<'_, PyAny>) -> PyResult<Bytes> {
     }
 }
 
+/// Extract a list-command option token (e.g. "BEFORE"/"AFTER", "LEFT"/"RIGHT")
+/// from a Python object that is either str or bytes. Bytes are decoded as UTF-8.
+/// On invalid UTF-8 we return a (lossy) string that the downstream
+/// case-insensitive parsers (parse_linsert_where / parse_list_end) will reject
+/// via StoreError::Syntax → ResponseError, matching real-Redis semantics for
+/// unknown option tokens.
+pub fn extract_token_str(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    if let Ok(s) = obj.extract::<String>() {
+        return Ok(s);
+    }
+    if let Ok(b) = obj.extract::<Vec<u8>>() {
+        return Ok(String::from_utf8(b).unwrap_or_else(|e| {
+            // Use the lossy form so the parser sees *something* it can echo back
+            // in its error message; the parser will still reject it as unknown.
+            String::from_utf8_lossy(e.as_bytes()).into_owned()
+        }));
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(
+        "expected str or bytes",
+    ))
+}
+
 /// Extract an expiration value from a Python object.
 /// Accepts int (seconds or milliseconds) or datetime.timedelta.
 /// Returns Duration.
