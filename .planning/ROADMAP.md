@@ -229,7 +229,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 12. Drop-in Replacement | 2/2 | Complete    | 2026-04-14 |
 | 13. Publish burner-redis to conda-forge | 2/3 | Complete    | 2026-04-24 |
 | 14. List data type | 3/3 | Complete    | 2026-04-26 |
-| 15. Close v0.1.6 wiring and coverage gaps | 0/1 | Not started | - |
+| 15. Close v0.1.6 wiring and coverage gaps | 1/1 | Complete    | 2026-04-27 |
 
 ### Phase 13: Publish burner-redis to conda-forge
 
@@ -271,7 +271,7 @@ Plans:
   1. `EVALSHA` on an unknown SHA raises `redis.exceptions.NoScriptError` (with fallback to `burner_redis.NoScriptError` when redis is not installed); `tests/test_scripting.py` asserts `pytest.raises(NoScriptError)` instead of `Exception`
   2. `Pipeline.zrangestore()` and `Pipeline.zcount()` execute correctly through `dispatch_pipeline_command` and produce the same results as their standalone pymethods
   3. `ValueData::List` round-trips through persistence: a populated list saved and reloaded preserves order and contents (covered by both a Rust unit test in `test_round_trip_all_types` and a Python `test_list_persistence`)
-**Plans:** 0/1 plans
+**Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 15-01-PLAN.md — NoScriptError mapping (src/lib.rs + tests/test_scripting.py), pipeline zrangestore/zcount regression tests (dispatch arms already wired in commit de9d259 at src/lib.rs:3110/3146), List persistence round-trip tests (src/persistence.rs unit test + tests/test_persistence.py)
+- [x] 15-01-PLAN.md — NoScriptError mapping (src/lib.rs + tests/test_scripting.py), pipeline zrangestore/zcount regression tests (dispatch arms already wired in commit de9d259 at src/lib.rs:3110/3146), List persistence round-trip tests (src/persistence.rs unit test + tests/test_persistence.py)
