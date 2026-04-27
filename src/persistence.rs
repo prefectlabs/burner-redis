@@ -147,6 +147,18 @@ mod tests {
                 .unwrap();
         }
 
+        // Add a list (LIST-01..16 round-trip coverage; closes ISSUE-3 from v0.1.6 audit)
+        store
+            .rpush(
+                Bytes::from("list_key"),
+                vec![
+                    Bytes::from("alpha"),
+                    Bytes::from("bravo"),
+                    Bytes::from("charlie"),
+                ],
+            )
+            .unwrap();
+
         // Load a script into the cache
         let sha = store.script_load("return 1");
 
@@ -226,6 +238,15 @@ mod tests {
         // Verify stream
         let xlen = new_store.xlen(&Bytes::from("stream_key")).unwrap();
         assert_eq!(xlen, 1);
+
+        // Verify list round-tripped with order preserved
+        let lrange = new_store
+            .lrange(&Bytes::from("list_key"), 0, -1)
+            .unwrap();
+        assert_eq!(lrange.len(), 3);
+        assert_eq!(lrange[0], Bytes::from("alpha"));
+        assert_eq!(lrange[1], Bytes::from("bravo"));
+        assert_eq!(lrange[2], Bytes::from("charlie"));
 
         // Verify script cache
         let exists = new_store.script_exists(&[sha]);

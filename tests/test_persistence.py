@@ -34,6 +34,25 @@ async def test_save_and_restore(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_list_persistence(tmp_path):
+    """PERS-01..04 / LIST-01..16 / Phase 15 ISSUE-3 regression: ValueData::List round-trips
+    through save/restore with order preserved.
+    """
+    client = BurnerRedis(persistence_path=tmp_path)
+    await client.rpush("list1", "a", "b", "c")
+    await client.save()
+
+    # New instance with the same persistence_path should restore the list.
+    client2 = BurnerRedis(persistence_path=tmp_path)
+    result = await client2.lrange("list1", 0, -1)
+    assert result == [b"a", b"b", b"c"]
+
+    # Verify length is also correct.
+    length = await client2.llen("list1")
+    assert length == 3
+
+
+@pytest.mark.asyncio
 async def test_save_with_explicit_path(tmp_path):
     """PERS-01: save() with explicit path argument."""
     client = BurnerRedis()

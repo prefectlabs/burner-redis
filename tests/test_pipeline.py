@@ -87,6 +87,49 @@ async def test_pipeline_sorted_set_commands(r):
     assert results[1] == [b"a", b"b", b"c"]  # zrange returns ordered list
 
 
+async def test_pipeline_zrangestore(r):
+    """ZSET-04 / Phase 15 ISSUE-2 regression: Pipeline.zrangestore dispatches and produces
+    the same result as the standalone BurnerRedis.zrangestore pymethod.
+    """
+    # Seed source via standalone command, then run zrangestore through the pipeline.
+    await r.zadd("src_zset", {"a": 1.0, "b": 2.0, "c": 3.0})
+
+    pipe = r.pipeline()
+    pipe.zrangestore("dest_zset", "src_zset", 0, 10)
+    pipe.zrange("dest_zset", 0, -1)
+    results = await pipe.execute()
+
+    assert results[0] == 3  # Pipeline.zrangestore returns the count of stored members
+    assert results[1] == [b"a", b"b", b"c"]
+
+    # Cross-check against the standalone pymethod with a fresh destination key.
+    standalone_count = await r.zrangestore("dest_zset_standalone", "src_zset", 0, 10)
+    assert standalone_count == results[0]
+    standalone_members = await r.zrange("dest_zset_standalone", 0, -1)
+    assert standalone_members == results[1]
+
+
+async def test_pipeline_zcount(r):
+    """ZSET-06 / Phase 15 ISSUE-2 regression: Pipeline.zcount dispatches and produces
+    the same result as the standalone BurnerRedis.zcount pymethod.
+    """
+    await r.zadd("zset", {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0})
+
+    pipe = r.pipeline()
+    pipe.zcount("zset", 2.0, 3.0)
+    pipe.zcount("zset", "-inf", "+inf")
+    results = await pipe.execute()
+
+    assert results[0] == 2  # b and c are in [2.0, 3.0]
+    assert results[1] == 4  # all four members
+
+    # Cross-check against the standalone pymethod.
+    standalone_inclusive = await r.zcount("zset", 2.0, 3.0)
+    standalone_all = await r.zcount("zset", "-inf", "+inf")
+    assert standalone_inclusive == results[0]
+    assert standalone_all == results[1]
+
+
 async def test_pipeline_stream_commands(r):
     """PIPE-01: Pipeline xadd, xlen returns correct results."""
     pipe = r.pipeline()

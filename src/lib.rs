@@ -95,6 +95,35 @@ fn make_response_error(msg: String) -> PyErr {
     }
 }
 
+/// Create a Redis-compatible NoScriptError raised by EVALSHA on unknown SHAs.
+/// Uses burner_redis.NoScriptError if available (which subclasses
+/// redis.exceptions.NoScriptError when redis is installed, so callers using either
+/// `except redis.exceptions.NoScriptError` or `except burner_redis.NoScriptError`
+/// catch the same exception), falls back to redis.exceptions.NoScriptError directly,
+/// then to Python's Exception.
+fn make_noscript_error(msg: String) -> PyErr {
+    match Python::try_attach(|py| -> PyResult<PyErr> {
+        if let Ok(burner_mod) = py.import("burner_redis") {
+            if let Ok(noscript_type) = burner_mod.getattr("NoScriptError") {
+                if let Ok(exc_type) = noscript_type.downcast::<pyo3::types::PyType>() {
+                    return Ok(PyErr::from_type(exc_type.clone(), msg.clone()));
+                }
+            }
+        }
+        if let Ok(redis_exc) = py.import("redis.exceptions") {
+            if let Ok(noscript_type) = redis_exc.getattr("NoScriptError") {
+                if let Ok(exc_type) = noscript_type.downcast::<pyo3::types::PyType>() {
+                    return Ok(PyErr::from_type(exc_type.clone(), msg.clone()));
+                }
+            }
+        }
+        Ok(pyo3::exceptions::PyException::new_err(msg.clone()))
+    }) {
+        Some(Ok(err)) => err,
+        _ => pyo3::exceptions::PyException::new_err(msg),
+    }
+}
+
 /// Convert a StoreError into a Python exception with the Redis-compatible error message.
 fn store_err_to_py(e: StoreError) -> PyErr {
     make_response_error(e.to_string())
@@ -1857,7 +1886,13 @@ impl BurnerRedis {
                 let py_val = redis_value_to_py(py, val)?;
                 resolved(py, py_val)
             }
-            Err(msg) => Err(make_response_error(msg)),
+            Err(msg) => {
+                if msg.starts_with("NOSCRIPT") {
+                    Err(make_noscript_error(msg))
+                } else {
+                    Err(make_response_error(msg))
+                }
+            }
         }
     }
 

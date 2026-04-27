@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v0.1.6
 milestone_name: wiring and coverage gaps
-status: completed
+status: executing
 stopped_at: Phase 15 context gathered
-last_updated: "2026-04-27T15:53:24.193Z"
-last_activity: "2026-04-26 - Completed quick task 260425-u84: Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE"
+last_updated: "2026-04-27T16:14:30.486Z"
+last_activity: 2026-04-27 -- Phase 15 Plan 01 complete: closed v0.1.6 audit ISSUE-1/2/3
 progress:
   total_phases: 15
-  completed_phases: 13
-  total_plans: 31
-  completed_plans: 30
+  completed_phases: 14
+  total_plans: 32
+  completed_plans: 31
   percent: 97
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-10)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase --phase — 14
+**Current focus:** Phase 15 — close-v0.1.6-wiring-and-coverage-gaps
 
 ## Current Position
 
-Phase: 14
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-04-26 - Completed quick task 260425-u84: Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE
+Phase: 15 (close-v0.1.6-wiring-and-coverage-gaps) — COMPLETE
+Plan: 1 of 1
+Status: Phase 15 plan 01 complete; ready for phase verification / milestone close
+Last activity: 2026-04-27 -- Phase 15 Plan 01 complete: closed v0.1.6 audit ISSUE-1/2/3
 
 Progress: [██████████] 97%
 
@@ -214,4 +214,4 @@ Stopped at: Phase 15 context gathered
 Resume file: --resume-file
 Resume point: Task 2 (checkpoint:human-verify, blocking) — verify staged_recipes_pr_url recorded in .planning/notes/phase-13-feedstock-submission.md frontmatter, then continue to Task 3 (CI iteration) + Task 4 (post-merge verify + SUMMARY)
 
-**Planned Phase:** 14 (add-support-for-the-redis-list-data-type-required-commands-l) — 3 plans — 2026-04-24T20:06:26.408Z
+**Planned Phase:** 15 (close-v0.1.6-wiring-and-coverage-gaps) — 1 plans — 2026-04-27T16:06:00.127Z

@@ -5,7 +5,7 @@ Covers requirements: LUA-01, LUA-02, LUA-03, LUA-04, LUA-05.
 import hashlib
 
 import pytest
-from burner_redis import BurnerRedis
+from burner_redis import BurnerRedis, NoScriptError
 
 
 # --- LUA-01: EVAL with KEYS and ARGV ---
@@ -81,8 +81,8 @@ async def test_evalsha_after_eval(r):
 
 
 async def test_evalsha_unknown_sha_raises(r):
-    """LUA-02: EVALSHA with unknown SHA raises NOSCRIPT error."""
-    with pytest.raises(Exception, match="NOSCRIPT"):
+    """LUA-02: EVALSHA with unknown SHA raises NoScriptError."""
+    with pytest.raises(NoScriptError):
         await r.evalsha("deadbeef" * 5, 0)
 
 
