@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v0.1.6
 milestone_name: wiring and coverage gaps
 status: milestone_complete
-stopped_at: Phase 15 context gathered
-last_updated: "2026-04-27T16:14:30.486Z"
-last_activity: 2026-04-27 -- Phase 15 Plan 01 complete: closed v0.1.6 audit ISSUE-1/2/3
+stopped_at: v0.1.6 milestone shipped
+last_updated: "2026-04-27T16:45:00.000Z"
+last_activity: 2026-04-27 -- v0.1.6 milestone archived (15 phases, 31 plans, 25 quick tasks); ready for /gsd-new-milestone
 progress:
   total_phases: 15
   completed_phases: 15
@@ -18,19 +18,61 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-04-10)
+See: .planning/PROJECT.md (updated 2026-04-27)
 
 **Core value:** A self-hosted Prefect server can start, run flows, and manage state using this library instead of an external Redis server
-**Current focus:** Phase 15 — close-v0.1.6-wiring-and-coverage-gaps
+**Current focus:** Planning next milestone — run `/gsd-new-milestone`
 
 ## Current Position
 
-Phase: 15
-Plan: Not started
-Status: Milestone complete
-Last activity: 2026-04-27
+Phase: — (no active phase; v0.1.6 archived)
+Plan: —
+Status: Milestone complete; ready to plan next milestone
+Last activity: 2026-04-27 -- v0.1.6 milestone archived
 
-Progress: [██████████] 97%
+Progress: [██████████] 100% (v0.1.6)
+
+## Deferred Items
+
+Items acknowledged and deferred at v0.1.6 milestone close on 2026-04-27:
+
+| Category | Item | Status |
+|----------|------|--------|
+| verification_gap | Phase 10: 10-VERIFICATION.md | human_needed (already addressed per audit; PUBSUB-01..12 entries verified by current REQUIREMENTS.md state) |
+| quick_task | 260411-b8i-add-integration-tests-that-simulate-how- | scanner-missing (committed; see STATE.md Quick Tasks Completed table) |
+| quick_task | 260411-ipj-run-integration-tests-in-ci-on-merge-to- | scanner-missing (committed) |
+| quick_task | 260413-vbg-update-the-integration-tests-that-ensure | scanner-missing (committed) |
+| quick_task | 260414-9ub-update-pydocket-to-use-burner-redis-and- | scanner-missing (committed) |
+| quick_task | 260414-ap2-implement-xpending-range | scanner-missing (committed) |
+| quick_task | 260414-tgx-fix-3-redis-py-compatibility-gaps-causin | scanner-missing (committed) |
+| quick_task | 260415-an2-eliminate-async-overhead-with-sync-fast- | scanner-missing (committed) |
+| quick_task | 260415-gtu-add-mit-license-file-and-set-up-dynamic- | scanner-missing (committed) |
+| quick_task | 260415-hb8-update-pypi-publishing-to-use-trusted-pu | scanner-missing (committed) |
+| quick_task | 260415-mn4-fix-asyncio-wait-for-cancellation-bug-in | scanner-missing (committed) |
+| quick_task | 260415-tc2-add-pydocket-test-suite-ci-workflow-on-m | scanner-missing (committed) |
+| quick_task | 260415-u8k-run-the-pydocket-tests-against-all-suppo | scanner-missing (committed) |
+| quick_task | 260415-us1-add-python-version-matrix-to-pydocket-an | scanner-missing (committed) |
+| quick_task | 260415-vor-fix-three-redis-py-compat-issues-xreadgr | scanner-missing (committed) |
+| quick_task | 260416-axy-pipeline-execute-raise-on-error-true-by- | scanner-missing (committed) |
+| quick_task | 260416-cea-fix-three-redis-py-stream-compat-gaps-xr | scanner-missing (committed) |
+| quick_task | 260416-gqd-add-ci-guard-against-accidental-hard-dep | scanner-missing (committed) |
+| quick_task | 260416-hbn-add-test-passing-gates-to-the-release-wo | scanner-missing (committed) |
+| quick_task | 260416-k68-add-tag-cargo-toml-version-guard-to-gith | scanner-missing (committed) |
+| quick_task | 260417-mj8-cut-release-0-1-2-bump-cargo-toml-cargo- | scanner-missing (committed) |
+| quick_task | 260425-ftl-fix-p3-accept-bytes-for-list-option-toke | scanner-missing (committed) |
+| quick_task | 260425-r3r-fix-p2-wrap-blocking-list-methods-blpop- | scanner-missing (committed) |
+| quick_task | 260425-sjc-fix-p2-normalize-key-list-rejects-single | scanner-missing (committed) |
+| quick_task | 260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p | scanner-missing (committed) |
+| quick_task | 260425-u84-fix-p2-get-on-non-string-keys-list-hash- | scanner-missing (committed) |
+
+Note: All 25 quick tasks listed are completed (commit hashes recorded in `.planning/STATE.md` Quick Tasks Completed table). The audit-open scanner flagged them as `missing` due to absent frontmatter on the legacy quick-task directories — false positive, no action required.
+
+In addition, the v0.1.6 milestone audit (`milestones/v0.1.6-MILESTONE-AUDIT.md`) accepted these as deferred quality-of-life work for future milestones:
+- VERIFICATION.md backfill for Phases 1–9 + 13 (procedural)
+- Complete VALIDATION.md drafts (Phases 1, 10, 11, 12, 14) — Nyquist coverage
+- Plan 13-03 staged-recipes PR submission (pending external developer action on conda-forge fork)
+- ZRANGESTORE/ZCOUNT and 5 stream commands not in Lua dispatch (consistent with real Redis but undocumented)
+- PyPI version-vs-tag drift (PyPI v0.1.5 vs tag v0.1.6)
 
 ## Performance Metrics
 
