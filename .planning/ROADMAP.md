@@ -228,6 +228,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4 -> 5 -> 6 -> 7 -> 8 -> 9 -> 10
 | 11. Pydocket Compatibility | 2/2 | Complete    | 2026-04-14 |
 | 12. Drop-in Replacement | 2/2 | Complete    | 2026-04-14 |
 | 13. Publish burner-redis to conda-forge | 2/3 | Complete    | 2026-04-24 |
+| 14. List data type | 3/3 | Complete    | 2026-04-26 |
+| 15. Close v0.1.6 wiring and coverage gaps | 0/1 | Not started | - |
 
 ### Phase 13: Publish burner-redis to conda-forge
 
@@ -258,3 +260,18 @@ Plans:
 - [x] 14-01-PLAN.md — Rust engine: ValueData::List variant, list_notify field, 13 non-blocking Store methods + blpop_poll/brpop_poll/lmove_atomic helpers, src/commands/lists.rs helpers, REQUIREMENTS.md update adding LIST-01..LIST-16 (Wave 1)
 - [x] 14-02-PLAN.md — Python surface: 13 non-blocking #[pymethods], 3 blocking #[pymethods] (BRPOP/BLPOP/BLMOVE via future_into_py + tokio::select! + notify re-arm), value-coercion monkey-patches, tests/test_lists.py covering LIST-01..LIST-15 (Wave 2)
 - [x] 14-03-PLAN.md — Lua + pipeline integration: had_list_mutation flag + 13 non-blocking + 3 blocking-reject arms in scripting.rs, 13 non-blocking arms in dispatch_pipeline_command, 16 Python pipeline stubs, Python-side blocking-aware Pipeline.execute() branch, LIST-16 tests, REQUIREMENTS.md finalize (Wave 3)
+
+### Phase 15: Close v0.1.6 wiring and coverage gaps
+
+**Goal:** `NoScriptError` is raised on EVALSHA misses, `Pipeline.zrangestore`/`Pipeline.zcount` dispatch correctly, and `ValueData::List` has persistence round-trip coverage — closing the three minor wiring/coverage gaps surfaced by the v0.1.6 milestone audit (`.planning/v0.1.6-MILESTONE-AUDIT.md`, status `tech_debt`).
+**Requirements**: D-08 (re-verify), ZSET-04 (re-verify), ZSET-06 (re-verify), PERS-01..04 (re-verify), LIST-01..16 (re-verify)
+**Depends on:** Phase 14
+**Gap Closure:** Closes ISSUE-1, ISSUE-2, ISSUE-3 + EVALSHA→NoScriptError flow from milestone audit
+**Success Criteria** (what must be TRUE):
+  1. `EVALSHA` on an unknown SHA raises `redis.exceptions.NoScriptError` (with fallback to `burner_redis.NoScriptError` when redis is not installed); `tests/test_scripting.py` asserts `pytest.raises(NoScriptError)` instead of `Exception`
+  2. `Pipeline.zrangestore()` and `Pipeline.zcount()` execute correctly through `dispatch_pipeline_command` and produce the same results as their standalone pymethods
+  3. `ValueData::List` round-trips through persistence: a populated list saved and reloaded preserves order and contents (covered by both a Rust unit test in `test_round_trip_all_types` and a Python `test_list_persistence`)
+**Plans:** 0/1 plans
+
+Plans:
+- [ ] 15-01-PLAN.md — NoScriptError mapping (src/lib.rs + tests/test_scripting.py), pipeline zrangestore/zcount dispatch arms (src/lib.rs:3823-3824), List persistence round-trip tests (src/persistence.rs unit test + tests/test_persistence.py)
