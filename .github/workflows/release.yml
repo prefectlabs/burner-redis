@@ -51,19 +51,36 @@ jobs:
             status=""
             conclusion=""
             url=""
+            run_found=false
             for i in $(seq 1 40); do
+              # Fallback: GitHub's `?head_sha=` filter on /actions/runs is unreliable
+              # (sometimes returns total_count=0 even for runs that exist). Use the
+              # gh CLI shorthand first, then fall back to a per_page=20 + jq filter
+              # against the last 20 runs to recover from indexing hiccups.
               run=$(gh run list \
                 -R "$GITHUB_REPOSITORY" \
                 --workflow="$wf" \
                 --commit="$GITHUB_SHA" \
                 --limit=1 \
                 --json status,conclusion,url \
-                -q '.[0]')
+                -q '.[0]' 2>/dev/null || echo "")
               if [ -z "$run" ] || [ "$run" = "null" ]; then
-                echo "ERROR: no $wf run found for $GITHUB_SHA"
-                echo "       was this commit pushed to main before tagging?"
-                exit 1
+                # Workflow file path lookup (per_page=20 covers our typical traffic)
+                wf_path=".github/workflows/${wf}"
+                run=$(gh api \
+                  "repos/${GITHUB_REPOSITORY}/actions/runs?per_page=20" \
+                  --jq ".workflow_runs[] | select(.head_sha == \"${GITHUB_SHA}\" and .path == \"${wf_path}\") | {status, conclusion, url: .html_url}" \
+                  2>/dev/null | head -1)
               fi
+              if [ -z "$run" ] || [ "$run" = "null" ]; then
+                # Still not indexed — keep polling instead of failing immediately.
+                # This handles GitHub's head_sha filter latency without dropping the
+                # safety check (the loop has a 10-minute ceiling via the i<=40 bound).
+                echo "  $wf: no run indexed yet for $GITHUB_SHA — waiting 15s... ($i/40)"
+                sleep 15
+                continue
+              fi
+              run_found=true
               status=$(echo "$run" | jq -r .status)
               conclusion=$(echo "$run" | jq -r .conclusion)
               url=$(echo "$run" | jq -r .url)
@@ -78,6 +95,11 @@ jobs:
               echo "  $wf status=$status — waiting 15s... ($i/40)"
               sleep 15
             done
+            if [ "$run_found" = "false" ]; then
+              echo "ERROR: no $wf run found for $GITHUB_SHA after 10 minutes of polling"
+              echo "       was this commit pushed to main before tagging?"
+              exit 1
+            fi
             if [ "$status" != "completed" ]; then
               echo "ERROR: $wf did not complete within 10 minutes on $GITHUB_SHA (last status=$status, see $url)"
               exit 1
