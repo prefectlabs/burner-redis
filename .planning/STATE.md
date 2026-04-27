@@ -249,6 +249,7 @@ None yet.
 | 260425-sjc | Fix P2: normalize_key_list rejects single memoryview/bytearray keys (BLPOP/BRPOP) | 2026-04-26 | 1b25790 | [260425-sjc-fix-p2-normalize-key-list-rejects-single](./quick/260425-sjc-fix-p2-normalize-key-list-rejects-single/) |
 | 260425-tlk | Fix P2: LREM count i64::MIN overflows in parse_lrem_count (src/commands/lists.rs:69) | 2026-04-26 | 51a0451 | [260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p](./quick/260425-tlk-fix-p2-lrem-count-i64-min-overflows-in-p/) |
 | 260425-u84 | Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE | 2026-04-26 | acdae17 | [260425-u84-fix-p2-get-on-non-string-keys-list-hash-](./quick/260425-u84-fix-p2-get-on-non-string-keys-list-hash-/) |
+| 260427-fix-release-gate-retry-on-empty | Fix release-gate `gh run list` empty-result race; add `?per_page=20` jq fallback for unreliable `?head_sha=` API filter — unblocked v0.1.6 release | 2026-04-27 | 2776590 | [260427-fix-release-gate-retry-on-empty](./quick/260427-fix-release-gate-retry-on-empty/) |
 
 ## Session Continuity
 
