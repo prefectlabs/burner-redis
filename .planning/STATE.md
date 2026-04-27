@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: milestone_complete
-stopped_at: Completed 14-03-PLAN.md (Phase 14 complete)
-last_updated: "2026-04-24T21:14:56.738Z"
-last_activity: 2026-04-24
+milestone: v0.1.6
+milestone_name: wiring and coverage gaps
+status: completed
+stopped_at: Phase 15 context gathered
+last_updated: "2026-04-27T15:53:24.193Z"
+last_activity: "2026-04-26 - Completed quick task 260425-u84: Fix P2: GET on non-string keys (list/hash/set/zset/stream) silently returns None instead of WRONGTYPE"
 progress:
-  total_phases: 14
-  completed_phases: 14
+  total_phases: 15
+  completed_phases: 13
   total_plans: 31
   completed_plans: 30
-  percent: 100
+  percent: 97
 ---
 
 # Project State
@@ -209,9 +209,9 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-24T21:14:56.733Z
-Stopped at: Completed 14-03-PLAN.md (Phase 14 complete)
-Resume file: None
+Last session: --stopped-at
+Stopped at: Phase 15 context gathered
+Resume file: --resume-file
 Resume point: Task 2 (checkpoint:human-verify, blocking) — verify staged_recipes_pr_url recorded in .planning/notes/phase-13-feedstock-submission.md frontmatter, then continue to Task 3 (CI iteration) + Task 4 (post-merge verify + SUMMARY)
 
 **Planned Phase:** 14 (add-support-for-the-redis-list-data-type-required-commands-l) — 3 plans — 2026-04-24T20:06:26.408Z
