@@ -274,4 +274,4 @@ Plans:
 **Plans:** 0/1 plans
 
 Plans:
-- [ ] 15-01-PLAN.md — NoScriptError mapping (src/lib.rs + tests/test_scripting.py), pipeline zrangestore/zcount dispatch arms (src/lib.rs:3823-3824), List persistence round-trip tests (src/persistence.rs unit test + tests/test_persistence.py)
+- [ ] 15-01-PLAN.md — NoScriptError mapping (src/lib.rs + tests/test_scripting.py), pipeline zrangestore/zcount regression tests (dispatch arms already wired in commit de9d259 at src/lib.rs:3110/3146), List persistence round-trip tests (src/persistence.rs unit test + tests/test_persistence.py)
