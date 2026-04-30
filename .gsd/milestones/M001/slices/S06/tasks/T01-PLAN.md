@@ -1,0 +1,432 @@
+# T01: Implement the Lua scripting engine in Rust: embed mlua (Lua 5.
+
+**Slice:** S06 — **Milestone:** M001
+
+## Description
+
+Implement the Lua scripting engine in Rust: embed mlua (Lua 5.4), build the redis.call()/redis.pcall() dispatch table routing to all existing Store commands, implement script caching with SHA1, and expose eval/evalsha/script_load/script_exists on the Store.
+
+Purpose: Prefect uses Lua scripts for atomic multi-key operations (lease acquisition, event ordering). The scripting engine must execute Lua with full access to all Redis commands atomically under the write lock.
+
+Output: `src/scripting.rs` module with LuaEngine, Store methods for eval/evalsha/script_load/script_exists, updated Cargo.toml with mlua and sha1 dependencies.
+
+## Legacy Source
+
+---
+phase: 06-lua-scripting
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - Cargo.toml
+  - src/scripting.rs
+  - src/store.rs
+  - src/lib.rs
+autonomous: true
+requirements:
+  - LUA-03
+  - LUA-04
+  - LUA-05
+
+must_haves:
+  truths:
+    - "Lua scripts can call redis.call() to execute any supported Redis command and receive correct return values"
+    - "Lua scripts can call redis.pcall() which returns error tables instead of raising on failure"
+    - "Type conversion between Lua and Redis types is correct: string<->bulk, number<->integer, nil<->false, table<->array, err table<->error"
+    - "Scripts are cached by SHA1 hash and can be looked up via script_exists"
+    - "EVAL and EVALSHA execute Lua scripts atomically while holding the Store write lock"
+  artifacts:
+    - path: "Cargo.toml"
+      provides: "mlua and sha1 dependencies"
+      contains: "mlua"
+    - path: "src/scripting.rs"
+      provides: "LuaEngine with eval, script_load, script_exists, and redis.call()/redis.pcall() dispatch"
+      contains: "pub struct LuaEngine"
+    - path: "src/store.rs"
+      provides: "scripts HashMap field and script_load/script_exists/eval/evalsha methods"
+      contains: "scripts:"
+    - path: "src/lib.rs"
+      provides: "mod scripting declaration"
+      contains: "mod scripting"
+  key_links:
+    - from: "src/scripting.rs"
+      to: "src/store.rs"
+      via: "LuaEngine dispatch_command calls Store methods directly on write-locked data"
+      pattern: "dispatch_command"
+    - from: "src/store.rs"
+      to: "src/scripting.rs"
+      via: "Store::eval/evalsha create LuaEngine and execute scripts"
+      pattern: "LuaEngine"
+---
+
+<objective>
+Implement the Lua scripting engine in Rust: embed mlua (Lua 5.4), build the redis.call()/redis.pcall() dispatch table routing to all existing Store commands, implement script caching with SHA1, and expose eval/evalsha/script_load/script_exists on the Store.
+
+Purpose: Prefect uses Lua scripts for atomic multi-key operations (lease acquisition, event ordering). The scripting engine must execute Lua with full access to all Redis commands atomically under the write lock.
+
+Output: `src/scripting.rs` module with LuaEngine, Store methods for eval/evalsha/script_load/script_exists, updated Cargo.toml with mlua and sha1 dependencies.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@src/store.rs
+@src/lib.rs
+@src/commands/mod.rs
+@Cargo.toml
+
+<interfaces>
+<!-- Existing patterns the executor needs -->
+
+From src/store.rs:
+```rust
+pub enum ValueData {
+    String(Bytes),
+    Hash(HashMap<Bytes, Bytes>),
+    Set(HashSet<Bytes>),
+    SortedSet(SortedSet),
+    Stream(Stream),
+}
+
+pub struct ValueEntry {
+    pub data: ValueData,
+    pub expires_at: Option<Instant>,
+}
+
+pub enum StoreError {
+    WrongType,
+    NoGroup(String, String),
+    BusyGroup,
+    KeyNotFound,
+}
+
+pub struct Store {
+    data: RwLock<HashMap<Bytes, ValueEntry>>,
+}
+
+// Key Store method signatures for dispatch:
+pub fn get(&self, key: &Bytes) -> Option<Bytes>
+pub fn set(&self, key: Bytes, value: Bytes, ttl: Option<Duration>, nx: bool, xx: bool) -> bool
+pub fn delete(&self, keys: &[Bytes]) -> i64
+pub fn exists(&self, keys: &[Bytes]) -> i64
+pub fn hset(&self, key: Bytes, fields: Vec<(Bytes, Bytes)>) -> Result<i64, StoreError>
+pub fn hget(&self, key: &Bytes, field: &Bytes) -> Result<Option<Bytes>, StoreError>
+pub fn hdel(&self, key: &Bytes, fields: &[Bytes]) -> Result<i64, StoreError>
+pub fn hvals(&self, key: &Bytes) -> Result<Vec<Bytes>, StoreError>
+pub fn sadd(&self, key: Bytes, members: Vec<Bytes>) -> Result<i64, StoreError>
+pub fn smembers(&self, key: &Bytes) -> Result<Vec<Bytes>, StoreError>
+pub fn sismember(&self, key: &Bytes, member: &Bytes) -> Result<bool, StoreError>
+pub fn srem(&self, key: &Bytes, members: &[Bytes]) -> Result<i64, StoreError>
+pub fn zadd(&self, key: Bytes, members: Vec<(f64, Bytes)>, nx: bool, xx: bool, gt: bool, lt: bool, ch: bool) -> Result<i64, StoreError>
+pub fn zrem(&self, key: &Bytes, members: &[Bytes]) -> Result<i64, StoreError>
+pub fn zrange(&self, key: &Bytes, start: i64, stop: i64, withscores: bool) -> Result<Vec<(Bytes, Option<f64>)>, StoreError>
+pub fn zrangebyscore(&self, key: &Bytes, min: Bound<f64>, max: Bound<f64>, withscores: bool) -> Result<Vec<(Bytes, Option<f64>)>, StoreError>
+pub fn zremrangebyscore(&self, key: &Bytes, min: Bound<f64>, max: Bound<f64>) -> Result<i64, StoreError>
+pub fn xadd(&self, key: Bytes, fields: HashMap<Bytes, Bytes>, id: Option<StreamId>) -> Result<StreamId, StoreError>
+pub fn xread(&self, keys: &[Bytes], ids: &[StreamId], count: Option<usize>) -> Result<Vec<(Bytes, Vec<(StreamId, HashMap<Bytes, Bytes>)>)>, StoreError>
+```
+
+From src/lib.rs:
+```rust
+pub struct BurnerRedis {
+    store: Arc<Store>,
+}
+```
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto">
+  <name>Task 1: Add mlua/sha1 dependencies and create scripting.rs with LuaEngine and redis.call() dispatch</name>
+  <files>Cargo.toml, src/scripting.rs, src/lib.rs</files>
+  <read_first>Cargo.toml, src/store.rs, src/lib.rs, src/commands/mod.rs</read_first>
+  <action>
+1. Update `Cargo.toml` dependencies to add:
+   ```toml
+   mlua = { version = "0.10", features = ["lua54", "send"] }
+   sha1 = "0.10"
+   ```
+   Note: Use mlua 0.10.x (not 0.11.x) as it is the latest stable release with reliable `send` feature support. If 0.10 has issues, try 0.11 with features `lua54` and `send`. The executor should check `cargo update` output and adjust version if needed.
+
+2. Add `mod scripting;` to `src/lib.rs` (after the existing `mod commands;` line).
+
+3. Create `src/scripting.rs` with the following structure:
+
+```rust
+use bytes::Bytes;
+use mlua::prelude::*;
+use sha1::{Sha1, Digest};
+use std::collections::HashMap;
+use std::ops::Bound;
+
+use crate::commands::streams::StreamId;
+```
+
+Define a `RedisValue` enum for the Lua-Redis bridge (NOT the same as store::ValueData -- this represents Redis protocol return values):
+
+```rust
+/// Represents a Redis command return value for Lua-Redis type conversion.
+#[derive(Debug, Clone)]
+pub enum RedisValue {
+    BulkString(Bytes),
+    Integer(i64),
+    Array(Vec<RedisValue>),
+    Nil,
+    Error(String),
+    Status(String),
+}
+```
+
+Implement `IntoLua` for `RedisValue`:
+- `BulkString(b)` -> Lua string (from bytes)
+- `Integer(n)` -> Lua integer
+- `Array(items)` -> Lua table (1-indexed, sequential)
+- `Nil` -> Lua false (NOT Lua nil -- matches Redis behavior)
+- `Error(msg)` -> this should NOT normally be converted; it's handled by the caller
+- `Status(s)` -> Lua table with `ok` field: `{ok = "status_string"}`
+
+Implement a function `lua_to_redis_value(val: LuaValue) -> RedisValue`:
+- Lua string -> `BulkString(Bytes::from(string.as_bytes().to_vec()))`
+- Lua integer/number -> `Integer(number as i64)` (truncate to integer, matching Redis)
+- Lua boolean true -> `Integer(1)`
+- Lua boolean false -> `Nil`
+- Lua nil -> `Nil`
+- Lua table: check for `err` key first -> `Error(err_string)`. Check for `ok` key -> `Status(ok_string)`. Otherwise treat as array: iterate sequential integer keys 1..n -> `Array(vec_of_values)`.
+
+Define the `LuaEngine` struct:
+
+```rust
+pub struct LuaEngine;
+
+impl LuaEngine {
+    /// Compute SHA1 hex digest of a script.
+    pub fn sha1_hex(script: &str) -> String {
+        let mut hasher = Sha1::new();
+        hasher.update(script.as_bytes());
+        let result = hasher.finalize();
+        format!("{:x}", result)
+    }
+
+    /// Execute a Lua script with access to KEYS, ARGV, and redis.call()/redis.pcall().
+    ///
+    /// `data` is the ALREADY WRITE-LOCKED store data HashMap -- the caller (Store::eval)
+    /// acquires the write lock and passes the mutable reference. This ensures atomicity.
+    pub fn execute(
+        script: &str,
+        keys: Vec<Bytes>,
+        args: Vec<Bytes>,
+        data: &mut HashMap<Bytes, crate::store::ValueEntry>,
+    ) -> Result<RedisValue, String> {
+        // Create a fresh Lua VM per execution (isolation, no state leakage)
+        let lua = Lua::new();
+
+        // ... (see detailed steps below)
+    }
+}
+```
+
+Inside `LuaEngine::execute`:
+
+a. Set up KEYS and ARGV as Lua globals:
+   - Create a Lua table for KEYS, populate with 1-indexed string entries from `keys` vec.
+   - Create a Lua table for ARGV, populate with 1-indexed string entries from `args` vec.
+   - Set both as globals on the Lua VM.
+
+b. Create the `redis` table with `call` and `pcall` functions:
+   - Use `lua.create_table()` to make a `redis` table.
+   - For `redis.call()`, use `lua.create_function()` (or `create_function_mut` if needed). The function receives variadic args: first arg is the command name (string), remaining args are command arguments.
+   - The key challenge: the dispatch function needs mutable access to `data`. Use `lua.scope()` to create scoped functions that can borrow `data` mutably, OR use `RefCell` to enable interior mutability. The recommended approach:
+     - Wrap `data` in a `std::cell::RefCell` and store a reference to it in Lua app data or use scope.
+     - Since mlua's `scope()` allows creating functions that borrow local data, use `lua.scope(|scope| { ... })` to create `redis.call` and `redis.pcall` as scoped functions, then execute the script within the scope.
+
+c. Dispatch function logic (`dispatch_command`):
+   The dispatch function takes a command name (uppercase it) and args, then calls the appropriate Store operation directly on the `data` HashMap. Since we have the raw `HashMap<Bytes, ValueEntry>` (not the Store struct), we need to implement command logic directly on the data. This is the core complexity.
+
+   Create a standalone function:
+   ```rust
+   fn dispatch_command(
+       cmd: &str,
+       args: &[Bytes],
+       data: &mut HashMap<Bytes, crate::store::ValueEntry>,
+   ) -> Result<RedisValue, String>
+   ```
+
+   The dispatch_command function matches on the uppercase command name and implements each command's logic directly against the HashMap. For each command:
+
+   **String commands:**
+   - `GET` (1 arg: key): Look up key in data, check expiration, return BulkString if String type, Nil if missing/expired, Error if wrong type.
+   - `SET` (2+ args: key, value, optional NX/XX/EX/PX): Parse optional flags from args[2..]. Insert/update entry. Return Status("OK") on success, Nil on NX/XX failure.
+   - `DEL` (1+ args: keys): Remove each key, count removed. Return Integer(count).
+   - `EXISTS` (1+ args: keys): Count existing non-expired keys. Return Integer(count).
+
+   **Hash commands:**
+   - `HSET` (3+ args: key, field1, value1, ...): Get or create hash entry. Insert fields. Return Integer(count_new).
+   - `HGET` (2 args: key, field): Look up field in hash. Return BulkString or Nil.
+   - `HDEL` (2+ args: key, field1, ...): Remove fields from hash. Return Integer(count_removed).
+   - `HVALS` (1 arg: key): Return Array of BulkStrings for all hash values.
+
+   **Set commands:**
+   - `SADD` (2+ args: key, member1, ...): Add members. Return Integer(count_new).
+   - `SMEMBERS` (1 arg: key): Return Array of BulkStrings.
+   - `SISMEMBER` (2 args: key, member): Return Integer(1) or Integer(0).
+   - `SREM` (2+ args: key, member1, ...): Remove members. Return Integer(count_removed).
+
+   **Sorted set commands:**
+   - `ZADD` (3+ args: key, score1, member1, ...): Add scored members. Return Integer(count_new).
+   - `ZREM` (2+ args: key, member1, ...): Remove members. Return Integer(count_removed).
+   - `ZRANGE` (3 args: key, start, stop): Return Array of BulkStrings for members in range.
+   - `ZRANGEBYSCORE` (3 args: key, min, max): Parse score bounds (support "-inf", "+inf", "(exclusive" prefix). Return Array of BulkStrings.
+   - `ZREMRANGEBYSCORE` (3 args: key, min, max): Remove members in score range. Return Integer(count_removed).
+
+   **Stream commands:**
+   - `XADD` (3+ args: key, id, field1, value1, ...): Parse ID ("*" -> auto). Add entry. Return BulkString(formatted_id).
+   - `XREAD`: This is complex (key-value dict style args). Implement a simplified version: args = ["COUNT", n, "STREAMS", key1, ..., id1, ...] or just ["STREAMS", key1, ..., id1, ...]. Parse accordingly. Return nested Array.
+
+   For unknown commands, return `Error("ERR unknown command '{cmd}'")`.
+
+   IMPORTANT: For each command that accesses data, check `is_expired()` on entries and remove expired ones (passive expiration) before processing. This matches the Store's own behavior.
+
+   IMPORTANT: For type checking, when a command expects a specific ValueData variant (e.g., Hash for HSET) but finds a different type, return `Error("WRONGTYPE Operation against a key holding the wrong kind of value")`.
+
+d. `redis.call()` behavior: Call dispatch_command. If result is `RedisValue::Error(msg)`, raise a Lua error (return `Err(LuaError::RuntimeError(msg))`). Otherwise convert result to Lua via IntoLua.
+
+e. `redis.pcall()` behavior: Call dispatch_command. If result is `RedisValue::Error(msg)`, return a Lua table `{err = msg}` (do NOT raise error). Otherwise convert result to Lua via IntoLua.
+
+f. Execute the script: `lua.load(script).exec()`. If the script returns a value, capture it. Use `lua.load(script).eval::<LuaValue>()` to get the return value. Convert the Lua return value back to RedisValue via `lua_to_redis_value()`.
+
+g. Return the RedisValue result, or Err(String) if Lua execution fails.
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && cargo build 2>&1 | tail -10</automated>
+  </verify>
+  <acceptance_criteria>
+    - grep -q "mlua" Cargo.toml
+    - grep -q "sha1" Cargo.toml
+    - grep -q "pub struct LuaEngine" src/scripting.rs
+    - grep -q "pub fn sha1_hex" src/scripting.rs
+    - grep -q "pub fn execute" src/scripting.rs
+    - grep -q "fn dispatch_command" src/scripting.rs
+    - grep -q "RedisValue" src/scripting.rs
+    - grep -q "IntoLua" src/scripting.rs
+    - grep -q "redis.call\|redis_call\|call" src/scripting.rs
+    - grep -q "redis.pcall\|redis_pcall\|pcall" src/scripting.rs
+    - grep -q "mod scripting" src/lib.rs
+    - grep -q "GET\|SET\|DEL\|HSET\|SADD\|ZADD\|XADD" src/scripting.rs
+    - cargo build succeeds with no errors
+  </acceptance_criteria>
+  <done>LuaEngine struct with sha1_hex(), execute(), and dispatch_command() function exists in src/scripting.rs. Dispatch handles all commands listed in CONTEXT.md (SET, GET, DELETE, EXISTS, HSET, HGET, HDEL, HVALS, SADD, SMEMBERS, SISMEMBER, SREM, ZADD, ZREM, ZRANGE, ZRANGEBYSCORE, ZREMRANGEBYSCORE, XADD, XREAD). redis.call() raises Lua error on failure, redis.pcall() returns error table. Type conversion between Lua and Redis is correct. Compiles without errors.</done>
+</task>
+
+<task type="auto">
+  <name>Task 2: Add script cache to Store and implement eval/evalsha/script_load/script_exists methods</name>
+  <files>src/store.rs</files>
+  <read_first>src/store.rs, src/scripting.rs</read_first>
+  <action>
+1. Add to Store struct a new field for the script cache:
+   ```rust
+   pub struct Store {
+       data: RwLock<HashMap<Bytes, ValueEntry>>,
+       scripts: RwLock<HashMap<String, String>>,  // SHA1 hex -> script source
+   }
+   ```
+
+   Update `Store::new()` to initialize `scripts: RwLock::new(HashMap::new())`.
+
+2. Add `use crate::scripting::{LuaEngine, RedisValue};` import at the top of store.rs.
+
+3. Add these Store methods:
+
+   `pub fn script_load(&self, script: &str) -> String`:
+   - Compute SHA1 via `LuaEngine::sha1_hex(script)`.
+   - Insert into scripts cache: `self.scripts.write().insert(sha1.clone(), script.to_string())`.
+   - Return the SHA1 hex string.
+
+   `pub fn script_exists(&self, shas: &[String]) -> Vec<bool>`:
+   - Acquire read lock on scripts.
+   - For each SHA1 in input, check if it exists in the cache.
+   - Return Vec<bool> of results.
+
+   `pub fn eval(&self, script: &str, keys: Vec<Bytes>, args: Vec<Bytes>) -> Result<RedisValue, String>`:
+   - Auto-cache the script: compute SHA1 and store in scripts cache (per CONTEXT.md decision: "EVAL also auto-caches every script it executes").
+   - Acquire write lock on `self.data`.
+   - Call `LuaEngine::execute(script, keys, args, &mut *data_guard)`.
+   - Return the result.
+
+   `pub fn evalsha(&self, sha: &str, keys: Vec<Bytes>, args: Vec<Bytes>) -> Result<RedisValue, String>`:
+   - Look up SHA in scripts cache (read lock on scripts).
+   - If not found, return `Err("NOSCRIPT No matching script. Use EVAL.".to_string())`.
+   - If found, clone the script source string.
+   - Acquire write lock on `self.data`.
+   - Call `LuaEngine::execute(&script, keys, args, &mut *data_guard)`.
+   - Return the result.
+
+IMPORTANT: The write lock on `self.data` is held for the ENTIRE duration of the Lua script execution. This ensures atomicity (per CONTEXT.md: "Lua scripts hold the Store write lock for the entire script duration"). Do NOT drop and re-acquire the lock.
+
+IMPORTANT: The scripts RwLock and data RwLock are separate. Always acquire scripts lock first (if needed), release it, then acquire data lock. This prevents deadlocks.
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && cargo build 2>&1 | tail -10</automated>
+  </verify>
+  <acceptance_criteria>
+    - grep -q "scripts:" src/store.rs
+    - grep -q "RwLock<HashMap<String, String>>" src/store.rs
+    - grep -q "pub fn script_load" src/store.rs
+    - grep -q "pub fn script_exists" src/store.rs
+    - grep -q "pub fn eval" src/store.rs
+    - grep -q "pub fn evalsha" src/store.rs
+    - grep -q "LuaEngine::sha1_hex\|LuaEngine::execute" src/store.rs
+    - grep -q "NOSCRIPT" src/store.rs
+    - cargo build succeeds with no errors
+  </acceptance_criteria>
+  <done>Store has a scripts HashMap<String, String> field for SHA1-to-source caching. script_load computes SHA1 and caches. script_exists checks cache for multiple SHAs. eval auto-caches and executes under write lock. evalsha looks up cached script and executes. NOSCRIPT error returned for unknown SHA. All compile without errors.</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| Python -> Rust -> Lua | User-supplied Lua scripts execute in embedded VM with access to Store data |
+| Lua -> Store dispatch | Lua redis.call() can execute any supported Redis command on the data |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-06-01 | Tampering | Lua script execution | mitigate | Fresh Lua VM per execution (no state leakage between scripts); mlua sandbox prevents filesystem/network access by default |
+| T-06-02 | Denial of Service | Unbounded Lua execution | accept | No script timeout implemented; in-process library where user controls own scripts. Prefect scripts are known and bounded. |
+| T-06-03 | Elevation of Privilege | redis.call() dispatch | mitigate | Dispatch only routes to explicitly supported commands; unknown commands return error. No access to internal Store methods beyond the defined command set. |
+| T-06-04 | Information Disclosure | Script cache | accept | Scripts cached in memory are only accessible to the same process; no cross-process boundary to protect. |
+</threat_model>
+
+<verification>
+1. `cargo build` compiles without errors
+2. `src/scripting.rs` exists with LuaEngine, RedisValue, dispatch_command
+3. `src/store.rs` has scripts cache and eval/evalsha/script_load/script_exists methods
+4. dispatch_command handles all 20 commands listed in CONTEXT.md
+</verification>
+
+<success_criteria>
+- mlua and sha1 dependencies added to Cargo.toml
+- LuaEngine creates fresh Lua 5.4 VM per execution
+- redis.call() dispatches to all supported commands (SET, GET, DELETE, EXISTS, HSET, HGET, HDEL, HVALS, SADD, SMEMBERS, SISMEMBER, SREM, ZADD, ZREM, ZRANGE, ZRANGEBYSCORE, ZREMRANGEBYSCORE, XADD, XREAD)
+- redis.call() raises Lua error on command failure; redis.pcall() returns error table
+- Type conversion correct in both directions (Redis<->Lua)
+- Script cache stores SHA1->source mappings
+- eval auto-caches scripts; evalsha looks up by SHA1
+- All code compiles without errors
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/06-lua-scripting/06-01-SUMMARY.md`
+</output>

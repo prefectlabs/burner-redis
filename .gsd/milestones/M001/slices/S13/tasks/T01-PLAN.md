@@ -1,0 +1,384 @@
+# T01: Prove that the PyPI sdist for burner-redis is conda-forge-feedstock-ready: it contains Cargo.
+
+**Slice:** S13 — **Milestone:** M001
+
+## Description
+
+Prove that the PyPI sdist for burner-redis is conda-forge-feedstock-ready: it contains Cargo.lock, it covers every file required for an offline build, and it actually builds with no network access. Produce a verification report that records the pinned version and the verified sha256 — these two values feed Plan 03's recipe.yaml directly. If 0.1.2 is not feedstock-ready, fix pyproject.toml, cut 0.1.3, and re-verify against 0.1.3 before unblocking Plan 02.
+
+Purpose: conda-forge builders can be air-gapped. If the sdist can't build offline, the staged-recipes PR will fail CI with no easy fix window. Catching this on our side is the hard gate before spending reviewer time.
+
+Output: `.planning/notes/phase-13-sdist-verification-report.md` with `pinned_version` and `sha256` locked in; optionally a 0.1.3 release tag if 0.1.2 fails.
+
+## Legacy Source
+
+---
+phase: 13-publish-burner-redis-to-conda-forge
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - .planning/notes/phase-13-sdist-verification-report.md
+  - pyproject.toml
+  - Cargo.toml
+autonomous: false
+requirements: []
+
+must_haves:
+  truths:
+    - "The PyPI sdist for the pinned version contains Cargo.lock at the tarball root (burner-redis-<ver>/Cargo.lock)"
+    - "A fresh clone of the sdist builds offline under CARGO_NET_OFFLINE=true with a pre-populated cargo cache"
+    - "A written verification report records the pinned version (0.1.2 or 0.1.3) and the sha256 of the verified PyPI sdist"
+    - "If 0.1.2 fails verification, pyproject.toml is fixed and 0.1.3 is released before proceeding to Plan 02"
+  artifacts:
+    - path: ".planning/notes/phase-13-sdist-verification-report.md"
+      provides: "Audit record of sdist contents, offline-build outcome, pinned version, and sha256"
+      contains: "pinned_version"
+  key_links:
+    - from: ".planning/notes/phase-13-sdist-verification-report.md"
+      to: "Plan 02 (license audit) and Plan 03 (recipe source.url + source.sha256)"
+      via: "pinned_version and sha256 fields"
+      pattern: "pinned_version|sha256"
+---
+
+<objective>
+Prove that the PyPI sdist for burner-redis is conda-forge-feedstock-ready: it contains Cargo.lock, it covers every file required for an offline build, and it actually builds with no network access. Produce a verification report that records the pinned version and the verified sha256 — these two values feed Plan 03's recipe.yaml directly. If 0.1.2 is not feedstock-ready, fix pyproject.toml, cut 0.1.3, and re-verify against 0.1.3 before unblocking Plan 02.
+
+Purpose: conda-forge builders can be air-gapped. If the sdist can't build offline, the staged-recipes PR will fail CI with no easy fix window. Catching this on our side is the hard gate before spending reviewer time.
+
+Output: `.planning/notes/phase-13-sdist-verification-report.md` with `pinned_version` and `sha256` locked in; optionally a 0.1.3 release tag if 0.1.2 fails.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@.planning/phases/13-publish-burner-redis-to-conda-forge/CONTEXT.md
+@.planning/notes/conda-forge-feedstock-setup-research.md
+@.planning/todos/pending/verify-sdist-contains-cargo-lock.md
+@pyproject.toml
+@Cargo.toml
+
+<interfaces>
+<!-- Key facts the executor needs. Current configuration extracted from the repo. -->
+
+Current `[tool.maturin]` in pyproject.toml:
+```toml
+[tool.maturin]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
+module-name = "burner_redis._burner_redis"
+python-source = "python"
+```
+
+No explicit `include` or `sdist-include` is set. Recent maturin (>=1.4) includes `Cargo.lock` in sdist by default, but this MUST be verified, not assumed.
+
+Current Cargo.toml version: `0.1.2` (line 3). The release workflow (.github/workflows/release.yml) enforces `tag == Cargo.toml version`.
+
+PyPI package name: `burner-redis` (dash, not underscore). sdist filename convention: `burner_redis-<ver>.tar.gz` (PEP 625 normalized — underscore) OR `burner-redis-<ver>.tar.gz` depending on maturin version. VERIFY actual filename by hitting pypi.org/pypi/burner-redis/json.
+
+Dynamic version source: `dynamic = ["version"]` in pyproject.toml; version resolved from `Cargo.toml [package] version` by maturin.
+
+Maturin sdist include defaults: Cargo.toml, Cargo.lock, src/**, pyproject.toml, python/**, README.md, LICENSE. Does NOT vendor `vendor/` dir by default.
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto">
+  <name>Task 1: Download and inspect the PyPI 0.1.2 sdist for feedstock-readiness</name>
+  <files>
+    - .planning/notes/phase-13-sdist-verification-report.md (new)
+  </files>
+  <read_first>
+    - .planning/notes/conda-forge-feedstock-setup-research.md (full — gotchas #1 and #4 specifically)
+    - .planning/todos/pending/verify-sdist-contains-cargo-lock.md (full)
+    - pyproject.toml (full — confirm `[tool.maturin]` has no explicit include that might exclude Cargo.lock)
+    - Cargo.toml (lines 1-20 — confirm `version = "0.1.2"` and mlua `vendored` feature)
+  </read_first>
+  <action>
+Perform the following steps in order. Record every command invocation and its exit code into the verification report as you go.
+
+**Step 1.1 — Resolve the current PyPI sdist URL and sha256 for 0.1.2:**
+
+```bash
+cd /tmp
+rm -rf phase-13-sdist-check && mkdir phase-13-sdist-check && cd phase-13-sdist-check
+
+# Pull the PyPI JSON index for the package
+curl -sSL https://pypi.org/pypi/burner-redis/0.1.2/json > pypi.json
+
+# Extract the sdist URL, filename, and sha256 (sdist has packagetype == "sdist")
+python3 - <<'PY'
+import json
+j = json.load(open("pypi.json"))
+sdist = next(f for f in j["urls"] if f["packagetype"] == "sdist")
+print("URL:", sdist["url"])
+print("FILENAME:", sdist["filename"])
+print("SHA256:", sdist["digests"]["sha256"])
+PY
+```
+
+Capture the SHA256 printed; this value will be needed for Plan 03's recipe.yaml (`source.sha256`). If no sdist exists on PyPI for 0.1.2 (only wheels), STOP and jump to Task 3 (cut 0.1.3 with sdist).
+
+**Step 1.2 — Download the sdist and verify sha256:**
+
+```bash
+SDIST_URL="$(python3 -c "import json; print(next(f for f in json.load(open('pypi.json'))['urls'] if f['packagetype']=='sdist')['url'])")"
+SDIST_FILENAME="$(basename "$SDIST_URL")"
+curl -sSL "$SDIST_URL" -o "$SDIST_FILENAME"
+
+EXPECTED_SHA256="$(python3 -c "import json; print(next(f for f in json.load(open('pypi.json'))['urls'] if f['packagetype']=='sdist')['digests']['sha256'])")"
+ACTUAL_SHA256="$(shasum -a 256 "$SDIST_FILENAME" | awk '{print $1}')"
+test "$EXPECTED_SHA256" = "$ACTUAL_SHA256" && echo "sha256 OK" || { echo "sha256 MISMATCH"; exit 1; }
+```
+
+**Step 1.3 — Inspect archive contents:**
+
+```bash
+tar -tzf "$SDIST_FILENAME" | sort > sdist-contents.txt
+
+# REQUIRED files
+grep -qE '^[^/]+/Cargo\.toml$' sdist-contents.txt && echo "Cargo.toml: OK" || echo "Cargo.toml: MISSING"
+grep -qE '^[^/]+/Cargo\.lock$' sdist-contents.txt && echo "Cargo.lock: OK" || echo "Cargo.lock: MISSING"
+grep -qE '^[^/]+/pyproject\.toml$' sdist-contents.txt && echo "pyproject.toml: OK" || echo "pyproject.toml: MISSING"
+grep -qE '^[^/]+/src/lib\.rs$' sdist-contents.txt && echo "src/lib.rs: OK" || echo "src/lib.rs: MISSING"
+
+# OPTIONAL but good-to-have
+grep -qE '^[^/]+/vendor/' sdist-contents.txt && echo "vendor/: present" || echo "vendor/: absent (builder will fetch from crates.io — OK if online, risky if air-gapped)"
+```
+
+If `Cargo.lock: MISSING` is reported, the sdist is NOT feedstock-ready. Proceed to Task 2 (pyproject.toml fix) then Task 3 (cut 0.1.3).
+
+**Step 1.4 — Write initial verification report:**
+
+Create `.planning/notes/phase-13-sdist-verification-report.md` with this exact frontmatter and skeleton (the `pinned_version` and `sha256` fields are the contract for downstream plans):
+
+```markdown
+---
+title: Phase 13 — sdist feedstock-readiness verification
+date: <YYYY-MM-DD>
+phase: 13
+step: 1
+pinned_version: "0.1.2"    # will be updated to 0.1.3 if re-verification required
+sdist_url: "<URL from Step 1.1>"
+sdist_filename: "<FILENAME from Step 1.1>"
+sha256: "<SHA256 from Step 1.1>"
+---
+
+# sdist feedstock-readiness verification
+
+## Archive contents audit
+<paste output of Step 1.3 checks>
+
+## Offline build audit
+<filled in by Task 4>
+
+## Decision
+<pass → pin 0.1.2 | fail → fix pyproject.toml and cut 0.1.3>
+```
+  </action>
+  <verify>
+    <automated>cd /tmp/phase-13-sdist-check && grep -qE '^[^/]+/Cargo\.lock$' sdist-contents.txt && echo PASS || echo FAIL-MISSING-CARGO-LOCK</automated>
+  </verify>
+  <acceptance_criteria>
+    - `.planning/notes/phase-13-sdist-verification-report.md` exists with non-empty `sdist_url`, `sdist_filename`, and `sha256` frontmatter fields
+    - The verification report contains a line matching `Cargo.toml: OK` (grep-verifiable)
+    - `tar -tzf <sdist>` on the downloaded PyPI tarball returns an entry matching `^burner[_-]redis-0\.1\.2/Cargo\.toml$`
+    - The SHA256 value in the report matches the actual digest of the downloaded sdist (shasum -a 256 confirms)
+    - The `pinned_version` frontmatter is exactly `"0.1.2"` at this checkpoint (may be updated later in Task 3)
+  </acceptance_criteria>
+  <done>The report captures whether 0.1.2's sdist contains Cargo.lock. If YES, proceed to Task 4. If NO, proceed to Task 2 → Task 3.</done>
+</task>
+
+<task type="auto">
+  <name>Task 2: (CONDITIONAL — run only if Task 1 found Cargo.lock MISSING) Fix pyproject.toml sdist includes</name>
+  <files>
+    - pyproject.toml
+    - .planning/notes/phase-13-sdist-verification-report.md (append)
+  </files>
+  <read_first>
+    - pyproject.toml (full — need the current `[tool.maturin]` block verbatim)
+    - .planning/notes/conda-forge-feedstock-setup-research.md (§ "Gotchas audited for burner-redis" row 1)
+    - https://www.maturin.rs/distribution.html via WebFetch — confirm the current maturin sdist-include syntax
+  </read_first>
+  <action>
+Skip this task entirely if Task 1's acceptance criteria showed `Cargo.lock: OK`. Otherwise:
+
+**Step 2.1 — Check maturin version and Cargo.lock inclusion rules:**
+
+```bash
+uv run --with "maturin>=1.0,<2.0" maturin --version
+```
+
+Modern maturin (>=1.4) includes Cargo.lock by default. If the version is older, upgrade by bumping the `[build-system] requires = ["maturin>=1.0,<2.0"]` line in pyproject.toml to a floor that includes Cargo.lock by default (maturin 1.4+).
+
+**Step 2.2 — Add explicit sdist-include for Cargo.lock:**
+
+Append the following keys inside the existing `[tool.maturin]` block in pyproject.toml (do NOT create a new section):
+
+```toml
+[tool.maturin]
+features = ["pyo3/extension-module", "pyo3/abi3-py310"]
+module-name = "burner_redis._burner_redis"
+python-source = "python"
+# Ensure Cargo.lock ships in the sdist so conda-forge builders can build offline.
+# Phase 13 requirement — do not remove.
+include = [
+  { path = "Cargo.lock", format = "sdist" },
+]
+```
+
+If maturin's current flag is `sdist-include` (older syntax) rather than the `include` array, use the exact name the installed maturin version documents. Run `maturin sdist --help` to confirm.
+
+**Step 2.3 — Rebuild sdist locally to confirm:**
+
+```bash
+cd /Users/alexander/dev/prefectlabs/burner-redis
+uv run --with "maturin>=1.0,<2.0" maturin sdist --out /tmp/phase-13-local-sdist
+tar -tzf /tmp/phase-13-local-sdist/burner_redis-*.tar.gz | grep -E 'Cargo\.lock$'
+```
+
+The grep MUST return a line ending in `/Cargo.lock`.
+
+**Step 2.4 — Append the fix record to the verification report:**
+
+Add a `## pyproject.toml fix` section to `.planning/notes/phase-13-sdist-verification-report.md` describing:
+- Which maturin version was checked
+- Exact diff applied to pyproject.toml
+- Output of Step 2.3's grep (confirming local sdist now includes Cargo.lock)
+  </action>
+  <verify>
+    <automated>cd /Users/alexander/dev/prefectlabs/burner-redis && grep -qE '^\s*include\s*=|^\s*sdist-include\s*=' pyproject.toml && echo PASS || echo FAIL</automated>
+  </verify>
+  <acceptance_criteria>
+    - pyproject.toml `[tool.maturin]` section contains either an `include` array with `"Cargo.lock"` or an `sdist-include` key with `"Cargo.lock"` (whichever syntax matches the installed maturin version)
+    - Locally-built sdist at `/tmp/phase-13-local-sdist/burner_redis-*.tar.gz` contains `Cargo.lock` (verified by `tar -tzf ... | grep -E 'Cargo\.lock$'`)
+    - Verification report has a `## pyproject.toml fix` section documenting the change
+  </acceptance_criteria>
+  <done>pyproject.toml now forces Cargo.lock into the sdist; local sdist rebuild confirms inclusion.</done>
+</task>
+
+<task type="checkpoint:human-action" gate="blocking">
+  <name>Task 3: (CONDITIONAL — run only if Task 2 executed) Cut 0.1.3 release, then re-run Task 1 against 0.1.3</name>
+  <what-built>Task 2 applied a pyproject.toml fix. The 0.1.2 sdist on PyPI is still bad — PyPI does not allow republishing the same version. A 0.1.3 release is required to re-test against a fresh sdist.</what-built>
+  <how-to-verify>
+    This checkpoint pauses for the developer to cut the release because it pushes a tag to the public repo and triggers the PyPI trusted-publisher workflow — a shared-state action that should not proceed without explicit go-ahead.
+
+    Developer steps:
+    1. Bump Cargo.toml `version = "0.1.3"` (the release workflow enforces tag == Cargo.toml version).
+    2. Commit Cargo.toml + the pyproject.toml fix from Task 2 on main: `git commit -m "chore(phase-13-01): bump to 0.1.3 with sdist Cargo.lock include"`.
+    3. Push to main: `git push origin main`.
+    4. Tag: `git tag v0.1.3 && git push origin v0.1.3`.
+    5. Wait for `.github/workflows/release.yml` to complete and publish to PyPI. Confirm by visiting https://pypi.org/project/burner-redis/0.1.3/ — the "Source Distribution" file must be listed.
+    6. Once 0.1.3 is live on PyPI, re-run Task 1 (verbatim) but against `https://pypi.org/pypi/burner-redis/0.1.3/json` instead of `/0.1.2/json`. Update `pinned_version: "0.1.3"` and the new `sha256:` in the verification report.
+    7. Re-run Task 4 (offline build) against the 0.1.3 sdist.
+
+    Reply "approved" here after steps 1-7 succeed and the report reflects 0.1.3.
+  </how-to-verify>
+  <resume-signal>Type "approved" after 0.1.3 is live on PyPI, the 0.1.3 sdist contains Cargo.lock, and the verification report frontmatter shows `pinned_version: "0.1.3"` with the new sha256. Type "skip" if Task 2 did not execute (0.1.2 was already clean).</resume-signal>
+</task>
+
+<task type="auto">
+  <name>Task 4: Offline build verification against the pinned sdist</name>
+  <files>
+    - .planning/notes/phase-13-sdist-verification-report.md (append)
+  </files>
+  <read_first>
+    - .planning/notes/phase-13-sdist-verification-report.md (the current state written by Task 1 or updated after Task 3)
+    - .planning/notes/conda-forge-feedstock-setup-research.md (§ "Gotchas audited for burner-redis" row 1 — "air-gapped builders")
+  </read_first>
+  <action>
+Use the sdist already downloaded into `/tmp/phase-13-sdist-check/` during Task 1 (or re-downloaded for 0.1.3 after Task 3). The goal: prove `pip install <sdist>` succeeds with zero network access to crates.io.
+
+**Step 4.1 — Pre-populate the cargo cache and remember the digest:**
+
+```bash
+# Pre-fetch all crates that Cargo.lock references (online).
+cd /Users/alexander/dev/prefectlabs/burner-redis
+cargo fetch --locked
+
+# Record the directory we care about
+echo "CARGO_HOME=${CARGO_HOME:-$HOME/.cargo}"
+ls -1 "${CARGO_HOME:-$HOME/.cargo}/registry/cache/" | head -5
+```
+
+**Step 4.2 — Offline build against the pinned sdist:**
+
+```bash
+cd /tmp/phase-13-sdist-check
+SDIST_FILENAME="$(ls burner_redis-*.tar.gz 2>/dev/null || ls burner-redis-*.tar.gz)"
+uv venv .venv-offline
+source .venv-offline/bin/activate
+
+# Install maturin (online, one-time)
+uv pip install "maturin>=1.0,<2.0" pip
+
+# Now flip to offline mode and build the wheel from the sdist
+CARGO_NET_OFFLINE=true pip install --no-build-isolation --no-index --no-deps "$SDIST_FILENAME" 2>&1 | tee offline-build.log
+echo "exit=$?"
+
+# Sanity: import it
+python -c "import burner_redis; r = burner_redis.BurnerRedis(); print('import+instantiate OK')" 2>&1 | tee offline-import.log
+```
+
+If the `pip install` exits non-zero with a cargo network error, the sdist is NOT self-contained for offline builds. The fix is vendoring: add `vendor/` + `.cargo/config.toml` to the sdist via `cargo vendor`, then loop back to Task 2.
+
+**Step 4.3 — Append results to the verification report:**
+
+Under `## Offline build audit`, write:
+- Command invocations (verbatim)
+- Exit codes
+- Last 20 lines of `offline-build.log`
+- Last 5 lines of `offline-import.log`
+
+**Step 4.4 — Finalize the `## Decision` section:**
+
+Write one of:
+- `PASS — pinned_version = <ver>; proceed to Plan 02 (license audit).`
+- `FAIL — requires vendoring; cycle back to Task 2 with the vendor fix, then Task 3.`
+
+Commit the report.
+  </action>
+  <verify>
+    <automated>grep -qE '^## Decision$' /Users/alexander/dev/prefectlabs/burner-redis/.planning/notes/phase-13-sdist-verification-report.md && grep -qE '^PASS' /Users/alexander/dev/prefectlabs/burner-redis/.planning/notes/phase-13-sdist-verification-report.md && echo PASS || echo FAIL</automated>
+  </verify>
+  <acceptance_criteria>
+    - `CARGO_NET_OFFLINE=true pip install --no-index --no-build-isolation --no-deps <sdist.tar.gz>` exits 0 (captured in offline-build.log)
+    - `python -c "import burner_redis; burner_redis.BurnerRedis()"` from the offline venv exits 0 (captured in offline-import.log)
+    - `.planning/notes/phase-13-sdist-verification-report.md` contains a `## Offline build audit` section with command output
+    - `.planning/notes/phase-13-sdist-verification-report.md` contains a `## Decision` section whose first non-heading line starts with `PASS` (not `FAIL`)
+    - Report frontmatter `pinned_version` is `"0.1.2"` or `"0.1.3"` (no other value acceptable)
+    - Report frontmatter `sha256` is a 64-character lowercase hex string matching the downloaded sdist
+  </acceptance_criteria>
+  <done>Offline build confirmed. The verification report locks in `pinned_version` and `sha256` — these are the contract Plan 03 consumes.</done>
+</task>
+
+</tasks>
+
+<verification>
+- The verification report at `.planning/notes/phase-13-sdist-verification-report.md` exists with `pinned_version` (0.1.2 or 0.1.3) and a 64-char `sha256` in its frontmatter.
+- Offline build from the pinned PyPI sdist succeeds with `CARGO_NET_OFFLINE=true`.
+- If Task 2/3 ran, 0.1.3 is live on PyPI and its sdist contains Cargo.lock (grep-verified).
+- Plan 02 can now run: it depends only on `pinned_version` being locked in.
+</verification>
+
+<success_criteria>
+- Step 1 from CONTEXT.md ("Verify sdist is feedstock-ready") is complete.
+- Pinned source version is locked to either 0.1.2 (if it passed) or 0.1.3 (if 0.1.2 required a fix).
+- The verified sha256 is recorded and reusable by Plan 03's recipe.yaml `source.sha256:`.
+- Hard gate in CONTEXT.md: staged-recipes PR is NOT yet touched. Plan 02 runs next.
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/13-publish-burner-redis-to-conda-forge/13-01-SUMMARY.md` capturing:
+- The pinned_version resolved
+- The sha256 locked in
+- Whether Task 2/3 were triggered (and if so, the diff applied and 0.1.3 release URL)
+- A one-line "next: Plan 02 license audit" pointer
+</output>

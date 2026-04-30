@@ -1,0 +1,581 @@
+# T01: Add Rust-layer Store methods and PyO3 bindings for keys(pattern), ttl(name), mget(*keys), and xpending summary form.
+
+**Slice:** S12 — **Milestone:** M001
+
+## Description
+
+Add Rust-layer Store methods and PyO3 bindings for keys(pattern), ttl(name), mget(*keys), and xpending summary form. Enhance glob_match with [a-z] character range support per D-04.
+
+Purpose: These Rust methods provide the data-layer foundation for the remaining redis-py compatibility gaps. keys() and ttl() enable key enumeration and TTL inspection, mget() enables atomic multi-key reads, and xpending summary provides the aggregated pending message view.
+
+Output: Four new Store methods, enhanced glob_match, and four new PyO3 async bindings in lib.rs.
+
+## Legacy Source
+
+---
+phase: 12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - src/commands/pubsub.rs
+  - src/store.rs
+  - src/lib.rs
+autonomous: true
+requirements:
+  - D-03
+  - D-04
+  - D-10
+  - D-11
+  - D-13
+
+must_haves:
+  truths:
+    - "keys(pattern) returns all non-expired keys matching a Redis glob pattern including [a-z] ranges"
+    - "ttl(name) returns seconds remaining, -1 for no TTL, -2 for missing/expired key"
+    - "mget(*keys) returns a list of values in key order with None for missing keys, in a single atomic read"
+    - "xpending(name, groupname) summary form returns dict with pending count, min/max IDs, and per-consumer counts"
+  artifacts:
+    - path: "src/commands/pubsub.rs"
+      provides: "glob_match with [a-z] character range support"
+      contains: "range_start"
+    - path: "src/store.rs"
+      provides: "keys(), ttl(), mget(), xpending_summary() Store methods"
+      exports: ["keys", "ttl", "mget", "xpending_summary"]
+    - path: "src/lib.rs"
+      provides: "PyO3 async bindings for keys, ttl, mget, xpending"
+      contains: "fn keys"
+  key_links:
+    - from: "src/lib.rs"
+      to: "src/store.rs"
+      via: "store.keys(), store.ttl(), store.mget(), store.xpending_summary()"
+      pattern: "store\\.(keys|ttl|mget|xpending_summary)"
+    - from: "src/store.rs"
+      to: "src/commands/pubsub.rs"
+      via: "glob_match() for keys pattern filtering"
+      pattern: "glob_match"
+---
+
+<objective>
+Add Rust-layer Store methods and PyO3 bindings for keys(pattern), ttl(name), mget(*keys), and xpending summary form. Enhance glob_match with [a-z] character range support per D-04.
+
+Purpose: These Rust methods provide the data-layer foundation for the remaining redis-py compatibility gaps. keys() and ttl() enable key enumeration and TTL inspection, mget() enables atomic multi-key reads, and xpending summary provides the aggregated pending message view.
+
+Output: Four new Store methods, enhanced glob_match, and four new PyO3 async bindings in lib.rs.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@.planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-CONTEXT.md
+@.planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-RESEARCH.md
+
+<interfaces>
+<!-- Key types and contracts the executor needs. Extracted from codebase. -->
+
+From src/store.rs:
+```rust
+pub struct ValueEntry {
+    pub data: ValueData,
+    pub expires_at: Option<Instant>,
+}
+
+impl ValueEntry {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at
+            .map(|exp| Instant::now() >= exp)
+            .unwrap_or(false)
+    }
+}
+
+pub enum ValueData {
+    String(Bytes),
+    Hash(HashMap<Bytes, Bytes>),
+    Set(HashSet<Bytes>),
+    SortedSet(SortedSet),
+    Stream(Stream),
+}
+
+pub enum StoreError {
+    WrongType,
+    NoGroup(String, String),
+    BusyGroup,
+    KeyNotFound,
+}
+```
+
+From src/store.rs (existing get pattern):
+```rust
+pub fn get(&self, key: &Bytes) -> Option<Bytes> {
+    // read lock, check expired, upgrade to write lock if expired
+    let data = self.data.read();
+    match data.get(key) {
+        None => return None,
+        Some(entry) if !entry.is_expired() => {
+            if let ValueData::String(ref v) = entry.data {
+                return Some(v.clone());
+            }
+            return None;
+        }
+        Some(_) => {} // expired, fall through
+    }
+    // ... write lock to remove expired
+}
+```
+
+From src/commands/pubsub.rs (glob_match -- character class section, lines 41-67):
+```rust
+// Inside [...] parsing loop (needs range support added):
+while pi < pattern.len() && pattern[pi] != b']' {
+    if string[si] == pattern[pi] {
+        found = true;
+    }
+    pi += 1;
+}
+```
+
+From src/lib.rs (PyO3 binding pattern):
+```rust
+fn get<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let store = self.store.clone();
+    let key = extract_bytes(name)?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        Ok(store.get(&key).map(|b| b.to_vec()))
+    })
+}
+```
+
+From src/store.rs (xpending_range at line 2014):
+```rust
+pub fn xpending_range(&self, key: &Bytes, group: &Bytes, min_id: StreamId, max_id: StreamId, count: usize, consumer_filter: Option<&Bytes>, min_idle_ms: Option<u64>) -> Result<Vec<(StreamId, Bytes, u128, u64)>, StoreError> {
+    // Iterates consumer PELs, filters by ID range and idle time
+}
+```
+
+From src/commands/streams.rs:
+```rust
+pub type StreamId = (u64, u64);
+pub fn format_stream_id(id: StreamId) -> String { format!("{}-{}", id.0, id.1) }
+```
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto" tdd="true">
+  <name>Task 1: Enhance glob_match with range support and add Store methods (keys, ttl, mget, xpending_summary)</name>
+  <files>src/commands/pubsub.rs, src/store.rs</files>
+  <read_first>
+    - src/commands/pubsub.rs (full file -- glob_match implementation and existing tests)
+    - src/store.rs (lines 1-30 for imports, 100-190 for ValueEntry/ValueData/StoreError, 280-380 for get/set patterns, 2014-2095 for xpending_range)
+    - src/commands/streams.rs (StreamId type and format_stream_id helper)
+  </read_first>
+  <behavior>
+    - glob_match(b"h[a-z]llo", b"hello") returns true
+    - glob_match(b"h[a-z]llo", b"hAllo") returns false (A outside a-z)
+    - glob_match(b"h[a-z]llo", b"hallo") returns true
+    - glob_match(b"[0-9]abc", b"5abc") returns true
+    - glob_match(b"[0-9]abc", b"xabc") returns false
+    - glob_match(b"[z-a]llo", b"ello") returns false (reversed range = empty)
+    - glob_match(b"[-abc]def", b"-def") returns true (leading hyphen = literal)
+    - glob_match(b"[abc-]def", b"-def") returns true (trailing hyphen = literal)
+    - store.keys(b"*") returns all non-expired keys
+    - store.keys(b"user:*") returns only keys matching prefix
+    - store.keys(b"nonexistent*") returns empty vec
+    - store.ttl(missing_key) returns -2
+    - store.ttl(key_no_ttl) returns -1
+    - store.ttl(key_with_ttl) returns positive seconds remaining
+    - store.mget([k1, k2, k3]) returns [Some(v1), None, Some(v3)] for existing/missing/existing
+    - store.mget on non-string key returns None for that key (no error)
+    - store.xpending_summary with 0 pending returns {pending:0, min:None, max:None, consumers:[]}
+    - store.xpending_summary with pending returns {pending:N, min:id, max:id, consumers:[{name, pending}]}
+  </behavior>
+  <action>
+**1. Enhance glob_match in src/commands/pubsub.rs (per D-04):**
+
+Replace the character class loop (lines 52-57) with range-aware logic. Inside the `while pi < pattern.len() && pattern[pi] != b']'` loop:
+
+```rust
+while pi < pattern.len() && pattern[pi] != b']' {
+    // Check for range: a-z (only if hyphen is NOT at start or end of class)
+    if pi + 2 < pattern.len() && pattern[pi + 1] == b'-' && pattern[pi + 2] != b']' {
+        let range_start = pattern[pi];
+        let range_end = pattern[pi + 2];
+        // Only match if range is valid (start <= end), otherwise treat as no match
+        if range_start <= range_end && string[si] >= range_start && string[si] <= range_end {
+            found = true;
+        }
+        pi += 3; // skip char, '-', char
+    } else {
+        if string[si] == pattern[pi] {
+            found = true;
+        }
+        pi += 1;
+    }
+}
+```
+
+Add Rust unit tests for ranges: `[a-z]`, `[0-9]`, `[z-a]` (empty), `[-abc]` (literal hyphen), `[abc-]` (literal hyphen).
+
+**2. Add `use crate::commands::pubsub::glob_match;` to src/store.rs imports.**
+
+**3. Add keys() method to Store impl in src/store.rs:**
+
+```rust
+/// KEYS: Returns all non-expired keys matching a glob pattern.
+pub fn keys(&self, pattern: &[u8]) -> Vec<Bytes> {
+    let data = self.data.read();
+    let mut result = Vec::new();
+    for (key, entry) in data.iter() {
+        if !entry.is_expired() && glob_match(pattern, key.as_ref()) {
+            result.push(key.clone());
+        }
+    }
+    result
+}
+```
+
+**4. Add ttl() method to Store impl in src/store.rs (per D-10):**
+
+```rust
+/// TTL: Returns remaining time-to-live in seconds.
+/// Returns -2 if key does not exist (or is expired).
+/// Returns -1 if key exists but has no TTL set.
+/// Returns positive integer: remaining seconds (truncated, matching Redis).
+pub fn ttl(&self, key: &Bytes) -> i64 {
+    let mut data = self.data.write();
+    match data.get(key) {
+        None => -2,
+        Some(entry) if entry.is_expired() => {
+            data.remove(key);
+            -2
+        }
+        Some(entry) => match entry.expires_at {
+            None => -1,
+            Some(exp) => {
+                match exp.checked_duration_since(Instant::now()) {
+                    Some(remaining) => remaining.as_secs() as i64,
+                    None => {
+                        // Expired between check and computation
+                        data.remove(key);
+                        -2
+                    }
+                }
+            }
+        },
+    }
+}
+```
+
+**5. Add mget() method to Store impl in src/store.rs (per D-13):**
+
+```rust
+/// MGET: Returns values for multiple keys at once in a single read lock.
+/// Returns None for missing, expired, or non-string keys (matches GET behavior).
+pub fn mget(&self, keys: &[Bytes]) -> Vec<Option<Bytes>> {
+    let data = self.data.read();
+    keys.iter().map(|key| {
+        match data.get(key) {
+            Some(entry) if !entry.is_expired() => {
+                if let ValueData::String(ref v) = entry.data {
+                    Some(v.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }).collect()
+}
+```
+
+**6. Add xpending_summary() method to Store impl in src/store.rs (per D-11):**
+
+Return type: `Result<(usize, Option<StreamId>, Option<StreamId>, Vec<(Bytes, usize)>), StoreError>`
+
+Tuple fields: (total_pending, min_id_or_none, max_id_or_none, consumer_counts_vec)
+
+```rust
+/// XPENDING summary form: Returns aggregated pending message info for a consumer group.
+/// Returns (total_pending, min_id, max_id, per_consumer_counts).
+pub fn xpending_summary(
+    &self,
+    key: &Bytes,
+    group: &Bytes,
+) -> Result<(usize, Option<StreamId>, Option<StreamId>, Vec<(Bytes, usize)>), StoreError> {
+    let mut data = self.data.write();
+
+    // Passive expiration
+    if let Some(entry) = data.get(key) {
+        if entry.is_expired() {
+            data.remove(key);
+            return Err(StoreError::NoGroup(
+                String::from_utf8_lossy(group.as_ref()).into_owned(),
+                String::from_utf8_lossy(key.as_ref()).into_owned(),
+            ));
+        }
+    }
+
+    let entry = match data.get(key) {
+        None => return Err(StoreError::NoGroup(
+            String::from_utf8_lossy(group.as_ref()).into_owned(),
+            String::from_utf8_lossy(key.as_ref()).into_owned(),
+        )),
+        Some(e) => e,
+    };
+
+    let stream = match &entry.data {
+        ValueData::Stream(s) => s,
+        _ => return Err(StoreError::WrongType),
+    };
+
+    let cg = match stream.groups.get(group) {
+        None => return Err(StoreError::NoGroup(
+            String::from_utf8_lossy(group.as_ref()).into_owned(),
+            String::from_utf8_lossy(key.as_ref()).into_owned(),
+        )),
+        Some(g) => g,
+    };
+
+    let mut total_pending: usize = 0;
+    let mut min_id: Option<StreamId> = None;
+    let mut max_id: Option<StreamId> = None;
+    let mut consumer_counts: Vec<(Bytes, usize)> = Vec::new();
+
+    for (consumer_name, consumer) in &cg.consumers {
+        let count = consumer.pending.len();
+        if count > 0 {
+            consumer_counts.push((consumer_name.clone(), count));
+            total_pending += count;
+            for (entry_id, _) in &consumer.pending {
+                match min_id {
+                    None => min_id = Some(*entry_id),
+                    Some(m) if *entry_id < m => min_id = Some(*entry_id),
+                    _ => {}
+                }
+                match max_id {
+                    None => max_id = Some(*entry_id),
+                    Some(m) if *entry_id > m => max_id = Some(*entry_id),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    Ok((total_pending, min_id, max_id, consumer_counts))
+}
+```
+  </action>
+  <verify>
+    <automated>cd /Users/alexander/dev/prefectlabs/burner-redis && cargo test -- glob_match 2>&1 | tail -20 && cargo test -- test_keys 2>&1 | tail -10 && cargo test -- test_ttl 2>&1 | tail -10 && cargo build 2>&1 | tail -5</automated>
+  </verify>
+  <acceptance_criteria>
+    - src/commands/pubsub.rs contains `range_start` and `range_end` variables inside the character class loop
+    - src/commands/pubsub.rs contains `pi += 3` for range skip logic
+    - src/commands/pubsub.rs contains test functions: test_char_class_range_lowercase, test_char_class_range_digits, test_char_class_reversed_range, test_char_class_leading_hyphen, test_char_class_trailing_hyphen
+    - src/store.rs contains `pub fn keys(&self, pattern: &[u8]) -> Vec<Bytes>`
+    - src/store.rs contains `pub fn ttl(&self, key: &Bytes) -> i64`
+    - src/store.rs contains `pub fn mget(&self, keys: &[Bytes]) -> Vec<Option<Bytes>>`
+    - src/store.rs contains `pub fn xpending_summary(`
+    - src/store.rs contains `use crate::commands::pubsub::glob_match`
+    - `cargo build` completes with zero errors
+    - `cargo test` for glob_match tests passes
+  </acceptance_criteria>
+  <done>glob_match supports [a-z] ranges, and Store has keys(), ttl(), mget(), xpending_summary() methods that compile and pass Rust unit tests</done>
+</task>
+
+<task type="auto">
+  <name>Task 2: Add PyO3 async bindings for keys, ttl, mget, and xpending in lib.rs</name>
+  <files>src/lib.rs</files>
+  <read_first>
+    - src/lib.rs (lines 1-60 for imports/helpers, 125-280 for #[pymethods] block and set/get binding patterns, 1557-1620 for xpending_range binding pattern)
+    - src/store.rs (the four new method signatures from Task 1)
+    - src/commands/streams.rs (format_stream_id function)
+  </read_first>
+  <action>
+Add four new PyO3 method bindings inside the `#[pymethods]` impl block in src/lib.rs. Follow the existing patterns exactly (extract_bytes for args, future_into_py for async, store.clone() capture).
+
+**1. keys() binding:**
+
+```rust
+/// KEYS command matching redis.asyncio.Redis.keys() signature.
+/// Returns list of keys matching the glob pattern.
+#[pyo3(signature = (pattern="*"))]
+fn keys<'py>(
+    &self,
+    py: Python<'py>,
+    pattern: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let store = self.store.clone();
+    let pat = Bytes::from(pattern.to_owned().into_bytes());
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let keys = store.keys(pat.as_ref());
+        let result: Vec<Vec<u8>> = keys.into_iter().map(|k| k.to_vec()).collect();
+        Ok(result)
+    })
+}
+```
+
+**2. ttl() binding:**
+
+```rust
+/// TTL command matching redis.asyncio.Redis.ttl() signature.
+/// Returns seconds remaining, -1 for no TTL, -2 for missing key.
+fn ttl<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let store = self.store.clone();
+    let key = extract_bytes(name)?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        Ok(store.ttl(&key))
+    })
+}
+```
+
+**3. mget() binding:**
+
+```rust
+/// MGET command matching redis.asyncio.Redis.mget() signature.
+/// Returns list of values (or None) for each key.
+#[pyo3(signature = (*keys))]
+fn mget<'py>(
+    &self,
+    py: Python<'py>,
+    keys: &Bound<'py, PyTuple>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let store = self.store.clone();
+    let key_list: Vec<Bytes> = keys
+        .iter()
+        .map(|k| extract_bytes(&k))
+        .collect::<PyResult<Vec<Bytes>>>()?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let results = store.mget(&key_list);
+        let py_results: Vec<Option<Vec<u8>>> = results
+            .into_iter()
+            .map(|opt| opt.map(|b| b.to_vec()))
+            .collect();
+        Ok(py_results)
+    })
+}
+```
+
+**4. xpending() binding (per D-11):**
+
+The redis-py `xpending(name, groupname)` summary form returns a dict:
+```python
+{"pending": int, "min": str_or_None, "max": str_or_None, "consumers": [{"name": bytes, "pending": int}]}
+```
+
+```rust
+/// XPENDING summary command matching redis.asyncio.Redis.xpending() signature.
+/// Returns dict with pending count, min/max IDs, and per-consumer counts.
+fn xpending<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    groupname: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let store = self.store.clone();
+    let key = extract_bytes(name)?;
+    let group = extract_bytes(groupname)?;
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let (total, min_id, max_id, consumers) = store
+            .xpending_summary(&key, &group)
+            .map_err(store_err_to_py)?;
+
+        Python::try_attach(|py| -> PyResult<PyObject> {
+            let dict = PyDict::new(py);
+            dict.set_item("pending", total)?;
+            match min_id {
+                Some(id) => dict.set_item("min", format_stream_id(id))?,
+                None => dict.set_item("min", py.None())?,
+            }
+            match max_id {
+                Some(id) => dict.set_item("max", format_stream_id(id))?,
+                None => dict.set_item("max", py.None())?,
+            }
+            let consumer_list = pyo3::types::PyList::empty(py);
+            for (cname, count) in consumers {
+                let cdict = PyDict::new(py);
+                cdict.set_item("name", PyBytes::new(py, &cname))?;
+                cdict.set_item("pending", count)?;
+                consumer_list.append(cdict)?;
+            }
+            dict.set_item("consumers", consumer_list)?;
+            Ok(dict.into_any().unbind())
+        })
+        .ok_or_else(|| {
+            PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("failed to attach to Python interpreter")
+        })?
+    })
+}
+```
+
+Ensure the `use` imports at the top of lib.rs include `format_stream_id` (already imported at line 16).
+  </action>
+  <verify>
+    <automated>cd /Users/alexander/dev/prefectlabs/burner-redis && cargo build 2>&1 | tail -10 && uv run python -c "from burner_redis import BurnerRedis; print('import ok')" 2>&1</automated>
+  </verify>
+  <acceptance_criteria>
+    - src/lib.rs contains `fn keys<'py>(`
+    - src/lib.rs contains `fn ttl<'py>(`
+    - src/lib.rs contains `fn mget<'py>(`
+    - src/lib.rs contains `fn xpending<'py>(`
+    - src/lib.rs xpending binding contains `dict.set_item("pending"` and `dict.set_item("min"` and `dict.set_item("consumers"`
+    - `cargo build` completes with zero errors
+    - `uv run python -c "from burner_redis import BurnerRedis"` exits 0
+  </acceptance_criteria>
+  <done>All four commands (keys, ttl, mget, xpending) have PyO3 bindings, the project compiles, and the Python module is importable</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| Python args -> Rust | User-supplied pattern strings, key names, group names cross into Rust |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-12-01 | D (Denial of Service) | glob_match with pathological patterns | accept | Existing iterative implementation with backtracking is O(m*n), already mitigated in Phase 10 (T-10-01). Range support adds constant-time work per range. |
+| T-12-02 | I (Information Disclosure) | keys() returning all keys | accept | In-process embedded database; no multi-tenant boundary. Caller already has full access to the Store. |
+| T-12-03 | D (Denial of Service) | keys(*) on very large keyspaces | accept | Embedded single-process use case; caller controls data volume. No external attack surface. |
+| T-12-04 | T (Tampering) | ttl() write lock for passive expiration cleanup | mitigate | Use write lock only when expired entry needs removal; read-then-write pattern with re-check under write lock. Matches existing get() passive expiration pattern. |
+</threat_model>
+
+<verification>
+- `cargo build` compiles with no errors
+- `cargo test` passes all existing tests plus new glob range tests
+- `uv run python -c "from burner_redis import BurnerRedis"` imports successfully
+- Keys, ttl, mget, xpending methods are visible on BurnerRedis instances
+</verification>
+
+<success_criteria>
+- glob_match supports [a-z], [0-9], [^a-z] range patterns with edge cases (reversed, leading/trailing hyphen)
+- Store.keys() filters HashMap entries by glob pattern excluding expired keys
+- Store.ttl() returns -2/-1/positive per Redis TTL semantics
+- Store.mget() returns atomic multi-key read results with None for missing/expired/non-string
+- Store.xpending_summary() aggregates PEL data across all consumers in a group
+- All four methods have PyO3 async bindings callable from Python
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-01-SUMMARY.md`
+</output>

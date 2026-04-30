@@ -1,0 +1,372 @@
+# T01: Implement the Pipeline class for batched command execution with full redis-py API compatibility.
+
+**Slice:** S07 — **Milestone:** M001
+
+## Description
+
+Implement the Pipeline class for batched command execution with full redis-py API compatibility. The Pipeline buffers commands and executes them sequentially against the BurnerRedis instance, returning results in command order.
+
+Purpose: Provide redis-py Pipeline API compatibility so Prefect code using `async with client.pipeline() as pipe` works as a drop-in replacement.
+
+Output: `python/burner_redis/pipeline.py` with Pipeline class, updated `__init__.py` with exports and factory method, `pipeline()` method on BurnerRedis Rust class, and `tests/test_pipeline.py` with comprehensive test coverage.
+
+## Legacy Source
+
+---
+phase: 07-pipeline-and-locking
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - python/burner_redis/pipeline.py
+  - python/burner_redis/__init__.py
+  - tests/test_pipeline.py
+autonomous: true
+requirements:
+  - PIPE-01
+  - PIPE-02
+  - PIPE-03
+
+must_haves:
+  truths:
+    - "User can create a pipeline via client.pipeline(), queue multiple commands, and execute them as a batch"
+    - "Pipeline execute() returns results as a list in command order"
+    - "Pipeline supports async context manager usage (async with client.pipeline() as pipe)"
+    - "Pipeline mirrors all BurnerRedis command method signatures (set, get, delete, exists, hset, hget, hdel, hvals, sadd, smembers, sismember, srem, zadd, zrem, zrange, zrangebyscore, zrangestore, zremrangebyscore, xadd, xread, xlen, xtrim, xgroup_create, xgroup_destroy, xreadgroup, xack, xautoclaim, xinfo_groups, xinfo_consumers, eval, evalsha, script_load, script_exists)"
+    - "Each pipeline command call returns self for method chaining"
+  artifacts:
+    - path: "python/burner_redis/pipeline.py"
+      provides: "Pipeline class with command buffering and batch execution"
+      contains: "class Pipeline"
+    - path: "python/burner_redis/__init__.py"
+      provides: "Pipeline export and BurnerRedis.pipeline() factory method"
+      contains: "Pipeline"
+    - path: "src/lib.rs"
+      provides: "pipeline() factory method on BurnerRedis Rust class"
+      contains: "fn pipeline"
+    - path: "tests/test_pipeline.py"
+      provides: "Comprehensive pytest suite for PIPE-01, PIPE-02, PIPE-03"
+      contains: "test_pipeline"
+  key_links:
+    - from: "python/burner_redis/pipeline.py"
+      to: "python/burner_redis/__init__.py"
+      via: "Pipeline references BurnerRedis instance methods"
+      pattern: "getattr.*self\\._client"
+    - from: "tests/test_pipeline.py"
+      to: "python/burner_redis/pipeline.py"
+      via: "Tests create pipelines and verify batched execution"
+      pattern: "client\\.pipeline\\(\\)"
+---
+
+<objective>
+Implement the Pipeline class for batched command execution with full redis-py API compatibility. The Pipeline buffers commands and executes them sequentially against the BurnerRedis instance, returning results in command order.
+
+Purpose: Provide redis-py Pipeline API compatibility so Prefect code using `async with client.pipeline() as pipe` works as a drop-in replacement.
+
+Output: `python/burner_redis/pipeline.py` with Pipeline class, updated `__init__.py` with exports and factory method, `pipeline()` method on BurnerRedis Rust class, and `tests/test_pipeline.py` with comprehensive test coverage.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@python/burner_redis/__init__.py
+@src/lib.rs
+@tests/conftest.py
+@tests/test_strings.py
+
+<interfaces>
+<!-- Key types and contracts the executor needs -->
+
+From python/burner_redis/__init__.py (existing):
+```python
+from burner_redis._burner_redis import BurnerRedis
+
+class ResponseError(Exception):
+    """Redis-compatible WRONGTYPE error."""
+    pass
+
+__all__ = ["BurnerRedis", "ResponseError"]
+```
+
+From src/lib.rs (existing BurnerRedis methods -- all async, all available on the client instance):
+```
+set(name, value, ex=None, px=None, nx=false, xx=false)
+get(name)
+delete(*names)
+exists(*names)
+hset(name, key=None, value=None, mapping=None)
+hget(name, key)
+hdel(name, *keys)
+hvals(name)
+sadd(name, *values)
+smembers(name)
+sismember(name, value)
+srem(name, *values)
+zadd(name, mapping, nx=false, xx=false, gt=false, lt=false, ch=false)
+zrem(name, *values)
+zrange(name, start, end, withscores=false)
+zrangebyscore(name, min, max, withscores=false)
+zrangestore(dest, name, start, end)
+zremrangebyscore(name, min, max)
+xadd(name, fields, id="*", maxlen=None, minid=None)
+xread(streams, count=None, block=None)
+xlen(name)
+xtrim(name, maxlen=None, minid=None)
+xgroup_create(name, groupname, id="0", mkstream=false)
+xgroup_destroy(name, groupname)
+xreadgroup(groupname, consumername, streams, count=None, block=None, noack=false)
+xack(name, groupname, *ids)
+xautoclaim(name, groupname, consumername, min_idle_time, start_id="0-0", count=None)
+xinfo_groups(name)
+xinfo_consumers(name, groupname)
+eval(script, numkeys, *keys_and_args)
+evalsha(sha, numkeys, *keys_and_args)
+script_load(script)
+script_exists(*args)
+```
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto">
+  <name>Task 1: Create Pipeline class and wire into BurnerRedis</name>
+  <files>python/burner_redis/pipeline.py, python/burner_redis/__init__.py, src/lib.rs</files>
+  <read_first>python/burner_redis/__init__.py, src/lib.rs</read_first>
+  <action>
+1. Create `python/burner_redis/pipeline.py` with the Pipeline class:
+
+```python
+"""Pipeline class for batched command execution.
+
+Provides redis-py compatible Pipeline API that buffers commands
+and executes them sequentially against a BurnerRedis instance.
+"""
+import asyncio
+
+
+class Pipeline:
+    """Buffers commands and executes them as a batch.
+
+    Created via client.pipeline(). Commands are queued as
+    (method_name, args, kwargs) tuples and executed sequentially
+    on execute(), returning results in command order.
+    """
+
+    def __init__(self, client):
+        self._client = client
+        self._commands = []
+
+    async def execute(self):
+        """Execute all queued commands and return results in order."""
+        results = []
+        for method_name, args, kwargs in self._commands:
+            method = getattr(self._client, method_name)
+            result = await method(*args, **kwargs)
+            results.append(result)
+        self._commands = []
+        return results
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            await self.execute()
+        return False
+```
+
+For EVERY method listed in the interfaces block above (set, get, delete, exists, hset, hget, hdel, hvals, sadd, smembers, sismember, srem, zadd, zrem, zrange, zrangebyscore, zrangestore, zremrangebyscore, xadd, xread, xlen, xtrim, xgroup_create, xgroup_destroy, xreadgroup, xack, xautoclaim, xinfo_groups, xinfo_consumers, eval, evalsha, script_load, script_exists), add a method that mirrors the signature and appends to `self._commands`. Each returns `self` for chaining.
+
+Pattern for each method:
+```python
+def set(self, name, value, ex=None, px=None, nx=False, xx=False):
+    self._commands.append(("set", (name, value), {"ex": ex, "px": px, "nx": nx, "xx": xx}))
+    return self
+
+def get(self, name):
+    self._commands.append(("get", (name,), {}))
+    return self
+
+def delete(self, *names):
+    self._commands.append(("delete", names, {}))
+    return self
+```
+
+Follow this pattern for ALL methods. The method signatures MUST match the BurnerRedis method signatures exactly (same parameter names, same defaults).
+
+IMPORTANT: Methods on Pipeline are synchronous (they just buffer). Only `execute()` is async.
+
+2. Update `python/burner_redis/__init__.py`:
+
+Add import of Pipeline at the top:
+```python
+from burner_redis._burner_redis import BurnerRedis
+from burner_redis.pipeline import Pipeline
+```
+
+Add `Pipeline` to `__all__`.
+
+Add a `pipeline()` function to BurnerRedis by monkey-patching after import:
+```python
+def _pipeline(self):
+    """Create a Pipeline for batched command execution."""
+    return Pipeline(self)
+
+BurnerRedis.pipeline = _pipeline
+```
+
+This approach avoids Rust changes for a pure Python factory method. The monkey-patch is applied at module load time.
+
+3. In `src/lib.rs`, do NOT add a pipeline() method -- the monkey-patch approach in __init__.py is simpler and sufficient since Pipeline is pure Python. No Rust changes needed for this task.
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && python -c "from burner_redis import BurnerRedis, Pipeline; r = BurnerRedis(); p = r.pipeline(); print('Pipeline created:', type(p).__name__)" 2>&1</automated>
+  </verify>
+  <acceptance_criteria>
+    - grep -q "class Pipeline" python/burner_redis/pipeline.py
+    - grep -q "def execute" python/burner_redis/pipeline.py
+    - grep -q "__aenter__" python/burner_redis/pipeline.py
+    - grep -q "__aexit__" python/burner_redis/pipeline.py
+    - grep -q "def set" python/burner_redis/pipeline.py
+    - grep -q "def get" python/burner_redis/pipeline.py
+    - grep -q "def delete" python/burner_redis/pipeline.py
+    - grep -q "def exists" python/burner_redis/pipeline.py
+    - grep -q "def hset" python/burner_redis/pipeline.py
+    - grep -q "def sadd" python/burner_redis/pipeline.py
+    - grep -q "def zadd" python/burner_redis/pipeline.py
+    - grep -q "def xadd" python/burner_redis/pipeline.py
+    - grep -q "def eval" python/burner_redis/pipeline.py
+    - grep -q "def evalsha" python/burner_redis/pipeline.py
+    - grep -q "_commands" python/burner_redis/pipeline.py
+    - grep -q "return self" python/burner_redis/pipeline.py
+    - grep -q "Pipeline" python/burner_redis/__init__.py
+    - grep -q "pipeline" python/burner_redis/__init__.py
+    - python -c "from burner_redis import BurnerRedis, Pipeline; r = BurnerRedis(); p = r.pipeline()" succeeds
+  </acceptance_criteria>
+  <done>Pipeline class exists in python/burner_redis/pipeline.py with all BurnerRedis command methods mirrored as synchronous buffer-and-return-self methods. execute() is async and runs all buffered commands sequentially. Async context manager support via __aenter__/__aexit__. BurnerRedis.pipeline() factory method works via monkey-patch in __init__.py. Pipeline importable from burner_redis package.</done>
+</task>
+
+<task type="auto">
+  <name>Task 2: Comprehensive pytest suite for Pipeline</name>
+  <files>tests/test_pipeline.py</files>
+  <read_first>tests/conftest.py, tests/test_strings.py, python/burner_redis/pipeline.py, python/burner_redis/__init__.py</read_first>
+  <action>
+Create `tests/test_pipeline.py` with the following test structure:
+
+```python
+"""Tests for Pipeline batched command execution.
+
+Covers requirements: PIPE-01, PIPE-02, PIPE-03.
+"""
+import pytest
+from burner_redis import BurnerRedis
+```
+
+All tests are async, use the `r` fixture from conftest.py.
+
+**PIPE-01 (Pipeline creation and command queuing):**
+
+- `test_pipeline_creation`: `r.pipeline()` returns a Pipeline instance
+- `test_pipeline_queue_and_execute`: Create pipeline, call `pipe.set("k1", "v1")`, `pipe.set("k2", "v2")`, `results = await pipe.execute()`. Assert results is `[True, True]`
+- `test_pipeline_get_after_set`: Pipeline `pipe.set("k", "v")` then `pipe.get("k")`. Execute. Results: `[True, b"v"]`
+- `test_pipeline_mixed_commands`: Pipeline set, get, delete, exists in sequence. Execute. Verify results list has correct types and values in order.
+- `test_pipeline_hash_commands`: Pipeline hset, hget, hvals. Execute. Verify results.
+- `test_pipeline_set_commands`: Pipeline sadd, sismember, smembers. Execute. Verify results.
+- `test_pipeline_sorted_set_commands`: Pipeline zadd, zrange. Execute. Verify results.
+- `test_pipeline_stream_commands`: Pipeline xadd, xlen. Execute. Verify results.
+- `test_pipeline_scripting_commands`: Pipeline eval("return 42", 0), script_load("return 1"). Execute. Verify results.
+- `test_pipeline_clears_after_execute`: Execute pipeline, then execute again. Second execute returns empty list `[]`.
+- `test_pipeline_empty_execute`: Pipeline with no commands, execute returns `[]`.
+
+**PIPE-02 (Results in command order):**
+
+- `test_pipeline_result_order`: Queue 5 different commands (set, set, get, get, exists). Execute. Assert results[0] is True (set), results[1] is True (set), results[2] is bytes (get), results[3] is bytes (get), results[4] is int (exists count).
+- `test_pipeline_preserves_none`: Pipeline get("nonexistent"). Execute. Results: `[None]`.
+
+**PIPE-03 (Async context manager):**
+
+- `test_pipeline_context_manager`: `async with r.pipeline() as pipe: pipe.set("k", "v"); pipe.get("k")` -- after the block, verify `await r.get("k") == b"v"` (commands were executed on __aexit__).
+- `test_pipeline_context_manager_with_explicit_execute`: Inside the context manager, call `results = await pipe.execute()` explicitly. Verify results. After the block, the second implicit execute returns `[]` (already cleared).
+- `test_pipeline_context_manager_exception`: Raise an exception inside the context manager. Verify commands were NOT executed (the key should not exist). Use `pytest.raises`.
+
+**Method chaining:**
+
+- `test_pipeline_method_chaining`: `pipe.set("k1", "v1").set("k2", "v2").get("k1")` -- each returns the pipeline. Execute returns `[True, True, b"v1"]`.
+
+**Error handling:**
+
+- `test_pipeline_wrongtype_error`: Pipeline hset on a string key. Execute should raise an exception (WRONGTYPE propagates from the individual command).
+
+IMPORTANT: All test functions must be `async def` and use the `r` fixture. Use `@pytest.mark.asyncio` is NOT needed since conftest.py provides the configuration (check if asyncio_mode is set; if not, add the marker).
+
+IMPORTANT: When testing context manager auto-execute, verify side effects OUTSIDE the block. The commands are executed when __aexit__ runs.
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && python -m pytest tests/test_pipeline.py -x -v 2>&1 | tail -40</automated>
+  </verify>
+  <acceptance_criteria>
+    - grep -q "PIPE-01" tests/test_pipeline.py
+    - grep -q "PIPE-02" tests/test_pipeline.py
+    - grep -q "PIPE-03" tests/test_pipeline.py
+    - grep -q "test_pipeline_creation" tests/test_pipeline.py
+    - grep -q "test_pipeline_queue_and_execute" tests/test_pipeline.py
+    - grep -q "test_pipeline_context_manager" tests/test_pipeline.py
+    - grep -q "test_pipeline_result_order" tests/test_pipeline.py
+    - grep -q "test_pipeline_method_chaining" tests/test_pipeline.py
+    - grep -q "test_pipeline_mixed_commands" tests/test_pipeline.py
+    - grep -q "test_pipeline_clears_after_execute" tests/test_pipeline.py
+    - grep -q "test_pipeline_empty_execute" tests/test_pipeline.py
+    - grep -q "test_pipeline_context_manager_exception" tests/test_pipeline.py
+    - python -m pytest tests/test_pipeline.py -x passes
+    - python -m pytest tests/ -x passes (full regression)
+  </acceptance_criteria>
+  <done>Comprehensive pytest suite in tests/test_pipeline.py covers all 3 PIPE requirements. Tests validate: pipeline creation and command queuing with execute returning batch results (PIPE-01), results returned in command order with correct types (PIPE-02), async context manager auto-executing on clean exit and skipping on exception (PIPE-03). Method chaining, empty execute, clear-after-execute, mixed command types, and WRONGTYPE error propagation all tested. Full regression suite passes.</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| Python user -> Pipeline | User queues arbitrary method names/args into the command buffer |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-07-01 | Tampering | Pipeline command buffer | accept | Pipeline only calls methods on its own BurnerRedis client instance via getattr; no external dispatch. In-process library, user controls own input. |
+| T-07-02 | Denial of Service | Unbounded command queue | accept | No queue size limit; in-process library, user controls own input. Memory bounded by process limits. |
+</threat_model>
+
+<verification>
+1. `python -c "from burner_redis import BurnerRedis, Pipeline"` imports successfully
+2. `r.pipeline()` returns a Pipeline instance
+3. `python -m pytest tests/test_pipeline.py -v` all pipeline tests pass
+4. `python -m pytest tests/ -v` full regression suite passes
+5. Pipeline buffers commands and returns results in order on execute()
+6. Async context manager auto-executes on clean exit, skips on exception
+7. Method chaining works (each command method returns self)
+</verification>
+
+<success_criteria>
+- Pipeline class mirrors all BurnerRedis command signatures
+- execute() runs buffered commands sequentially and returns results list
+- Async context manager (async with client.pipeline() as pipe) works correctly
+- Method chaining supported (pipe.set(...).get(...).execute())
+- Tests cover all 3 PIPE requirements with multiple cases each
+- Full test suite (all prior phases + pipeline) passes with zero regressions
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/07-pipeline-and-locking/07-01-SUMMARY.md`
+</output>

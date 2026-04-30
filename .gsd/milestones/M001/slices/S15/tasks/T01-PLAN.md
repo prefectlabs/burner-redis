@@ -1,0 +1,659 @@
+# T01: Close the three minor wiring/coverage gaps surfaced by the v0.
+
+**Slice:** S15 — **Milestone:** M001
+
+## Description
+
+Close the three minor wiring/coverage gaps surfaced by the v0.1.6 milestone audit:
+
+1. **ISSUE-1 (NoScriptError):** Wire the existing `burner_redis.NoScriptError` (and `redis.exceptions.NoScriptError` superclass) into the EVALSHA error path so callers can `except NoScriptError:` instead of catching the generic `ResponseError`. Tighten the regression test in place.
+2. **ISSUE-2 (Pipeline zrangestore / zcount):** The Rust dispatch arms already exist in `src/lib.rs` (lines 3110 and 3146, added in commit `de9d259` on 2026-04-15 — the audit referenced stale line numbers `3823-3824`). Add regression tests so this silent gap cannot reappear, and update the audit doc to record the historical context.
+3. **ISSUE-3 (List persistence coverage):** Production code already serializes `ValueData::List` via `PersistableValueData::List` (`src/store.rs:3470-3478`). Add the missing test coverage on both the Rust side (`test_round_trip_all_types`) and the Python side (new `test_list_persistence`).
+
+Purpose: Close the v0.1.6 milestone audit's `tech_debt` issues without scope creep. Every audit REQ-ID listed in the phase manifest (D-08, ZSET-04, ZSET-06, PERS-01..04, LIST-01..16) is **re-verified** in this plan — the originating phases (12, 3, 8, 14) already shipped the underlying functionality; this phase confirms the wiring and coverage are complete.
+
+Output: One Rust helper (`make_noscript_error`), one branched call site (`evalsha` Err), one Rust unit-test extension (list_key in `test_round_trip_all_types`), three new Python tests (`test_evalsha_unknown_sha_raises` retightened in place + two pipeline regressions + one persistence regression), and one audit-doc clarification note.
+
+## Legacy Source
+
+---
+phase: 15-close-v0.1.6-wiring-and-coverage-gaps
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - src/lib.rs
+  - tests/test_scripting.py
+  - tests/test_pipeline.py
+  - src/persistence.rs
+  - tests/test_persistence.py
+  - .planning/v0.1.6-MILESTONE-AUDIT.md
+autonomous: true
+requirements:
+  - D-08
+  - ZSET-04
+  - ZSET-06
+  - PERS-01
+  - PERS-02
+  - PERS-03
+  - PERS-04
+  - LIST-01
+  - LIST-02
+  - LIST-03
+  - LIST-04
+  - LIST-05
+  - LIST-06
+  - LIST-07
+  - LIST-08
+  - LIST-09
+  - LIST-10
+  - LIST-11
+  - LIST-12
+  - LIST-13
+  - LIST-14
+  - LIST-15
+  - LIST-16
+tags:
+  - rust
+  - python-bindings
+  - error-mapping
+  - tests
+  - persistence
+  - lists
+
+must_haves:
+  truths:
+    - "src/lib.rs has fn make_noscript_error returning PyErr with resolution order: redis.exceptions.NoScriptError → burner_redis.NoScriptError → pyo3::exceptions::PyException (per D-01)"
+    - "src/lib.rs evalsha Err branch routes to make_noscript_error when message starts with 'NOSCRIPT', otherwise make_response_error (per D-02, D-03)"
+    - "tests/test_scripting.py test_evalsha_unknown_sha_raises uses pytest.raises(NoScriptError) with NoScriptError imported from burner_redis (per D-04)"
+    - "tests/test_pipeline.py asserts Pipeline.zrangestore and Pipeline.zcount produce results equivalent to the standalone BurnerRedis pymethods (per D-06)"
+    - "src/persistence.rs test_round_trip_all_types includes a list_key seeded via rpush with ordered byte values; lrange after reload returns the same byte sequence in the same order (per D-08)"
+    - "tests/test_persistence.py contains test_list_persistence: client1 rpush + save, client2 with same persistence_path reads the same list with order preserved (per D-09)"
+    - ".planning/v0.1.6-MILESTONE-AUDIT.md notes ISSUE-2 was already wired in commit de9d259 and Phase 15 added regression coverage (per D-07)"
+    - "All Rust unit tests pass: cargo test --lib persistence"
+    - "All Python tests pass: pytest tests/test_scripting.py tests/test_pipeline.py tests/test_persistence.py"
+    - "EVALSHA on unknown SHA raises redis.exceptions.NoScriptError when redis is installed; raises burner_redis.NoScriptError otherwise (closes ISSUE-1, re-verifies D-08)"
+    - "Pipeline.zrangestore() and Pipeline.zcount() execute correctly through dispatch_pipeline_command (closes ISSUE-2, re-verifies ZSET-04 and ZSET-06)"
+    - "ValueData::List round-trips through persistence with order preserved on both Rust and Python sides (closes ISSUE-3, re-verifies PERS-01..04 and LIST-01..16)"
+  artifacts:
+    - path: "src/lib.rs"
+      provides: "make_noscript_error helper + branched evalsha Err arm"
+      contains: "fn make_noscript_error"
+    - path: "tests/test_scripting.py"
+      provides: "Tightened test_evalsha_unknown_sha_raises asserting NoScriptError"
+      contains: "pytest.raises(NoScriptError)"
+    - path: "tests/test_pipeline.py"
+      provides: "Pipeline regression coverage for zrangestore + zcount"
+      contains: "test_pipeline_zrangestore"
+    - path: "src/persistence.rs"
+      provides: "List round-trip assertion inside test_round_trip_all_types"
+      contains: "list_key"
+    - path: "tests/test_persistence.py"
+      provides: "Python test_list_persistence (save/restore on a populated list)"
+      contains: "test_list_persistence"
+    - path: ".planning/v0.1.6-MILESTONE-AUDIT.md"
+      provides: "Audit-doc note that ISSUE-2 was wired in de9d259"
+      contains: "de9d259"
+  key_links:
+    - from: "src/lib.rs evalsha Err branch (line ~1860)"
+      to: "make_noscript_error helper"
+      via: "if msg.starts_with(\"NOSCRIPT\") { make_noscript_error(msg) } else { make_response_error(msg) }"
+      pattern: "make_noscript_error"
+    - from: "tests/test_scripting.py"
+      to: "burner_redis.NoScriptError"
+      via: "from burner_redis import NoScriptError + pytest.raises(NoScriptError)"
+      pattern: "from burner_redis import .*NoScriptError"
+    - from: "tests/test_pipeline.py Pipeline.zrangestore()"
+      to: "src/lib.rs:3110 dispatch_pipeline_command zrangestore arm"
+      via: "pipe.zrangestore() → execute() → dispatch_pipeline_command"
+      pattern: "pipe\\.zrangestore"
+    - from: "tests/test_pipeline.py Pipeline.zcount()"
+      to: "src/lib.rs:3146 dispatch_pipeline_command zcount arm"
+      via: "pipe.zcount() → execute() → dispatch_pipeline_command"
+      pattern: "pipe\\.zcount"
+    - from: "src/persistence.rs test_round_trip_all_types"
+      to: "PersistableValueData::List arm at src/store.rs:3470-3478"
+      via: "rpush → save_to_path → load_from_path → into_runtime → lrange"
+      pattern: "list_key"
+    - from: "tests/test_persistence.py test_list_persistence"
+      to: "PersistableValueData::List wire format"
+      via: "client1.rpush → client1.save → client2(persistence_path=...).lrange"
+      pattern: "test_list_persistence"
+---
+
+<objective>
+Close the three minor wiring/coverage gaps surfaced by the v0.1.6 milestone audit:
+
+1. **ISSUE-1 (NoScriptError):** Wire the existing `burner_redis.NoScriptError` (and `redis.exceptions.NoScriptError` superclass) into the EVALSHA error path so callers can `except NoScriptError:` instead of catching the generic `ResponseError`. Tighten the regression test in place.
+2. **ISSUE-2 (Pipeline zrangestore / zcount):** The Rust dispatch arms already exist in `src/lib.rs` (lines 3110 and 3146, added in commit `de9d259` on 2026-04-15 — the audit referenced stale line numbers `3823-3824`). Add regression tests so this silent gap cannot reappear, and update the audit doc to record the historical context.
+3. **ISSUE-3 (List persistence coverage):** Production code already serializes `ValueData::List` via `PersistableValueData::List` (`src/store.rs:3470-3478`). Add the missing test coverage on both the Rust side (`test_round_trip_all_types`) and the Python side (new `test_list_persistence`).
+
+Purpose: Close the v0.1.6 milestone audit's `tech_debt` issues without scope creep. Every audit REQ-ID listed in the phase manifest (D-08, ZSET-04, ZSET-06, PERS-01..04, LIST-01..16) is **re-verified** in this plan — the originating phases (12, 3, 8, 14) already shipped the underlying functionality; this phase confirms the wiring and coverage are complete.
+
+Output: One Rust helper (`make_noscript_error`), one branched call site (`evalsha` Err), one Rust unit-test extension (list_key in `test_round_trip_all_types`), three new Python tests (`test_evalsha_unknown_sha_raises` retightened in place + two pipeline regressions + one persistence regression), and one audit-doc clarification note.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@.planning/REQUIREMENTS.md
+@.planning/v0.1.6-MILESTONE-AUDIT.md
+@.planning/phases/15-close-v0.1.6-wiring-and-coverage-gaps/15-CONTEXT.md
+
+<interfaces>
+<!-- Key types and call sites the executor needs. Extracted from the codebase; -->
+<!-- executor should use these directly without further exploration. -->
+
+Existing helper at src/lib.rs:82-96 (template for the new make_noscript_error):
+```rust
+/// Create a Redis-compatible ResponseError.
+/// Uses redis.exceptions.ResponseError if available (for pydocket/redis-py compatibility),
+/// falls back to Python's Exception.
+fn make_response_error(msg: String) -> PyErr {
+    match Python::try_attach(|py| -> PyResult<PyErr> {
+        if let Ok(redis_exc) = py.import("redis.exceptions") {
+            if let Ok(response_error_type) = redis_exc.getattr("ResponseError") {
+                if let Ok(exc_type) = response_error_type.downcast::<pyo3::types::PyType>() {
+                    return Ok(PyErr::from_type(exc_type.clone(), msg.clone()));
+                }
+            }
+        }
+        Ok(pyo3::exceptions::PyException::new_err(msg.clone()))
+    }) {
+        Some(Ok(err)) => err,
+        _ => pyo3::exceptions::PyException::new_err(msg),
+    }
+}
+```
+
+Existing call site at src/lib.rs:1854-1861 (evalsha Err branch — the only edit point in this file):
+```rust
+let result = self.store.evalsha(&sha, keys, args);
+match result {
+    Ok(val) => {
+        let py_val = redis_value_to_py(py, val)?;
+        resolved(py, py_val)
+    }
+    Err(msg) => Err(make_response_error(msg)),
+}
+```
+
+Existing pipeline dispatch arms at src/lib.rs:3110-3121 and src/lib.rs:3146-3155 (NO source change — just verify regression tests pass):
+```rust
+"zrangestore" => {
+    let dest = &args.get_item(0)?;
+    let name = &args.get_item(1)?;
+    let start = &args.get_item(2)?;
+    let end = &args.get_item(3)?;
+    let dst_bytes = extract_bytes(dest)?;
+    let src_bytes = extract_bytes(name)?;
+    let min_f64 = parse_score_bound(start)?;
+    let max_f64 = parse_score_bound(end)?;
+    let count = self.store.zrangestore(dst_bytes, &src_bytes, min_f64, max_f64).map_err(store_err_to_py)?;
+    Ok(count.into_pyobject(py)?.into_any().unbind())
+}
+// ...
+"zcount" => {
+    let name = &args.get_item(0)?;
+    let min = &args.get_item(1)?;
+    let max = &args.get_item(2)?;
+    let name_bytes = extract_bytes(name)?;
+    let min_f64 = parse_score_bound(min)?;
+    let max_f64 = parse_score_bound(max)?;
+    let count = self.store.zcount(&name_bytes, min_f64, max_f64).map_err(store_err_to_py)?;
+    Ok(count.into_pyobject(py)?.into_any().unbind())
+}
+```
+
+Existing dual-class definition at python/burner_redis/__init__.py:26-38 (already exported, just unreachable until Task 1 wires it in):
+```python
+class NoScriptError(Exception):
+    """Raised when EVALSHA references an unknown script SHA."""
+    pass
+
+
+try:
+    import redis.exceptions
+
+    class NoScriptError(redis.exceptions.NoScriptError):  # type: ignore[no-redef]
+        """Raised when EVALSHA references an unknown script SHA (subclass of redis.exceptions.NoScriptError)."""
+        pass
+except (ImportError, AttributeError):
+    pass
+```
+
+Existing pattern in tests/test_pipeline.py:80-87 (template for the new pipeline regression tests):
+```python
+async def test_pipeline_sorted_set_commands(r):
+    """PIPE-01: Pipeline zadd, zrange returns correct results."""
+    pipe = r.pipeline()
+    pipe.zadd("zset", {"a": 1.0, "b": 2.0, "c": 3.0})
+    pipe.zrange("zset", 0, -1)
+    results = await pipe.execute()
+    assert results[0] == 3
+    assert results[1] == [b"a", b"b", b"c"]
+```
+
+Existing pattern in tests/test_persistence.py:20-33 (template for test_list_persistence):
+```python
+@pytest.mark.asyncio
+async def test_save_and_restore(tmp_path):
+    """PERS-01, PERS-03: Manual save persists data, new instance restores it."""
+    client = BurnerRedis(persistence_path=tmp_path)
+    await client.set("key1", "value1")
+    await client.hset("hash1", mapping={"f1": "v1"})
+    await client.save()
+
+    # New instance should restore data
+    client2 = BurnerRedis(persistence_path=tmp_path)
+    result = await client2.get("key1")
+    assert result == b"value1"
+    result = await client2.hget("hash1", "f1")
+    assert result == b"v1"
+```
+
+Existing wire format at src/store.rs:3470-3478 (NO change — just evidence that the variant round-trips):
+```rust
+pub enum PersistableValueData {
+    String(Vec<u8>),
+    Hash(Vec<(Vec<u8>, Vec<u8>)>),
+    Set(Vec<Vec<u8>>),
+    SortedSet(PersistableSortedSet),
+    Stream(PersistableStream),
+    /// Serialized as Vec<Vec<u8>> (same shape as Set); order is preserved
+    /// by virtue of being a Vec. Deserialized back into a VecDeque<Bytes>.
+    List(Vec<Vec<u8>>),
+}
+```
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto">
+  <name>Task 1: Wire NoScriptError into the evalsha error path and tighten the regression test</name>
+  <files>src/lib.rs, tests/test_scripting.py, .planning/v0.1.6-MILESTONE-AUDIT.md</files>
+  <read_first>
+    - src/lib.rs lines 75-100 (existing make_response_error helper — structural template)
+    - src/lib.rs lines 1840-1862 (the evalsha pymethod, including the Err branch on line 1860)
+    - python/burner_redis/__init__.py lines 26-38 (existing NoScriptError dual-class)
+    - tests/test_scripting.py lines 1-95 (whole file, including the test at line 83 to retighten)
+    - .planning/v0.1.6-MILESTONE-AUDIT.md lines 17-30 (ISSUE-1 evidence + remediation language) and lines 22-26 (ISSUE-2 evidence — needed for the audit-doc note)
+  </read_first>
+  <action>
+**Step 1 — Add `make_noscript_error` helper to src/lib.rs immediately after `make_response_error` (after line 96).** This mirrors `make_response_error` exactly but resolves to `NoScriptError`. Per D-01, the resolution order is `redis.exceptions.NoScriptError` → `burner_redis.NoScriptError` → `pyo3::exceptions::PyException`. Insert the following verbatim:
+
+```rust
+/// Create a Redis-compatible NoScriptError raised by EVALSHA on unknown SHAs.
+/// Uses redis.exceptions.NoScriptError if available (for redis-py compatibility),
+/// falls back to burner_redis.NoScriptError, then to Python's Exception.
+fn make_noscript_error(msg: String) -> PyErr {
+    match Python::try_attach(|py| -> PyResult<PyErr> {
+        if let Ok(redis_exc) = py.import("redis.exceptions") {
+            if let Ok(noscript_type) = redis_exc.getattr("NoScriptError") {
+                if let Ok(exc_type) = noscript_type.downcast::<pyo3::types::PyType>() {
+                    return Ok(PyErr::from_type(exc_type.clone(), msg.clone()));
+                }
+            }
+        }
+        if let Ok(burner_mod) = py.import("burner_redis") {
+            if let Ok(noscript_type) = burner_mod.getattr("NoScriptError") {
+                if let Ok(exc_type) = noscript_type.downcast::<pyo3::types::PyType>() {
+                    return Ok(PyErr::from_type(exc_type.clone(), msg.clone()));
+                }
+            }
+        }
+        Ok(pyo3::exceptions::PyException::new_err(msg.clone()))
+    }) {
+        Some(Ok(err)) => err,
+        _ => pyo3::exceptions::PyException::new_err(msg),
+    }
+}
+```
+
+**Step 2 — Branch the evalsha Err arm at src/lib.rs:1860.** Per D-02, replace the unconditional `Err(make_response_error(msg))` with prefix-routing. Per D-03, do NOT generalize `make_response_error` itself — the routing lives at this single call site only. The new arm reads:
+
+```rust
+Err(msg) => {
+    if msg.starts_with("NOSCRIPT") {
+        Err(make_noscript_error(msg))
+    } else {
+        Err(make_response_error(msg))
+    }
+}
+```
+
+The `starts_with("NOSCRIPT")` check is exact-match (case-sensitive), matching the canonical Redis NOSCRIPT error wording. Do not lowercase or fuzzy-match.
+
+**Step 3 — Tighten tests/test_scripting.py:83 in place.** Per D-04, do NOT add a new test; modify the existing `test_evalsha_unknown_sha_raises` body. Required edits:
+
+1. Add `from burner_redis import NoScriptError` to the imports at the top of `tests/test_scripting.py` (alongside any existing `from burner_redis import ...`). If there is no existing burner_redis import, add a fresh line. Per D-04, NoScriptError must be imported from `burner_redis` (not from `redis.exceptions` directly) so the test passes whether or not `redis` is installed in the test env — burner_redis re-exports the right class via the dual-definition fallback.
+2. Replace the body of `test_evalsha_unknown_sha_raises` (currently `with pytest.raises(Exception, match="NOSCRIPT"):`) with `with pytest.raises(NoScriptError):`. Drop the `match=` argument — type assertion is sufficient and stricter.
+
+The retightened test should look like:
+```python
+async def test_evalsha_unknown_sha_raises(r):
+    """LUA-02: EVALSHA with unknown SHA raises NoScriptError."""
+    with pytest.raises(NoScriptError):
+        await r.evalsha("deadbeef" * 5, 0)
+```
+
+**Step 4 — Update .planning/v0.1.6-MILESTONE-AUDIT.md (per D-07).** Find the ISSUE-2 entry in the YAML frontmatter `gaps.integration` block (titled "Pipeline stubs for zrangestore/zcount have no Rust dispatch arm"). Append a new field (after `remediation:`) clarifying the historical state:
+
+```yaml
+      historical_note: "Dispatch arms were already wired in commit de9d259 (2026-04-15) at src/lib.rs:3110 (zrangestore) and src/lib.rs:3146 (zcount); audit's stale line numbers (3823-3824) misled the gap-check. Phase 15 added regression tests in tests/test_pipeline.py to prevent silent re-regression."
+```
+
+Also add a paragraph beneath the prose `### ISSUE-2: Pipeline runtime error for zrangestore/zcount` section in the body (immediately after the `**Remediation:**` line), starting with: `**Status (Phase 15):** Already wired in commit de9d259 (2026-04-15) — Phase 15 added regression coverage in tests/test_pipeline.py.`
+
+Do NOT bump the milestone status from `tech_debt` — that decision is part of milestone closure, separate from audit-gap closure.
+  </action>
+  <verify>
+    <automated>cargo build --release 2>&amp;1 | tail -20 &amp;&amp; pytest tests/test_scripting.py::test_evalsha_unknown_sha_raises -xvs</automated>
+  </verify>
+  <acceptance_criteria>
+    - `grep -n "fn make_noscript_error" src/lib.rs` returns at least one line
+    - `grep -A 22 "fn make_noscript_error" src/lib.rs` shows the resolution order: `py.import("redis.exceptions")` then `getattr("NoScriptError")` precedes `py.import("burner_redis")` then `getattr("NoScriptError")`, with the `pyo3::exceptions::PyException::new_err` fallback last
+    - `grep -B 2 -A 5 'msg.starts_with("NOSCRIPT")' src/lib.rs` shows the branch lives inside the evalsha Err arm and calls `make_noscript_error(msg)` on the true branch and `make_response_error(msg)` on the false branch
+    - `grep -c 'msg.starts_with("NOSCRIPT")' src/lib.rs` returns exactly `1` (the routing is single-sourced; D-03 must hold)
+    - `grep -n "from burner_redis import .*NoScriptError" tests/test_scripting.py` returns at least one match
+    - `grep -n "pytest.raises(NoScriptError)" tests/test_scripting.py` returns at least one match
+    - `grep -c 'pytest.raises(Exception, match="NOSCRIPT")' tests/test_scripting.py` returns `0` (the loose old assertion is gone)
+    - `cargo build --release` exits 0 (helper compiles, no warnings introduced from this edit)
+    - `cargo test --lib -- --nocapture 2>&amp;1 | tail -20` shows the existing test suite still passes (no regression in adjacent code)
+    - `pytest tests/test_scripting.py::test_evalsha_unknown_sha_raises -xvs` exits 0 with NoScriptError raised (verified by pytest.raises type-match)
+    - `pytest tests/test_scripting.py -xvs 2>&amp;1 | tail -10` shows the full scripting test suite still passes
+    - `grep -A 1 "ISSUE-2:" .planning/v0.1.6-MILESTONE-AUDIT.md | grep -i "de9d259\|already wired"` returns at least one match (audit doc records the historical fix)
+    - `grep "historical_note:" .planning/v0.1.6-MILESTONE-AUDIT.md` returns at least one match
+    - `python -c "from burner_redis import NoScriptError; print(NoScriptError.__mro__)"` prints an MRO that includes either `redis.exceptions.NoScriptError` (when redis is installed) or `Exception` (when it isn't) — confirms the dual-class export is intact and importable
+  </acceptance_criteria>
+  <done>
+    - `make_noscript_error` exists in src/lib.rs and follows the three-tier resolution chain in D-01.
+    - The evalsha Err arm at src/lib.rs:~1860 routes NOSCRIPT-prefixed messages to `make_noscript_error`, all others to `make_response_error`.
+    - `make_response_error` is unchanged (D-03: no global NOSCRIPT sniffing).
+    - `tests/test_scripting.py::test_evalsha_unknown_sha_raises` asserts `pytest.raises(NoScriptError)` with NoScriptError imported from `burner_redis`.
+    - `.planning/v0.1.6-MILESTONE-AUDIT.md` records that ISSUE-2 was already wired in `de9d259` (per D-07).
+    - All Python and Rust tests still pass.
+  </done>
+</task>
+
+<task type="auto">
+  <name>Task 2: Add Pipeline regression tests for zrangestore and zcount</name>
+  <files>tests/test_pipeline.py</files>
+  <read_first>
+    - tests/test_pipeline.py lines 1-110 (whole file shape — confirm fixture name `r` and existing async test pattern)
+    - tests/test_pipeline.py lines 80-87 (existing `test_pipeline_sorted_set_commands` — direct shape template)
+    - python/burner_redis/pipeline.py lines 195-201 (Pipeline.zrangestore and Pipeline.zcount stub signatures)
+    - src/lib.rs lines 3110-3155 (already-wired dispatch arms — evidence the test should pass without a source change)
+  </read_first>
+  <action>
+**No `src/lib.rs` source change** (per D-05; arms already exist at lines 3110 and 3146 from commit `de9d259`). This task adds regression coverage only.
+
+Add **two new test functions** to `tests/test_pipeline.py` immediately after the existing `test_pipeline_sorted_set_commands` (after line 87). Per D-06 the planner picks the cleaner shape — adjacent dedicated tests are more discoverable than mutating the existing function and keep regression failures clearly attributed.
+
+```python
+async def test_pipeline_zrangestore(r):
+    """ZSET-04 / Phase 15 ISSUE-2 regression: Pipeline.zrangestore dispatches and produces
+    the same result as the standalone BurnerRedis.zrangestore pymethod.
+    """
+    # Seed source via standalone command, then run zrangestore through the pipeline.
+    await r.zadd("src_zset", {"a": 1.0, "b": 2.0, "c": 3.0})
+
+    pipe = r.pipeline()
+    pipe.zrangestore("dest_zset", "src_zset", 0, 10)
+    pipe.zrange("dest_zset", 0, -1)
+    results = await pipe.execute()
+
+    assert results[0] == 3  # Pipeline.zrangestore returns the count of stored members
+    assert results[1] == [b"a", b"b", b"c"]
+
+    # Cross-check against the standalone pymethod with a fresh destination key.
+    standalone_count = await r.zrangestore("dest_zset_standalone", "src_zset", 0, 10)
+    assert standalone_count == results[0]
+    standalone_members = await r.zrange("dest_zset_standalone", 0, -1)
+    assert standalone_members == results[1]
+
+
+async def test_pipeline_zcount(r):
+    """ZSET-06 / Phase 15 ISSUE-2 regression: Pipeline.zcount dispatches and produces
+    the same result as the standalone BurnerRedis.zcount pymethod.
+    """
+    await r.zadd("zset", {"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0})
+
+    pipe = r.pipeline()
+    pipe.zcount("zset", 2.0, 3.0)
+    pipe.zcount("zset", "-inf", "+inf")
+    results = await pipe.execute()
+
+    assert results[0] == 2  # b and c are in [2.0, 3.0]
+    assert results[1] == 4  # all four members
+
+    # Cross-check against the standalone pymethod.
+    standalone_inclusive = await r.zcount("zset", 2.0, 3.0)
+    standalone_all = await r.zcount("zset", "-inf", "+inf")
+    assert standalone_inclusive == results[0]
+    assert standalone_all == results[1]
+```
+
+Notes:
+- Use `await r.zadd(...)` to seed because the goal is to exercise the **pipeline dispatch arm**, not to chain everything inside one pipeline. Mixing seeded data with the pipeline call isolates the dispatch concern.
+- Use distinct key names (`src_zset`, `dest_zset`, `dest_zset_standalone`, `zset`) per test so the per-test fixture cleanup behavior of the existing `r` fixture is not assumed — keeps the tests independent.
+- The cross-check against the standalone pymethod is what makes this a *regression* test (rather than just "pipeline returns some integer"). If the dispatch arm were ever removed, the pipeline call would surface `Unknown pipeline command` and these tests would fail loudly.
+
+If `r.zcount()` does not currently accept the `"-inf"` / `"+inf"` string bounds in a way that round-trips through the pipeline, fall back to numeric `float("-inf")` / `float("inf")` — read `src/lib.rs::parse_score_bound` to confirm which forms are accepted before switching, but the string form is the redis-py canonical one.
+
+ZSET-05 (`ZRANGESTORE`) is the underlying requirement for `zrangestore`; the audit's `affected_reqs` lists ZSET-04 (which is `ZRANGEBYSCORE` in REQUIREMENTS.md) and ZSET-06 (`ZREMRANGEBYSCORE`). The audit's REQ-ID mapping is broad-stroke (the pipeline gap touched the sorted-set range/count surface in general). We mirror the audit's mapping in this plan's `requirements` frontmatter without re-adjudicating it; the regression tests above directly exercise `Pipeline.zrangestore` and `Pipeline.zcount`, which is what closes the audit issue.
+  </action>
+  <verify>
+    <automated>pytest tests/test_pipeline.py -xvs -k "zrangestore or zcount"</automated>
+  </verify>
+  <acceptance_criteria>
+    - `grep -n "async def test_pipeline_zrangestore" tests/test_pipeline.py` returns exactly one match
+    - `grep -n "async def test_pipeline_zcount" tests/test_pipeline.py` returns exactly one match
+    - `grep -A 1 "test_pipeline_zrangestore" tests/test_pipeline.py | grep -i "ZSET-04\|ISSUE-2\|Phase 15"` returns at least one match (docstring traces back to the audit issue)
+    - `grep -A 1 "test_pipeline_zcount" tests/test_pipeline.py | grep -i "ZSET-06\|ISSUE-2\|Phase 15"` returns at least one match
+    - `grep -c "pipe.zrangestore\|pipe\\.zrangestore" tests/test_pipeline.py` returns at least `1`
+    - `grep -c "pipe.zcount\|pipe\\.zcount" tests/test_pipeline.py` returns at least `1`
+    - `pytest tests/test_pipeline.py::test_pipeline_zrangestore -xvs` exits 0
+    - `pytest tests/test_pipeline.py::test_pipeline_zcount -xvs` exits 0
+    - `pytest tests/test_pipeline.py -xvs -k "zrangestore or zcount" 2>&amp;1 | grep -i "passed"` shows both tests passed
+    - `pytest tests/test_pipeline.py -xvs 2>&amp;1 | tail -5` shows the entire pipeline test file still passes (no regression in adjacent tests)
+    - `git diff src/lib.rs` shows NO changes to src/lib.rs from this task (D-05: regression-only, no source modification)
+  </acceptance_criteria>
+  <done>
+    - Two new tests (`test_pipeline_zrangestore`, `test_pipeline_zcount`) live in `tests/test_pipeline.py`.
+    - Each test asserts the pipeline result equals the standalone-pymethod result for the same input (regression discipline).
+    - No source change in `src/lib.rs` (per D-05).
+    - All pipeline tests pass.
+  </done>
+</task>
+
+<task type="auto">
+  <name>Task 3: Add list persistence round-trip coverage on Rust and Python sides</name>
+  <files>src/persistence.rs, tests/test_persistence.py</files>
+  <read_first>
+    - src/persistence.rs lines 75-236 (the existing `test_round_trip_all_types` end-to-end — extension point)
+    - src/store.rs lines 3460-3480 (PersistableValueData::List wire format — confirms variant exists; NO change needed)
+    - src/store.rs around lines 2819 (`pub fn rpush`) and 2899 (`pub fn lrange`) (confirm Store method signatures used by the new Rust assertion)
+    - tests/test_persistence.py lines 1-75 (existing fixture + `test_save_and_restore` template)
+  </read_first>
+  <action>
+**Part A — Extend src/persistence.rs::test_round_trip_all_types (per D-08).**
+
+This is strictly additive — extend the existing test, do NOT create a new `test_round_trip_list`. The seed phase, save/load phase, and verification phase are already in place; we only add list seeding and a list verification.
+
+1. **Seed (insert near the existing seeding block, after the stream block ending around line 148; before the `script_load` line at 151):**
+
+```rust
+        // Add a list (LIST-01..16 round-trip coverage; closes ISSUE-3 from v0.1.6 audit)
+        store
+            .rpush(
+                Bytes::from("list_key"),
+                vec![
+                    Bytes::from("alpha"),
+                    Bytes::from("bravo"),
+                    Bytes::from("charlie"),
+                ],
+            )
+            .unwrap();
+```
+
+2. **Verify (insert near the existing verification block, after the stream verification around line 228, before the `script_exists` verification around line 231):**
+
+```rust
+        // Verify list round-tripped with order preserved
+        let lrange = new_store
+            .lrange(&Bytes::from("list_key"), 0, -1)
+            .unwrap();
+        assert_eq!(lrange.len(), 3);
+        assert_eq!(lrange[0], Bytes::from("alpha"));
+        assert_eq!(lrange[1], Bytes::from("bravo"));
+        assert_eq!(lrange[2], Bytes::from("charlie"));
+```
+
+The values `alpha`/`bravo`/`charlie` are arbitrary distinct byte sequences — discretion item. The key is that there are 3+ ordered values so order preservation is observable. Use `rpush` (not `lpush`) so the input order matches the read-back order without inversion — easier to reason about.
+
+**Part B — Add tests/test_persistence.py::test_list_persistence (per D-09).**
+
+Insert as a new test function after the existing `test_save_and_restore` (after line 33). Mirror the two-client save/restore pattern. Per D-09, the scope is single populated list with order preservation — no multi-list / mixed-direction-push / mutation-after-restore variants.
+
+```python
+@pytest.mark.asyncio
+async def test_list_persistence(tmp_path):
+    """PERS-01..04 / LIST-01..16 / Phase 15 ISSUE-3 regression: ValueData::List round-trips
+    through save/restore with order preserved.
+    """
+    client = BurnerRedis(persistence_path=tmp_path)
+    await client.rpush("list1", "a", "b", "c")
+    await client.save()
+
+    # New instance with the same persistence_path should restore the list.
+    client2 = BurnerRedis(persistence_path=tmp_path)
+    result = await client2.lrange("list1", 0, -1)
+    assert result == [b"a", b"b", b"c"]
+
+    # Verify length is also correct.
+    length = await client2.llen("list1")
+    assert length == 3
+```
+
+Notes:
+- The `tmp_path` fixture defined at line 13 of `tests/test_persistence.py` returns an `os.path.join(d, "test.dat")` string — same shape as `test_save_and_restore` uses. Reuse it directly; do NOT create a new fixture.
+- `rpush` accepts `*values` after `name` (per Phase 14's Python surface). Passing `"a", "b", "c"` as separate positional args is the canonical redis-py call shape.
+- Asserting both `lrange(0, -1)` and `llen()` is intentional: lrange exercises the read-side ordering, llen exercises the read-side length. Together they verify the persisted `Vec<Vec<u8>>` deserialized correctly back into a `VecDeque<Bytes>` of the right shape.
+  </action>
+  <verify>
+    <automated>cargo test --lib persistence::tests::test_round_trip_all_types -- --exact &amp;&amp; pytest tests/test_persistence.py::test_list_persistence -xvs</automated>
+  </verify>
+  <acceptance_criteria>
+    - `grep -n "list_key" src/persistence.rs` returns at least 2 lines (one in seed block, one in verify block)
+    - `grep -B 1 -A 4 'store.rpush' src/persistence.rs | grep -i "alpha\|bravo\|charlie"` returns at least one match (seed values present)
+    - `grep -B 1 -A 4 'new_store.lrange' src/persistence.rs | grep -i "alpha\|bravo\|charlie"` returns at least one match (verify-side values present)
+    - `cargo test --lib persistence::tests::test_round_trip_all_types -- --exact` exits 0
+    - `cargo test --lib persistence -- 2>&amp;1 | tail -5` shows all persistence unit tests pass
+    - `grep -n "async def test_list_persistence" tests/test_persistence.py` returns exactly one match
+    - `grep -A 1 "test_list_persistence" tests/test_persistence.py | grep -i "PERS-\|LIST-\|ISSUE-3\|Phase 15"` returns at least one match (docstring traces back to the audit issue)
+    - `grep -c "client.rpush\|client\\.rpush" tests/test_persistence.py` returns at least `1`
+    - `grep -c "client2.lrange\|client2\\.lrange" tests/test_persistence.py` returns at least `1`
+    - `pytest tests/test_persistence.py::test_list_persistence -xvs` exits 0
+    - `pytest tests/test_persistence.py -xvs 2>&amp;1 | tail -5` shows the entire persistence test file still passes
+    - `git diff src/store.rs` shows NO changes to src/store.rs (the wire format at lines 3470-3478 is already correct; this is a coverage gap, not a wiring gap)
+  </acceptance_criteria>
+  <done>
+    - `src/persistence.rs::test_round_trip_all_types` seeds and verifies a `list_key` with order preservation.
+    - `tests/test_persistence.py::test_list_persistence` saves and restores a 3-element list across two BurnerRedis instances.
+    - `cargo test --lib persistence` passes.
+    - `pytest tests/test_persistence.py` passes.
+    - No source-code change in `src/store.rs` or `src/lib.rs` (this is a coverage gap, per D-08/D-09).
+  </done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| Python ↔ Rust binding (PyO3) | Only changes are an internal error-class helper and a prefix-match on a Rust-internal error string |
+| File system ↔ persistence load | No changes to wire format; tests exercise the existing serialize/deserialize path |
+| Audit doc ↔ workflow tooling | New `historical_note:` YAML field is informational only; no consumer parses it for behavior |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-15-01 | Spoofing | `make_noscript_error` resolution chain | accept | The chain only imports symbols that are already trusted module-level imports (`redis.exceptions`, `burner_redis`); spoofing would require having already compromised the Python import path, which is out of scope for this in-process embedded library. |
+| T-15-02 | Tampering | `msg.starts_with("NOSCRIPT")` prefix check | mitigate | The `msg` argument originates from `Store::evalsha`'s internal Rust error path (not user-controlled); even if user data could influence it, the consequence of mis-routing is at most surfacing a `NoScriptError` instead of `ResponseError` (still a Python-side exception, no privilege boundary crossed). Keep the prefix check exact-match, case-sensitive — D-03 prohibits generalizing to whole-binding error sniffing. |
+| T-15-03 | Repudiation | (n/a) | accept | No logging or audit fields touched by this phase. |
+| T-15-04 | Information disclosure | NoScriptError message body | accept | The NOSCRIPT error message comes from the Lua script registry and contains a SHA1 hex string (the missing script's hash). SHA1 of an unknown script is not sensitive — it is precisely the value the caller already passed in. Existing `make_response_error` already returns the same message body for the un-routed case, so no information disclosure delta. |
+| T-15-05 | Denial of service | Pipeline regression tests | accept | Tests use bounded inputs (3-4 sorted set members, 3 list elements). No new code paths exposed to user input. |
+| T-15-06 | Elevation of privilege | (n/a) | accept | No auth boundary in the project (embedded in-process library, ACL out of scope per REQUIREMENTS.md). |
+| T-15-07 | Tampering | List persistence round-trip test data | accept | Test inputs (`alpha`/`bravo`/`charlie`, `a`/`b`/`c`) are constants in test code, not user-supplied. |
+
+**Severity summary:** All threats LOW or N/A. The phase touches an internal error-routing helper, two Python regression tests, one Rust unit-test extension, and one audit-doc clarification — no new external attack surface, no new serialization/deserialization paths, no new authenticated/unauthenticated boundary changes.
+</threat_model>
+
+<verification>
+## Phase-Level Verification
+
+After all three tasks complete:
+
+```bash
+# Rust side
+cargo build --release
+cargo test --lib persistence
+cargo test --lib  # full Rust test suite, no regressions
+
+# Python side
+pytest tests/test_scripting.py -xvs
+pytest tests/test_pipeline.py -xvs
+pytest tests/test_persistence.py -xvs
+pytest tests/  # full Python test suite, no regressions
+
+# Cross-check: NoScriptError is reachable as a redis.exceptions subclass when redis is installed
+python -c "import redis.exceptions; from burner_redis import NoScriptError; assert issubclass(NoScriptError, redis.exceptions.NoScriptError)"
+
+# Cross-check: NoScriptError is reachable as a plain Exception otherwise (verify in a uv env without redis if desired)
+
+# Cross-check: audit doc records the historical fix
+grep -i "de9d259\|already wired" .planning/v0.1.6-MILESTONE-AUDIT.md
+```
+
+## REQ-ID Re-verification Map
+
+| REQ-ID | Origin Phase | Closure Mechanism in Phase 15 |
+|--------|--------------|-------------------------------|
+| D-08 (NoScriptError) | Phase 12 | Task 1 wires the existing class into the evalsha Err path; tightened test asserts the type. |
+| ZSET-04 (ZRANGEBYSCORE) | Phase 3 | Task 2 cross-checks Pipeline.zrangestore against standalone pymethod (audit listed ZSET-04 as broad-stroke for the pipeline arm gap). |
+| ZSET-06 (ZREMRANGEBYSCORE) | Phase 3 | Task 2 cross-checks Pipeline.zcount against standalone pymethod (audit listed ZSET-06 as broad-stroke for the pipeline arm gap). |
+| PERS-01..04 | Phase 8 | Task 3 exercises save/restore on a list, re-verifying flush, atexit-equivalent restore, and crash-safe write semantics through the existing PersistableValueData path. |
+| LIST-01..16 | Phase 14 | Task 3 exercises the storage representation (`PersistableValueData::List`) used by every list command; rpush+lrange round-trip confirms the wire format produced by all 16 list operations is restorable. |
+</verification>
+
+<success_criteria>
+- [ ] `make_noscript_error` exists in `src/lib.rs` with the three-tier resolution chain (D-01).
+- [ ] `evalsha` Err arm at `src/lib.rs:~1860` routes NOSCRIPT-prefixed messages through `make_noscript_error`, all others through `make_response_error` (D-02, D-03).
+- [ ] `make_response_error` is unchanged (D-03).
+- [ ] `tests/test_scripting.py::test_evalsha_unknown_sha_raises` asserts `pytest.raises(NoScriptError)` with NoScriptError imported from `burner_redis` (D-04).
+- [ ] `tests/test_pipeline.py` contains `test_pipeline_zrangestore` and `test_pipeline_zcount`, both cross-checking pipeline result against standalone pymethod (D-06).
+- [ ] No new edits to `src/lib.rs` for the pipeline regression task (D-05).
+- [ ] `src/persistence.rs::test_round_trip_all_types` seeds and verifies a `list_key` with rpush + lrange (D-08).
+- [ ] `tests/test_persistence.py::test_list_persistence` saves and restores a populated list across two `BurnerRedis` instances (D-09).
+- [ ] `.planning/v0.1.6-MILESTONE-AUDIT.md` records that ISSUE-2 was wired in `de9d259` (D-07).
+- [ ] `cargo test --lib persistence` passes; `pytest tests/test_scripting.py tests/test_pipeline.py tests/test_persistence.py` passes.
+- [ ] No version bump (Cargo.toml / pyproject.toml stay at 0.1.5 — release-prep is a separate concern, deferred per CONTEXT.md Claude's Discretion default).
+- [ ] No Lua dispatch coverage additions (deferred per CONTEXT.md).
+- [ ] No VERIFICATION.md backfill / Nyquist work (deferred per CONTEXT.md).
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/15-close-v0.1.6-wiring-and-coverage-gaps/15-01-SUMMARY.md` recording: artifacts modified, tasks completed, REQ-IDs re-verified (all 23), test commands and their pass/fail outcomes, and any deviations from the plan.
+</output>

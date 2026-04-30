@@ -1,0 +1,349 @@
+# T01: Implement the Stream data structure and basic stream commands (XADD, XREAD, XLEN, XTRIM) in both the Rust store engine and Python async bindings.
+
+**Slice:** S05 — **Milestone:** M001
+
+## Description
+
+Implement the Stream data structure and basic stream commands (XADD, XREAD, XLEN, XTRIM) in both the Rust store engine and Python async bindings.
+
+Purpose: Streams are the foundation for Prefect's messaging subsystem. This plan establishes the stream data structure and the basic publish/read/trim operations that consumer groups (Plan 02/03) build upon.
+
+Output: Working XADD/XREAD/XLEN/XTRIM commands accessible from Python with full test coverage.
+
+## Legacy Source
+
+---
+phase: 05-stream-commands-and-consumer-groups
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - src/store.rs
+  - src/commands/mod.rs
+  - src/commands/streams.rs
+  - src/lib.rs
+  - tests/test_streams.py
+autonomous: true
+requirements:
+  - STRM-01
+  - STRM-02
+  - STRM-03
+  - STRM-04
+
+must_haves:
+  truths:
+    - "User can XADD entries to a stream and get auto-generated IDs back"
+    - "User can XREAD entries from one or more streams in ID order"
+    - "User can XLEN to get stream entry count"
+    - "User can XTRIM a stream by maxlen or minid"
+  artifacts:
+    - path: "src/store.rs"
+      provides: "Stream ValueData variant with BTreeMap<StreamId, HashMap<Bytes, Bytes>>, StreamId type, and xadd/xread/xlen/xtrim methods"
+      contains: "ValueData::Stream"
+    - path: "src/commands/streams.rs"
+      provides: "StreamId parsing/formatting helpers"
+      contains: "parse_stream_id"
+    - path: "src/lib.rs"
+      provides: "Python async bindings for xadd, xread, xlen, xtrim"
+      contains: "fn xadd"
+    - path: "tests/test_streams.py"
+      provides: "Pytest suite covering STRM-01 through STRM-04"
+      contains: "test_xadd"
+  key_links:
+    - from: "src/lib.rs"
+      to: "src/store.rs"
+      via: "store.xadd(), store.xread(), store.xlen(), store.xtrim()"
+      pattern: "store\\.x(add|read|len|trim)"
+    - from: "tests/test_streams.py"
+      to: "src/lib.rs"
+      via: "await r.xadd(), await r.xread()"
+      pattern: "await r\\.x(add|read|len|trim)"
+---
+
+<objective>
+Implement the Stream data structure and basic stream commands (XADD, XREAD, XLEN, XTRIM) in both the Rust store engine and Python async bindings.
+
+Purpose: Streams are the foundation for Prefect's messaging subsystem. This plan establishes the stream data structure and the basic publish/read/trim operations that consumer groups (Plan 02/03) build upon.
+
+Output: Working XADD/XREAD/XLEN/XTRIM commands accessible from Python with full test coverage.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@src/store.rs
+@src/lib.rs
+@src/commands/mod.rs
+@src/commands/strings.rs
+@tests/conftest.py
+@tests/test_sets.py
+
+<interfaces>
+<!-- Existing patterns the executor needs -->
+
+From src/store.rs:
+```rust
+pub enum ValueData {
+    String(Bytes),
+    Hash(HashMap<Bytes, Bytes>),
+    Set(HashSet<Bytes>),
+    SortedSet(SortedSet),
+}
+
+pub struct ValueEntry {
+    pub data: ValueData,
+    pub expires_at: Option<Instant>,
+}
+
+pub enum StoreError {
+    #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
+    WrongType,
+}
+
+pub struct Store {
+    data: RwLock<HashMap<Bytes, ValueEntry>>,
+}
+```
+
+From src/lib.rs:
+```rust
+fn store_err_to_py(e: StoreError) -> PyErr { ... }
+
+pub struct BurnerRedis {
+    store: Arc<Store>,
+}
+
+// Pattern for async methods:
+fn command<'py>(&self, py: Python<'py>, ...) -> PyResult<Bound<'py, PyAny>> {
+    let store = self.store.clone();
+    pyo3_async_runtimes::tokio::future_into_py(py, async move { ... })
+}
+```
+
+From src/commands/strings.rs:
+```rust
+pub fn extract_bytes(obj: &Bound<'_, PyAny>) -> PyResult<Bytes> { ... }
+```
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto">
+  <name>Task 1: Implement Stream data structure and Rust store methods</name>
+  <files>src/store.rs, src/commands/streams.rs, src/commands/mod.rs</files>
+  <read_first>src/store.rs, src/commands/mod.rs, src/commands/strings.rs</read_first>
+  <action>
+1. Create `src/commands/streams.rs` with:
+   - `pub type StreamId = (u64, u64);` — (milliseconds, sequence) tuple
+   - `pub fn format_stream_id(id: StreamId) -> String` — returns `"{ms}-{seq}"` format
+   - `pub fn parse_stream_id(s: &str) -> Option<StreamId>` — parses `"ms-seq"` string into tuple, returns None on invalid format
+   - `pub fn extract_stream_fields(dict: &Bound<'_, PyDict>) -> PyResult<HashMap<Bytes, Bytes>>` — extracts Python dict to field-value HashMap
+
+2. Add `pub mod streams;` to `src/commands/mod.rs`.
+
+3. In `src/store.rs`, add the Stream data structures at the top (after SortedSet):
+   - Import `commands::streams::StreamId` (add `use crate::commands::streams::StreamId;`)
+   - `pub struct Stream` with fields:
+     - `pub entries: BTreeMap<StreamId, HashMap<Bytes, Bytes>>`
+     - `pub last_id: StreamId` (initialized to `(0, 0)`)
+     - `pub groups: HashMap<Bytes, ConsumerGroup>` (empty for now, used in Plan 02)
+   - `pub struct ConsumerGroup` with fields:
+     - `pub last_delivered_id: StreamId`
+     - `pub consumers: HashMap<Bytes, Consumer>`
+   - `pub struct Consumer` with fields:
+     - `pub pending: HashMap<StreamId, PendingEntry>`
+   - `pub struct PendingEntry` with fields:
+     - `pub delivery_time: Instant`
+     - `pub delivery_count: u64`
+   - Add `Stream(Stream)` variant to `ValueData` enum
+   - Add `ValueEntry::new_stream()` constructor
+
+4. Add these Store methods:
+
+   `pub fn xadd(&self, key: Bytes, fields: HashMap<Bytes, Bytes>, id: Option<StreamId>) -> Result<StreamId, StoreError>`:
+   - Acquire write lock. Passive expiration check.
+   - Get or create Stream entry (or_insert_with new_stream). WrongType if not Stream.
+   - Generate ID: if `id` is None, use `std::time::SystemTime::now()` for ms since epoch. If ms <= last_id.0, use last_id.0 with seq = last_id.1 + 1. If ms > last_id.0, use ms with seq = 0. If `id` is Some, use it directly (validate > last_id or return error).
+   - Insert entry into BTreeMap. Update last_id. Return generated StreamId.
+
+   `pub fn xread(&self, keys: &[Bytes], ids: &[StreamId], count: Option<usize>) -> Result<Vec<(Bytes, Vec<(StreamId, HashMap<Bytes, Bytes>)>)>, StoreError>`:
+   - Acquire read lock (upgrade to write if passive expiration needed).
+   - For each key: if stream exists and not expired, collect entries with id > given id. Apply count limit if specified. Return vec of (key, entries) pairs. Skip keys that don't exist (return empty for them — do NOT include them in result). WrongType if key exists but is not a Stream.
+
+   `pub fn xlen(&self, key: &Bytes) -> Result<usize, StoreError>`:
+   - Acquire write lock. Passive expiration check.
+   - Return entries.len() if Stream, 0 if key doesn't exist. WrongType if not Stream.
+
+   `pub fn xtrim(&self, key: &Bytes, maxlen: Option<usize>, minid: Option<StreamId>) -> Result<usize, StoreError>`:
+   - Acquire write lock. Passive expiration check.
+   - If key doesn't exist, return Ok(0). WrongType if not Stream.
+   - If maxlen: while entries.len() > maxlen, remove first (lowest) entry. Count removals.
+   - If minid: remove all entries with id < minid. Count removals.
+   - Return count of trimmed entries.
+
+  Use `std::time::SystemTime::UNIX_EPOCH.elapsed().unwrap().as_millis() as u64` for current time in XADD.
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && cargo build 2>&1 | tail -5</automated>
+  </verify>
+  <acceptance_criteria>
+    - grep -q "ValueData::Stream" src/store.rs
+    - grep -q "pub struct Stream" src/store.rs
+    - grep -q "pub struct ConsumerGroup" src/store.rs
+    - grep -q "pub struct PendingEntry" src/store.rs
+    - grep -q "pub fn xadd" src/store.rs
+    - grep -q "pub fn xread" src/store.rs
+    - grep -q "pub fn xlen" src/store.rs
+    - grep -q "pub fn xtrim" src/store.rs
+    - grep -q "pub type StreamId" src/commands/streams.rs
+    - grep -q "pub fn format_stream_id" src/commands/streams.rs
+    - grep -q "pub fn parse_stream_id" src/commands/streams.rs
+    - grep -q "pub mod streams" src/commands/mod.rs
+    - cargo build succeeds with no errors
+  </acceptance_criteria>
+  <done>Stream data structure with ConsumerGroup/Consumer/PendingEntry structs added to store.rs. XADD generates monotonic IDs using system time. XREAD returns entries after a given ID. XLEN returns entry count. XTRIM removes entries by maxlen or minid. All compile without errors.</done>
+</task>
+
+<task type="auto">
+  <name>Task 2: Python async bindings and pytest suite for XADD/XREAD/XLEN/XTRIM</name>
+  <files>src/lib.rs, tests/test_streams.py</files>
+  <read_first>src/lib.rs, src/store.rs, src/commands/streams.rs, tests/test_sets.py, tests/conftest.py</read_first>
+  <action>
+1. In `src/lib.rs`, add stream command imports and methods to BurnerRedis:
+
+   Add to imports: `use pyo3::types::PyList;` and `use commands::streams::{format_stream_id, parse_stream_id, extract_stream_fields, StreamId};` and `use std::collections::HashMap;`
+
+   Add `// -- Stream Commands --` section with these methods:
+
+   `#[pyo3(signature = (name, fields, id="*"))]`
+   `fn xadd<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>, fields: &Bound<'py, PyDict>, id: &str) -> PyResult<Bound<'py, PyAny>>`:
+   - Extract name as Bytes via extract_bytes.
+   - Extract fields dict to HashMap<Bytes, Bytes> via extract_stream_fields.
+   - Parse id: if "*" then None (auto-generate), else parse with parse_stream_id and pass as Some. Return PyValueError if parse fails.
+   - Call store.xadd(key, fields, id_opt). Map result to format_stream_id() as bytes (Vec<u8> from string bytes).
+   - Return the ID string as bytes (e.g., b"1234567890123-0").
+
+   `#[pyo3(signature = (streams, count=None))]`
+   `fn xread<'py>(&self, py: Python<'py>, streams: &Bound<'py, PyDict>, count: Option<usize>) -> PyResult<Bound<'py, PyAny>>`:
+   - Extract streams dict: keys are stream names (Bytes), values are ID strings. Parse each ID: "0" or "0-0" means StreamId(0,0); other formats parsed via parse_stream_id.
+   - Call store.xread(&keys, &ids, count).
+   - Return result as Python list of [stream_name_bytes, [(id_bytes, {field: value}), ...]]. Use Python::try_attach to construct nested Python objects.
+   - Return None if no results (all streams empty/missing). Matches redis-py behavior.
+
+   `fn xlen<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>>`:
+   - Extract name. Call store.xlen. Return usize as i64.
+
+   `#[pyo3(signature = (name, maxlen=None, minid=None))]`
+   `fn xtrim<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>, maxlen: Option<usize>, minid: Option<&str>) -> PyResult<Bound<'py, PyAny>>`:
+   - Extract name. Parse minid string to StreamId if provided. Call store.xtrim. Return trimmed count.
+
+2. Create `tests/test_streams.py` with pytest-asyncio tests:
+
+   ```python
+   """Tests for stream commands: XADD, XREAD, XLEN, XTRIM.
+
+   Covers requirements: STRM-01, STRM-02, STRM-03, STRM-04.
+   """
+   import pytest
+   from burner_redis import BurnerRedis
+   ```
+
+   Tests to implement (all async, use `r` fixture from conftest.py):
+
+   STRM-01 (XADD):
+   - `test_xadd_returns_id`: XADD returns bytes ID in "ms-seq" format (assert b"-" in result)
+   - `test_xadd_sequential_ids`: Two XADDs return different IDs, second > first lexicographically
+   - `test_xadd_creates_stream`: After XADD, XLEN returns 1
+   - `test_xadd_multiple_fields`: XADD with multiple field-value pairs, XREAD returns all fields
+   - `test_xadd_bytes_input`: XADD works with bytes keys/fields
+   - `test_xadd_wrongtype`: XADD on a string key raises WRONGTYPE
+
+   STRM-02 (XREAD):
+   - `test_xread_all_entries`: XREAD with id="0-0" returns all entries
+   - `test_xread_from_offset`: XREAD with a specific ID returns only entries after it
+   - `test_xread_multiple_streams`: XREAD from 2 streams returns both
+   - `test_xread_count_limit`: XREAD with count=1 returns only 1 entry
+   - `test_xread_empty_stream`: XREAD on non-existent stream returns None
+   - `test_xread_returns_field_dict`: Each entry's fields are a dict with bytes keys/values
+
+   STRM-03 (XLEN):
+   - `test_xlen_with_entries`: XLEN returns correct count after multiple XADDs
+   - `test_xlen_empty`: XLEN on non-existent key returns 0
+   - `test_xlen_wrongtype`: XLEN on a string key raises WRONGTYPE
+
+   STRM-04 (XTRIM):
+   - `test_xtrim_maxlen`: After adding 5 entries, XTRIM maxlen=3 removes 2, XLEN returns 3
+   - `test_xtrim_minid`: XTRIM with minid removes entries below that ID
+   - `test_xtrim_nonexistent`: XTRIM on missing key returns 0
+   - `test_xtrim_wrongtype`: XTRIM on a string key raises WRONGTYPE
+
+   For XREAD return format, match redis-py: `[[b"stream", [(b"id", {b"field": b"value"}), ...]]]`
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && maturin develop 2>&1 | tail -3 && python -m pytest tests/test_streams.py -x -v 2>&1 | tail -30</automated>
+  </verify>
+  <acceptance_criteria>
+    - grep -q "fn xadd" src/lib.rs
+    - grep -q "fn xread" src/lib.rs
+    - grep -q "fn xlen" src/lib.rs
+    - grep -q "fn xtrim" src/lib.rs
+    - grep -q "test_xadd_returns_id" tests/test_streams.py
+    - grep -q "test_xread_all_entries" tests/test_streams.py
+    - grep -q "test_xlen_with_entries" tests/test_streams.py
+    - grep -q "test_xtrim_maxlen" tests/test_streams.py
+    - grep -q "STRM-01" tests/test_streams.py
+    - grep -q "STRM-02" tests/test_streams.py
+    - grep -q "STRM-03" tests/test_streams.py
+    - grep -q "STRM-04" tests/test_streams.py
+    - python -m pytest tests/test_streams.py passes
+  </acceptance_criteria>
+  <done>All 4 basic stream commands (XADD, XREAD, XLEN, XTRIM) are callable from Python as async methods. Tests pass confirming: XADD returns auto-generated monotonic IDs, XREAD returns entries in order with field dicts, XLEN returns accurate count, XTRIM trims by maxlen and minid.</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| Python -> Rust | User-supplied stream IDs, field names/values cross into Rust engine |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-05-01 | Tampering | StreamId parsing | mitigate | Validate ID format strictly in parse_stream_id; reject malformed IDs with PyValueError |
+| T-05-02 | Denial of Service | XADD unbounded | accept | No maxlen auto-trim on XADD (user must call XTRIM); in-process library, user controls own memory |
+| T-05-03 | Information Disclosure | SystemTime for IDs | accept | Stream IDs expose wall-clock time; this matches Redis behavior and is expected |
+</threat_model>
+
+<verification>
+1. `cargo build` compiles without errors
+2. `maturin develop` installs the Python package
+3. `python -m pytest tests/test_streams.py -v` all tests pass
+4. XADD returns bytes IDs in "ms-seq" format
+5. XREAD returns nested list structure matching redis-py
+</verification>
+
+<success_criteria>
+- Stream ValueData variant exists with BTreeMap-based entry storage
+- XADD generates monotonic stream IDs using system time
+- XREAD returns entries after a given ID with count support
+- XLEN returns accurate entry count
+- XTRIM removes entries by both maxlen and minid strategies
+- All 4 commands accessible as async Python methods
+- Full pytest coverage with WRONGTYPE error handling
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/05-stream-commands-and-consumer-groups/05-01-SUMMARY.md`
+</output>

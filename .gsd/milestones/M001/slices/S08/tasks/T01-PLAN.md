@@ -1,0 +1,325 @@
+# T01: Implement the Rust-side persistence engine: add serde derives to all Store data structures, create a persistence module with crash-safe save/load functions using rmp-serde (MessagePack), and wire save/load methods into the Store struct.
+
+**Slice:** S08 — **Milestone:** M001
+
+## Description
+
+Implement the Rust-side persistence engine: add serde derives to all Store data structures, create a persistence module with crash-safe save/load functions using rmp-serde (MessagePack), and wire save/load methods into the Store struct.
+
+Purpose: Enable the Store to serialize its entire keyspace (excluding expired keys) and script cache to disk with crash-safe writes, and restore from a previously saved file.
+
+Output: `src/persistence.rs` with save/load logic, updated `Cargo.toml` with serde/rmp-serde deps, updated `src/store.rs` with Serialize/Deserialize derives and save/load methods.
+
+## Legacy Source
+
+---
+phase: 08-persistence
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - Cargo.toml
+  - src/store.rs
+  - src/persistence.rs
+autonomous: true
+requirements:
+  - PERS-01
+  - PERS-04
+
+must_haves:
+  truths:
+    - "Store data structures can be serialized to MessagePack binary format and deserialized back"
+    - "Persistence writes use crash-safe pattern: write temp file, fsync, rename"
+    - "Partial writes never corrupt the target persistence file"
+    - "Already-expired keys are excluded during serialization"
+    - "Script cache is included in serialized output"
+  artifacts:
+    - path: "Cargo.toml"
+      provides: "serde and rmp-serde dependencies"
+      contains: "rmp-serde"
+    - path: "src/store.rs"
+      provides: "Serde derives on all data structures"
+      contains: "Serialize, Deserialize"
+    - path: "src/persistence.rs"
+      provides: "save_to_path and load_from_path functions with crash-safe writes"
+      contains: "save_to_path"
+  key_links:
+    - from: "src/persistence.rs"
+      to: "src/store.rs"
+      via: "Serializes Store data and script cache"
+      pattern: "rmp_serde::to_vec"
+    - from: "src/persistence.rs"
+      to: "Cargo.toml"
+      via: "Uses rmp-serde and serde dependencies"
+      pattern: "rmp_serde"
+---
+
+<objective>
+Implement the Rust-side persistence engine: add serde derives to all Store data structures, create a persistence module with crash-safe save/load functions using rmp-serde (MessagePack), and wire save/load methods into the Store struct.
+
+Purpose: Enable the Store to serialize its entire keyspace (excluding expired keys) and script cache to disk with crash-safe writes, and restore from a previously saved file.
+
+Output: `src/persistence.rs` with save/load logic, updated `Cargo.toml` with serde/rmp-serde deps, updated `src/store.rs` with Serialize/Deserialize derives and save/load methods.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@.planning/phases/08-persistence/08-CONTEXT.md
+
+@Cargo.toml
+@src/store.rs
+@src/lib.rs
+</context>
+
+<interfaces>
+<!-- Key types the executor needs from the existing codebase -->
+
+From src/store.rs:
+```rust
+pub struct SortedSet {
+    pub by_score: BTreeMap<(OrderedFloat<f64>, Bytes), ()>,
+    pub by_member: HashMap<Bytes, f64>,
+}
+
+pub struct Stream {
+    pub entries: BTreeMap<StreamId, HashMap<Bytes, Bytes>>,
+    pub last_id: StreamId,
+    pub groups: HashMap<Bytes, ConsumerGroup>,
+}
+
+pub struct ConsumerGroup {
+    pub last_delivered_id: StreamId,
+    pub consumers: HashMap<Bytes, Consumer>,
+}
+
+pub struct Consumer {
+    pub pending: HashMap<StreamId, PendingEntry>,
+}
+
+pub struct PendingEntry {
+    pub delivery_time: Instant,
+    pub delivery_count: u64,
+}
+
+pub enum ValueData {
+    String(Bytes),
+    Hash(HashMap<Bytes, Bytes>),
+    Set(HashSet<Bytes>),
+    SortedSet(SortedSet),
+    Stream(Stream),
+}
+
+pub struct ValueEntry {
+    pub data: ValueData,
+    pub expires_at: Option<Instant>,
+}
+
+pub struct Store {
+    data: RwLock<HashMap<Bytes, ValueEntry>>,
+    scripts: RwLock<HashMap<String, String>>,
+}
+```
+
+From src/commands/streams.rs:
+```rust
+pub type StreamId = (u64, u64);
+```
+</interfaces>
+
+<tasks>
+
+<task type="auto">
+  <name>Task 1: Add serde dependencies and derives to all Store data structures</name>
+  <files>Cargo.toml, src/store.rs</files>
+  <read_first>
+    - Cargo.toml (full file for dependency section)
+    - src/store.rs (full file for all struct definitions)
+    - src/commands/streams.rs (StreamId type alias)
+  </read_first>
+  <action>
+1. Add dependencies to Cargo.toml:
+   - `serde = { version = "1.0", features = ["derive"] }`
+   - `rmp-serde = "1.3"`
+
+2. In src/store.rs, add `use serde::{Serialize, Deserialize};` to imports.
+
+3. Add `#[derive(Clone, Debug, Serialize, Deserialize)]` to ALL these structs/enums:
+   - `SortedSet`
+   - `Stream`
+   - `ConsumerGroup`
+   - `Consumer`
+   - `ValueData` (enum)
+   - `ValueEntry`
+
+4. For `PendingEntry`: the `delivery_time: Instant` field cannot be serialized directly. Create a serializable version:
+   - Add a new struct `PersistablePendingEntry` with `delivery_count: u64` (delivery_time is ephemeral runtime data that cannot meaningfully persist across restarts, so it will be reset to "now" on load).
+   - OR: Keep PendingEntry as-is but add custom Serialize/Deserialize that stores delivery_count only and reconstructs delivery_time as Instant::now() on deserialization.
+   - Recommended approach: Use serde `#[serde(with = "...")]` or a custom serialize/deserialize for the `Instant` field that converts to/from a duration-from-now representation. On serialization, compute Duration since epoch or just store 0 (since delivery_time is only used for idle time calculation in XAUTOCLAIM). On deserialization, set to Instant::now() (conservative: treats all pending entries as freshly delivered).
+
+5. For `ValueEntry.expires_at: Option<Instant>`: Cannot serialize Instant directly. Add custom serde:
+   - On serialize: convert `expires_at` to `Option<Duration>` representing time remaining (duration from now). If already expired, serialize as None (will be filtered out during save anyway).
+   - On deserialize: convert `Option<Duration>` back to `Option<Instant>` by adding duration to Instant::now().
+   - Use a serde helper module pattern: create a module `mod instant_serde` with serialize/deserialize functions, annotate the field with `#[serde(with = "instant_serde")]`.
+
+6. For `Bytes` type: The `bytes::Bytes` type does not implement Serialize/Deserialize natively. Use `serde_bytes` crate OR implement custom serialization. Simplest approach: add `serde_bytes = "0.11"` to Cargo.toml and use `#[serde(with = "serde_bytes")]` on Bytes fields. HOWEVER, since Bytes is used inside HashMap keys (HashMap<Bytes, ValueEntry>), and in BTreeMap keys, the serde_bytes approach won't work for map keys. Instead, use a different strategy:
+   - Create a newtype wrapper OR use `#[serde(serialize_with = ..., deserialize_with = ...)]` on each Bytes field.
+   - SIMPLEST: Convert the entire data HashMap to `HashMap<Vec<u8>, ValueEntry>` during serialization and back on deserialization. This is cleanest as a separate "persistable snapshot" struct.
+   - RECOMMENDED: Create a `PersistableStore` struct that mirrors the Store data but uses `Vec<u8>` instead of `Bytes`, and `Option<Duration>` instead of `Option<Instant>`. Implement `From<&Store>` (snapshot) and `Into<Store>` (restore). This keeps serde concerns completely separate from the runtime Store.
+
+7. The `PersistableStore` approach:
+   ```rust
+   #[derive(Serialize, Deserialize)]
+   struct PersistableEntry {
+       data: PersistableValueData,
+       ttl_remaining_ms: Option<u64>,  // None = no expiry
+   }
+
+   #[derive(Serialize, Deserialize)]
+   enum PersistableValueData {
+       String(Vec<u8>),
+       Hash(HashMap<Vec<u8>, Vec<u8>>),
+       Set(HashSet<Vec<u8>>),
+       SortedSet(PersistableSortedSet),
+       Stream(PersistableStream),
+   }
+   ```
+   And so on for nested types. This avoids custom serde on `Bytes`/`Instant` entirely.
+
+8. Ensure `cargo build` succeeds with no errors after adding derives.
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && cargo build 2>&1 | tail -5</automated>
+  </verify>
+  <acceptance_criteria>
+    - Cargo.toml contains `serde = { version = "1.0", features = ["derive"] }` dependency
+    - Cargo.toml contains `rmp-serde = "1.3"` dependency
+    - src/store.rs contains Serialize/Deserialize derives or PersistableStore types
+    - `cargo build` succeeds without errors
+  </acceptance_criteria>
+  <done>All Store data structures are serializable via serde with rmp-serde. The PersistableStore snapshot pattern cleanly separates serialization concerns from runtime types. cargo build passes.</done>
+</task>
+
+<task type="auto">
+  <name>Task 2: Create persistence module with crash-safe save and load</name>
+  <files>src/persistence.rs, src/store.rs, src/lib.rs</files>
+  <read_first>
+    - src/store.rs (updated file with PersistableStore types from Task 1)
+    - src/lib.rs (module declarations)
+  </read_first>
+  <action>
+1. Create `src/persistence.rs` module with two public functions:
+
+   ```rust
+   pub fn save_to_path(store: &Store, path: &str) -> Result<(), PersistenceError>
+   ```
+   - Acquire read lock on store.data
+   - Filter out expired entries (entry.is_expired() == true)
+   - Convert remaining entries to PersistableStore snapshot
+   - Also read store.scripts (read lock) and include in snapshot
+   - Serialize snapshot using `rmp_serde::to_vec(&snapshot)`
+   - Write to temp file: `format!("{}.tmp", path)`
+   - Call fsync on the temp file (use `file.sync_all()`)
+   - Rename temp file to target path (use `std::fs::rename`)
+   - If rename fails, attempt to remove temp file, return error
+   - Return Ok(())
+
+   ```rust
+   pub fn load_from_path(path: &str) -> Result<Option<(HashMap<Bytes, ValueEntry>, HashMap<String, String>)>, PersistenceError>
+   ```
+   - If file does not exist, return Ok(None)
+   - Read file contents
+   - Deserialize using `rmp_serde::from_slice`
+   - Convert PersistableStore back to runtime types (Bytes from Vec<u8>, Instant from Duration)
+   - Skip entries where ttl_remaining_ms was Some(0) or negative (already expired at save time edge case)
+   - Return Ok(Some((data_map, scripts_map)))
+   - If deserialization fails (corrupt file), return Err with descriptive error
+
+2. Define `PersistenceError` enum (with thiserror):
+   ```rust
+   #[derive(Debug, thiserror::Error)]
+   pub enum PersistenceError {
+       #[error("IO error: {0}")]
+       Io(#[from] std::io::Error),
+       #[error("Serialization error: {0}")]
+       Serialize(#[from] rmp_serde::encode::Error),
+       #[error("Deserialization error: {0}")]
+       Deserialize(#[from] rmp_serde::decode::Error),
+   }
+   ```
+
+3. Add `pub fn save(&self, path: &str) -> Result<(), PersistenceError>` method to Store that calls `persistence::save_to_path(self, path)`.
+
+4. Add `pub fn load_into(&self, path: &str) -> Result<bool, PersistenceError>` method to Store that:
+   - Calls `persistence::load_from_path(path)`
+   - If Some, acquires write lock on self.data and replaces contents; same for scripts
+   - Returns Ok(true) if data was loaded, Ok(false) if file missing
+
+5. Add `mod persistence;` to src/lib.rs module declarations.
+
+6. Write a Rust unit test in src/persistence.rs:
+   ```rust
+   #[cfg(test)]
+   mod tests {
+       // Test round-trip: create store, save, load into new store, verify data matches
+       // Test crash-safe: verify temp file doesn't exist after successful save
+       // Test missing file: load returns None
+   }
+   ```
+
+7. Verify with `cargo test`.
+  </action>
+  <verify>
+    <automated>cd /Users/desertaxle/dev/prefectlabs/burner-redis && cargo test -- --nocapture 2>&1 | tail -20</automated>
+  </verify>
+  <acceptance_criteria>
+    - src/persistence.rs exists with save_to_path and load_from_path functions
+    - save_to_path writes to .tmp file, calls sync_all(), then renames (crash-safe pattern)
+    - load_from_path returns None for missing files, Err for corrupt files
+    - Store has save() and load_into() public methods
+    - src/lib.rs declares `mod persistence;`
+    - All cargo tests pass including persistence round-trip test
+  </acceptance_criteria>
+  <done>Persistence module provides crash-safe save (write-tmp, fsync, rename) and load with MessagePack serialization. Store has save/load_into methods. Round-trip test proves data survives serialize/deserialize cycle. Expired keys excluded from persistence.</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| disk file -> Store | Persistence file loaded into memory on startup |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-08-01 | Tampering | persistence file on disk | accept | Embedded in-process DB; file is user-owned with standard FS permissions. No network boundary. |
+| T-08-02 | Denial of Service | corrupt persistence file | mitigate | load_from_path returns error on corrupt data; caller logs warning and starts empty |
+| T-08-03 | Information Disclosure | persistence file contents | accept | File contains user's own data; no secrets beyond what user already controls |
+| T-08-04 | Denial of Service | partial write corrupts state | mitigate | Write-then-rename pattern ensures atomic file replacement; partial writes only affect .tmp file |
+</threat_model>
+
+<verification>
+- `cargo build` succeeds
+- `cargo test` passes all existing tests plus new persistence tests
+- Round-trip test: Store with string, hash, set, sorted set, stream data serializes and deserializes correctly
+- Crash-safe verification: no .tmp file exists after successful save
+</verification>
+
+<success_criteria>
+Store data structures are fully serializable via MessagePack. The persistence module implements crash-safe write-then-rename with fsync. Round-trip tests prove all data types survive serialization. Expired keys are excluded from saves.
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/08-persistence/08-01-SUMMARY.md`
+</output>

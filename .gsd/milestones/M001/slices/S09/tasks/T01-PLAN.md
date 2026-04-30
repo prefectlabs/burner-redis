@@ -1,0 +1,219 @@
+# T01: Create the GitHub Actions CI workflow that builds cross-platform wheels for burner-redis on every PR and push to main.
+
+**Slice:** S09 — **Milestone:** M001
+
+## Description
+
+Create the GitHub Actions CI workflow that builds cross-platform wheels for burner-redis on every PR and push to main. Also update pyproject.toml with proper PyPI metadata (classifiers, URLs, license).
+
+Purpose: Establish the build pipeline that proves wheels build successfully for all target platforms before any release is cut.
+Output: `.github/workflows/ci.yml` workflow file, updated `pyproject.toml` metadata.
+
+## Legacy Source
+
+---
+phase: 09-distribution
+plan: 01
+type: execute
+wave: 1
+depends_on: []
+files_modified:
+  - .github/workflows/ci.yml
+  - pyproject.toml
+autonomous: true
+requirements:
+  - DIST-01
+  - DIST-02
+
+must_haves:
+  truths:
+    - "CI workflow builds wheels for all 4 target platforms on every PR"
+    - "abi3-py39 produces one wheel per platform (no per-Python-version matrix)"
+    - "CI workflow runs pytest against the built wheel"
+    - "pyproject.toml has proper metadata for PyPI publishing"
+  artifacts:
+    - path: ".github/workflows/ci.yml"
+      provides: "CI build and test workflow"
+      contains: "maturin-action"
+    - path: "pyproject.toml"
+      provides: "Package metadata for PyPI"
+      contains: "classifiers"
+  key_links:
+    - from: ".github/workflows/ci.yml"
+      to: "pyproject.toml"
+      via: "maturin build reads pyproject.toml config"
+      pattern: "maturin"
+---
+
+<objective>
+Create the GitHub Actions CI workflow that builds cross-platform wheels for burner-redis on every PR and push to main. Also update pyproject.toml with proper PyPI metadata (classifiers, URLs, license).
+
+Purpose: Establish the build pipeline that proves wheels build successfully for all target platforms before any release is cut.
+Output: `.github/workflows/ci.yml` workflow file, updated `pyproject.toml` metadata.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@pyproject.toml
+@Cargo.toml
+</context>
+
+<tasks>
+
+<task type="auto">
+  <name>Task 1: Update pyproject.toml with PyPI metadata</name>
+  <files>pyproject.toml</files>
+  <read_first>pyproject.toml</read_first>
+  <action>
+Update pyproject.toml to add proper PyPI publishing metadata:
+
+1. Add `license = {text = "MIT"}` to [project] section
+2. Add `readme = "README.md"` to [project] section (maturin uses this for PyPI long description)
+3. Add `classifiers` list:
+   - "Programming Language :: Rust"
+   - "Programming Language :: Python :: Implementation :: CPython"
+   - "Programming Language :: Python :: 3"
+   - "Development Status :: 4 - Beta"
+   - "Intended Audience :: Developers"
+   - "License :: OSI Approved :: MIT License"
+   - "Operating System :: POSIX :: Linux"
+   - "Operating System :: MacOS"
+4. Add `[project.urls]` section:
+   - Homepage = "https://github.com/PrefectHQ/burner-redis"
+   - Repository = "https://github.com/PrefectHQ/burner-redis"
+   - Issues = "https://github.com/PrefectHQ/burner-redis/issues"
+
+Keep all existing content (build-system, tool.maturin, tool.pytest, optional-dependencies) exactly as-is. Only add new fields.
+  </action>
+  <verify>
+    <automated>python -c "import tomllib; d=tomllib.load(open('pyproject.toml','rb')); assert 'classifiers' in d['project']; assert 'urls' in d['project']; assert d['project']['license'] == {'text': 'MIT'}; print('OK')"</automated>
+  </verify>
+  <acceptance_criteria>
+- pyproject.toml contains `license = {text = "MIT"}`
+- pyproject.toml contains at least 5 classifiers
+- pyproject.toml contains [project.urls] with Homepage and Repository keys
+- All existing fields (build-system, tool.maturin, tool.pytest, optional-dependencies) unchanged
+  </acceptance_criteria>
+  <done>pyproject.toml has complete PyPI metadata: license, classifiers, URLs, readme reference</done>
+</task>
+
+<task type="auto">
+  <name>Task 2: Create CI workflow with cross-platform wheel builds</name>
+  <files>.github/workflows/ci.yml</files>
+  <read_first>pyproject.toml, Cargo.toml</read_first>
+  <action>
+Create `.github/workflows/ci.yml` with the following structure:
+
+**Trigger:** `push` to `main` branch, `pull_request` to `main` branch.
+
+**Jobs:**
+
+1. **`test`** job:
+   - runs-on: `ubuntu-latest`
+   - Steps: checkout, setup Python 3.12, install dev deps (`pip install -e ".[dev]"`), run `maturin develop --release`, run `pytest`
+
+2. **`build`** job (matrix strategy):
+   - Matrix entries (4 targets):
+     - `{os: ubuntu-latest, target: x86_64}`
+     - `{os: ubuntu-latest, target: aarch64}` (cross-compile via QEMU)
+     - `{os: macos-13, target: x86_64}` (Intel mac runner)
+     - `{os: macos-14, target: aarch64}` (Apple Silicon runner)
+   - Steps:
+     - `actions/checkout@v4`
+     - For aarch64 linux: `docker/setup-qemu-action@v3` (needed for cross-compile)
+     - `PyO3/maturin-action@v1` with:
+       - `command: build`
+       - `args: --release --out dist`
+       - `target: ${{ matrix.target }}`
+       - `manylinux: auto` (for linux builds)
+     - `actions/upload-artifact@v4` with:
+       - `name: wheels-${{ matrix.os }}-${{ matrix.target }}`
+       - `path: dist/`
+
+**Important details:**
+- Use `abi3-py39` (already in Cargo.toml features) so each platform produces exactly 1 wheel.
+- Do NOT add `sccache` or other caching for now -- keep the workflow simple.
+- Do NOT include any publish/release steps in this workflow.
+- The `test` job and `build` job run in parallel (no `needs` between them).
+  </action>
+  <verify>
+    <automated>python -c "
+import yaml
+with open('.github/workflows/ci.yml') as f:
+    wf = yaml.safe_load(f)
+assert 'push' in wf[True] or 'push' in wf.get('on', {})
+jobs = wf.get('jobs', {})
+assert 'test' in jobs, 'missing test job'
+assert 'build' in jobs, 'missing build job'
+build = jobs['build']
+matrix = build.get('strategy', {}).get('matrix', {}).get('include', [])
+targets = [(m.get('os'), m.get('target')) for m in matrix]
+assert len(targets) == 4, f'expected 4 targets, got {len(targets)}'
+print('OK')
+" 2>/dev/null || python3 -c "
+import yaml
+with open('.github/workflows/ci.yml') as f:
+    wf = yaml.safe_load(f)
+on_key = wf.get(True) or wf.get('on', {})
+jobs = wf.get('jobs', {})
+assert 'test' in jobs, 'missing test job'
+assert 'build' in jobs, 'missing build job'
+build = jobs['build']
+matrix = build.get('strategy', {}).get('matrix', {}).get('include', [])
+targets = [(m.get('os'), m.get('target')) for m in matrix]
+assert len(targets) == 4, f'expected 4 targets, got {len(targets)}'
+print('OK')
+"</automated>
+  </verify>
+  <acceptance_criteria>
+- `.github/workflows/ci.yml` exists
+- Workflow triggers on push to main and pull_request to main
+- Contains a `test` job that runs pytest
+- Contains a `build` job with 4 matrix entries (linux x86_64, linux aarch64, macos x86_64, macos arm64)
+- Build job uses `PyO3/maturin-action@v1`
+- Build job uploads wheel artifacts
+- Linux aarch64 entry includes QEMU setup step
+- No publish/release steps present
+  </acceptance_criteria>
+  <done>CI workflow builds wheels for manylinux x86_64, manylinux aarch64, macOS x86_64, macOS arm64 on every PR</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| GitHub Actions | CI runs in GitHub's infrastructure; secrets must be protected |
+| PyPI credentials | Will be added in Plan 02; not present in this plan |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-09-01 | Tampering | CI workflow | accept | Workflow is in repo and subject to PR review; no secrets in ci.yml |
+| T-09-02 | Information Disclosure | Build artifacts | accept | Wheels are public artifacts (open source package); no secrets embedded |
+</threat_model>
+
+<verification>
+- `ci.yml` is valid YAML and contains expected structure
+- pyproject.toml is valid TOML with complete metadata
+- No publish steps in CI workflow (publish is Plan 02)
+</verification>
+
+<success_criteria>
+- CI workflow file exists with correct trigger, test job, and 4-target build matrix
+- pyproject.toml has license, classifiers, URLs for PyPI readiness
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/09-distribution/09-01-SUMMARY.md`
+</output>

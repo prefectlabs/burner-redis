@@ -1,0 +1,761 @@
+# T02: Add Python-layer value coercion, exception hierarchy alignment, convenience commands (scan_iter, setex), pipeline stubs for all new commands, and comprehensive test coverage for the entire Phase 12 feature set.
+
+**Slice:** S12 — **Milestone:** M001
+
+## Description
+
+Add Python-layer value coercion, exception hierarchy alignment, convenience commands (scan_iter, setex), pipeline stubs for all new commands, and comprehensive test coverage for the entire Phase 12 feature set.
+
+Purpose: This plan delivers the Python-side compatibility layer that makes burner-redis a true drop-in replacement for redis.asyncio.Redis. Value coercion fixes the most critical gap (set() rejecting integers), LockError hierarchy fixes exception catching, and pipeline stubs ensure all new commands work in batched execution.
+
+Output: Updated Python files with coercion/exceptions/wrappers, pipeline stubs, and complete test coverage for all D-01 through D-13 features.
+
+## Legacy Source
+
+---
+phase: 12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl
+plan: 02
+type: execute
+wave: 2
+depends_on: ["12-01"]
+files_modified:
+  - python/burner_redis/__init__.py
+  - python/burner_redis/lock.py
+  - python/burner_redis/pipeline.py
+  - tests/test_strings.py
+  - tests/test_locking.py
+  - tests/test_expiration.py
+  - tests/test_streams.py
+  - tests/test_pipeline.py
+autonomous: true
+requirements:
+  - D-01
+  - D-02
+  - D-05
+  - D-06
+  - D-07
+  - D-08
+  - D-09
+  - D-12
+
+must_haves:
+  truths:
+    - "set(key, 1) coerces integer to string bytes, matching redis-py behavior"
+    - "set(key, True) raises TypeError, matching redis-py bool rejection"
+    - "LockError is a subclass of redis.exceptions.LockError when redis package is installed"
+    - "scan_iter(match=pattern) yields keys as an async generator"
+    - "setex(name, time, value) stores a key with TTL as shorthand for set()"
+    - "Pipeline has stubs for keys, ttl, mget, setex, xpending, and scan_iter"
+    - "All new commands have test coverage with passing assertions"
+  artifacts:
+    - path: "python/burner_redis/__init__.py"
+      provides: "_coerce_value helper, scan_iter async generator, setex wrapper"
+      contains: "_coerce_value"
+    - path: "python/burner_redis/lock.py"
+      provides: "LockError with conditional redis.exceptions.LockError subclassing"
+      contains: "redis.exceptions.LockError"
+    - path: "python/burner_redis/pipeline.py"
+      provides: "Pipeline stubs for keys, ttl, mget, setex, xpending, scan_iter"
+      contains: "def keys"
+    - path: "tests/test_strings.py"
+      provides: "Tests for coercion, keys, scan_iter, setex, mget"
+      contains: "test_set_coercion_int"
+    - path: "tests/test_locking.py"
+      provides: "Test for LockError hierarchy"
+      contains: "test_lock_error_hierarchy"
+  key_links:
+    - from: "python/burner_redis/__init__.py"
+      to: "src/lib.rs"
+      via: "BurnerRedis.set() calling Rust set after coercion, BurnerRedis.keys() calling Rust keys"
+      pattern: "_coerce_value"
+    - from: "python/burner_redis/lock.py"
+      to: "python/burner_redis/__init__.py"
+      via: "LockError import in __init__.py"
+      pattern: "from burner_redis.lock import.*LockError"
+---
+
+<objective>
+Add Python-layer value coercion, exception hierarchy alignment, convenience commands (scan_iter, setex), pipeline stubs for all new commands, and comprehensive test coverage for the entire Phase 12 feature set.
+
+Purpose: This plan delivers the Python-side compatibility layer that makes burner-redis a true drop-in replacement for redis.asyncio.Redis. Value coercion fixes the most critical gap (set() rejecting integers), LockError hierarchy fixes exception catching, and pipeline stubs ensure all new commands work in batched execution.
+
+Output: Updated Python files with coercion/exceptions/wrappers, pipeline stubs, and complete test coverage for all D-01 through D-13 features.
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@.planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-CONTEXT.md
+@.planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-RESEARCH.md
+@.planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-01-SUMMARY.md
+
+<interfaces>
+<!-- Key types and contracts from Plan 01. Executor needs these. -->
+
+From src/lib.rs (Plan 01 output -- PyO3 bindings now available):
+```python
+# Available on BurnerRedis after Plan 01:
+await client.keys(pattern="*")    # Returns list[bytes]
+await client.ttl(name)            # Returns int (-2, -1, or positive)
+await client.mget(*keys)          # Returns list[bytes|None]
+await client.xpending(name, groupname)  # Returns dict with pending/min/max/consumers
+```
+
+From python/burner_redis/__init__.py (existing patterns):
+```python
+# ResponseError conditional subclassing pattern (lines 7-23):
+class ResponseError(Exception): pass
+try:
+    import redis.exceptions
+    class ResponseError(redis.exceptions.ResponseError): pass
+except (ImportError, AttributeError): pass
+
+# Monkey-patch pattern (lines 26-47):
+def _pipeline(self): return Pipeline(self)
+BurnerRedis.pipeline = _pipeline
+
+# Script._coerce_arg pattern (lines 63-69):
+@staticmethod
+def _coerce_arg(arg):
+    if isinstance(arg, (str, bytes, memoryview)): return arg
+    if isinstance(arg, (int, float)): return str(arg)
+    return str(arg)
+```
+
+From python/burner_redis/lock.py (current LockError, lines 10-12):
+```python
+class LockError(Exception):
+    """Raised when a lock operation fails (e.g., release without ownership)."""
+    pass
+```
+
+From python/burner_redis/pipeline.py (stub pattern):
+```python
+def set(self, name, value, ex=None, px=None, nx=False, xx=False):
+    self._commands.append(("set", (name, value), {"ex": ex, "px": px, "nx": nx, "xx": xx}))
+    return self
+```
+
+From tests/conftest.py:
+```python
+# Fixture providing a BurnerRedis instance:
+@pytest.fixture
+async def r():
+    return BurnerRedis()
+```
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto" tdd="true">
+  <name>Task 1: Add value coercion, exception hierarchy, scan_iter, and setex to Python layer</name>
+  <files>python/burner_redis/__init__.py, python/burner_redis/lock.py</files>
+  <read_first>
+    - python/burner_redis/__init__.py (full file -- current ResponseError pattern, Script._coerce_arg, monkey-patch pattern, __all__)
+    - python/burner_redis/lock.py (full file -- current LockError definition, Lock class)
+    - tests/conftest.py (fixture pattern for test setup)
+  </read_first>
+  <behavior>
+    - _coerce_value(b"hello") returns b"hello" (bytes passthrough)
+    - _coerce_value(memoryview(b"hi")) returns memoryview(b"hi") (memoryview passthrough)
+    - _coerce_value(True) raises TypeError with message containing "'bool'"
+    - _coerce_value(False) raises TypeError with message containing "'bool'"
+    - _coerce_value(42) returns b"42" (int to repr().encode())
+    - _coerce_value(3.14) returns b"3.14" (float to repr().encode())
+    - _coerce_value("hello") returns "hello" (str passthrough)
+    - LockError.__bases__ includes redis.exceptions.LockError when redis is installed
+    - scan_iter(match="user:*") yields keys matching pattern as async generator
+    - setex("key", 10, "val") calls set("key", "val", ex=10)
+  </behavior>
+  <action>
+**1. Add _coerce_value() helper to python/burner_redis/__init__.py (per D-01, D-02):**
+
+Add this function BEFORE the monkey-patch section (after the ResponseError block, around line 24):
+
+```python
+def _coerce_value(value):
+    """Coerce a value to str or bytes, matching redis-py's Encoder.encode() behavior.
+    
+    Accepts: bytes, memoryview, int, float, str.
+    Rejects: bool (redis-py rejects bools with DataError since bool is subclass of int).
+    """
+    if isinstance(value, (bytes, memoryview)):
+        return value
+    if isinstance(value, bool):
+        raise TypeError(
+            "Invalid input of type: 'bool'. "
+            "Convert to a bytes, string, int or float first."
+        )
+    if isinstance(value, (int, float)):
+        return repr(value).encode()
+    if isinstance(value, str):
+        return value
+    return str(value)
+```
+
+**2. Monkey-patch set() to apply coercion (per D-01):**
+
+Add a wrapper that coerces the value before calling the Rust set():
+
+```python
+_original_set = BurnerRedis.set
+
+async def _coerced_set(self, name, value, ex=None, px=None, nx=False, xx=False):
+    """SET with value coercion matching redis-py behavior."""
+    return await _original_set(self, name, _coerce_value(value), ex=ex, px=px, nx=nx, xx=xx)
+
+BurnerRedis.set = _coerced_set
+```
+
+**3. Add setex() wrapper to BurnerRedis (per D-12):**
+
+```python
+async def _setex(self, name, time, value):
+    """SETEX: Set key with expiration in seconds. Shorthand for SET with EX."""
+    return await self.set(name, _coerce_value(value), ex=time)
+
+BurnerRedis.setex = _setex
+```
+
+**4. Add scan_iter() async generator to BurnerRedis (per D-05):**
+
+```python
+async def _scan_iter(self, match=None, count=None, _type=None):
+    """Async iterator over keys matching a glob pattern.
+    
+    Wraps keys() as an async generator for redis-py scan_iter() compatibility.
+    count and _type parameters are accepted but ignored (in-process, no cursor needed).
+    """
+    pattern = match if match is not None else "*"
+    keys = await self.keys(pattern)
+    for key in keys:
+        yield key
+
+BurnerRedis.scan_iter = _scan_iter
+```
+
+**5. Update __all__ to include _coerce_value (or keep it private with underscore).**
+
+No change to __all__ needed since _coerce_value is private (underscore prefix).
+
+**6. Fix LockError in python/burner_redis/lock.py (per D-06):**
+
+Replace lines 10-12 with the conditional subclassing pattern:
+
+```python
+class LockError(Exception):
+    """Raised when a lock operation fails (e.g., release without ownership)."""
+    pass
+
+
+try:
+    import redis.exceptions
+
+    class LockError(redis.exceptions.LockError):  # type: ignore[no-redef]
+        """Raised when a lock operation fails (subclass of redis.exceptions.LockError)."""
+        pass
+except (ImportError, AttributeError):
+    pass
+```
+
+The rest of lock.py (Lock class using LockError) remains unchanged since it references LockError by name.
+
+**7. Exception audit per D-07:**
+
+Check if NoScriptError should be aligned. The current EVALSHA path in lib.rs raises a generic exception with "NOSCRIPT" message. For D-07, add a conditional NoScriptError class to __init__.py that wraps redis.exceptions.NoScriptError if available, though this is lower priority than LockError. Add it after the ResponseError block:
+
+```python
+class NoScriptError(Exception):
+    """Raised when EVALSHA references an unknown script SHA."""
+    pass
+
+try:
+    import redis.exceptions
+    class NoScriptError(redis.exceptions.NoScriptError):  # type: ignore[no-redef]
+        """Raised when EVALSHA references an unknown script SHA (subclass of redis.exceptions.NoScriptError)."""
+        pass
+except (ImportError, AttributeError):
+    pass
+```
+
+Update __all__ to include "NoScriptError".
+  </action>
+  <verify>
+    <automated>cd /Users/alexander/dev/prefectlabs/burner-redis && uv run python -c "
+from burner_redis import BurnerRedis, LockError
+from burner_redis._burner_redis import BurnerRedis as RawBR
+# Check coercion exists
+from burner_redis import _coerce_value
+assert _coerce_value(42) == b'42'
+assert _coerce_value('hi') == 'hi'
+try:
+    _coerce_value(True)
+    assert False, 'should have raised'
+except TypeError:
+    pass
+# Check LockError hierarchy
+import redis.exceptions
+assert issubclass(LockError, redis.exceptions.LockError)
+# Check scan_iter is async generator
+import inspect
+assert inspect.isasyncgenfunction(BurnerRedis.scan_iter)
+# Check setex exists
+assert hasattr(BurnerRedis, 'setex')
+print('ALL CHECKS PASSED')
+" 2>&1</automated>
+  </verify>
+  <acceptance_criteria>
+    - python/burner_redis/__init__.py contains `def _coerce_value(value):`
+    - python/burner_redis/__init__.py contains `isinstance(value, bool)` BEFORE `isinstance(value, (int, float))`
+    - python/burner_redis/__init__.py contains `repr(value).encode()`
+    - python/burner_redis/__init__.py contains `_original_set = BurnerRedis.set`
+    - python/burner_redis/__init__.py contains `async def _coerced_set(`
+    - python/burner_redis/__init__.py contains `async def _setex(`
+    - python/burner_redis/__init__.py contains `async def _scan_iter(`
+    - python/burner_redis/__init__.py contains `yield key`
+    - python/burner_redis/lock.py contains `redis.exceptions.LockError`
+    - python/burner_redis/lock.py contains `class LockError(redis.exceptions.LockError):`
+    - `uv run python -c "from burner_redis import LockError; import redis.exceptions; assert issubclass(LockError, redis.exceptions.LockError)"` exits 0
+  </acceptance_criteria>
+  <done>Value coercion rejects bools and coerces int/float, LockError is subclass of redis.exceptions.LockError, scan_iter is async generator, setex delegates to set()</done>
+</task>
+
+<task type="auto" tdd="true">
+  <name>Task 2: Add pipeline stubs and comprehensive test coverage for all Phase 12 features</name>
+  <files>python/burner_redis/pipeline.py, tests/test_strings.py, tests/test_locking.py, tests/test_expiration.py, tests/test_streams.py, tests/test_pipeline.py</files>
+  <read_first>
+    - python/burner_redis/pipeline.py (full file -- existing stub patterns)
+    - tests/test_strings.py (existing test patterns for string commands)
+    - tests/test_locking.py (existing test patterns for lock)
+    - tests/test_expiration.py (existing test patterns for TTL/expiry)
+    - tests/test_streams.py (existing test patterns for streams/consumer groups)
+    - tests/test_pipeline.py (existing test patterns for pipeline)
+    - python/burner_redis/__init__.py (after Task 1 changes -- coercion and wrappers)
+  </read_first>
+  <behavior>
+    - Pipeline.keys("prefix:*") buffers a keys command
+    - Pipeline.ttl("mykey") buffers a ttl command
+    - Pipeline.mget("k1", "k2") buffers an mget command
+    - Pipeline.setex("k", 10, "v") buffers a setex command
+    - Pipeline.xpending("stream", "group") buffers an xpending command
+    - test_set_coercion_int: set(key, 42) then get(key) returns b"42"
+    - test_set_coercion_float: set(key, 3.14) then get(key) returns b"3.14"
+    - test_set_coercion_bool_rejected: set(key, True) raises TypeError
+    - test_keys_pattern: keys("user:*") returns matching keys only
+    - test_keys_all: keys("*") returns all keys
+    - test_scan_iter: async for key in r.scan_iter(match="*") collects all keys
+    - test_ttl_no_expiry: ttl on key without TTL returns -1
+    - test_ttl_missing_key: ttl on nonexistent key returns -2
+    - test_ttl_with_expiry: ttl on key with EX returns positive int
+    - test_setex: setex then get returns the value
+    - test_setex_expiry: setex then ttl returns positive seconds
+    - test_mget: mget returns list matching key order
+    - test_mget_missing: mget with missing keys returns None in those positions
+    - test_xpending_summary: xpending returns dict with pending/min/max/consumers keys
+    - test_xpending_summary_empty: xpending with no pending returns {pending: 0, min: None, max: None, consumers: []}
+    - test_lock_error_hierarchy: LockError is subclass of redis.exceptions.LockError
+    - test_pipeline_new_commands: pipeline stubs work for keys/ttl/mget/setex/xpending
+  </behavior>
+  <action>
+**1. Add pipeline stubs to python/burner_redis/pipeline.py (per D-09):**
+
+Add these methods to the Pipeline class, in a new section after the Pub/Sub Commands section:
+
+```python
+# ---- Key Enumeration Commands ----
+
+def keys(self, pattern="*"):
+    self._commands.append(("keys", (pattern,), {}))
+    return self
+
+def ttl(self, name):
+    self._commands.append(("ttl", (name,), {}))
+    return self
+
+def setex(self, name, time, value):
+    self._commands.append(("setex", (name, time, value), {}))
+    return self
+
+def mget(self, *keys):
+    self._commands.append(("mget", keys, {}))
+    return self
+
+def xpending(self, name, groupname):
+    self._commands.append(("xpending", (name, groupname), {}))
+    return self
+```
+
+Note: scan_iter does NOT need a pipeline stub because scan_iter is an async generator (yields individual results), not a command that returns a single result. redis-py Pipeline also does not have scan_iter.
+
+**2. Add coercion tests to tests/test_strings.py:**
+
+Add a new test class or section at the end of the file:
+
+```python
+# ---- Value Coercion Tests (D-01, D-02) ----
+
+@pytest.mark.asyncio
+async def test_set_coercion_int(r):
+    """set() accepts integer values and coerces to string bytes."""
+    await r.set("counter", 42)
+    result = await r.get("counter")
+    assert result == b"42"
+
+@pytest.mark.asyncio
+async def test_set_coercion_int_with_flags(r):
+    """set() coercion works with NX/PX flags (docket's exact pattern)."""
+    result = await r.set("cooldown", 1, nx=True, px=5000)
+    assert result is True
+    val = await r.get("cooldown")
+    assert val == b"1"
+
+@pytest.mark.asyncio
+async def test_set_coercion_float(r):
+    """set() accepts float values and coerces to string bytes."""
+    await r.set("ratio", 3.14)
+    result = await r.get("ratio")
+    assert result == b"3.14"
+
+@pytest.mark.asyncio
+async def test_set_coercion_bool_rejected(r):
+    """set() rejects boolean values matching redis-py behavior."""
+    with pytest.raises(TypeError, match="bool"):
+        await r.set("flag", True)
+
+@pytest.mark.asyncio
+async def test_set_coercion_bool_false_rejected(r):
+    """set() rejects False as well as True."""
+    with pytest.raises(TypeError, match="bool"):
+        await r.set("flag", False)
+
+@pytest.mark.asyncio
+async def test_set_coercion_bytes_passthrough(r):
+    """set() passes bytes through without coercion."""
+    await r.set("key", b"raw bytes")
+    result = await r.get("key")
+    assert result == b"raw bytes"
+
+@pytest.mark.asyncio
+async def test_set_coercion_str_passthrough(r):
+    """set() passes str through without coercion."""
+    await r.set("key", "hello")
+    result = await r.get("key")
+    assert result == b"hello"
+
+# ---- keys() Tests (D-03, D-04) ----
+
+@pytest.mark.asyncio
+async def test_keys_all(r):
+    """keys('*') returns all keys."""
+    await r.set("a", "1")
+    await r.set("b", "2")
+    await r.set("c", "3")
+    result = await r.keys("*")
+    assert set(result) == {b"a", b"b", b"c"}
+
+@pytest.mark.asyncio
+async def test_keys_pattern(r):
+    """keys(pattern) filters by glob pattern."""
+    await r.set("user:1", "alice")
+    await r.set("user:2", "bob")
+    await r.set("item:1", "widget")
+    result = await r.keys("user:*")
+    assert set(result) == {b"user:1", b"user:2"}
+
+@pytest.mark.asyncio
+async def test_keys_no_match(r):
+    """keys() returns empty list when no keys match."""
+    await r.set("foo", "bar")
+    result = await r.keys("nonexistent:*")
+    assert result == []
+
+@pytest.mark.asyncio
+async def test_keys_default_pattern(r):
+    """keys() with no args defaults to '*'."""
+    await r.set("x", "1")
+    result = await r.keys()
+    assert b"x" in result
+
+@pytest.mark.asyncio
+async def test_keys_char_range(r):
+    """keys() supports [a-z] character range patterns."""
+    await r.set("key_a", "1")
+    await r.set("key_b", "2")
+    await r.set("key_1", "3")
+    result = await r.keys("key_[a-z]")
+    assert set(result) == {b"key_a", b"key_b"}
+
+# ---- scan_iter() Tests (D-05) ----
+
+@pytest.mark.asyncio
+async def test_scan_iter_all(r):
+    """scan_iter() yields all keys."""
+    await r.set("s1", "v1")
+    await r.set("s2", "v2")
+    keys = []
+    async for key in r.scan_iter():
+        keys.append(key)
+    assert set(keys) == {b"s1", b"s2"}
+
+@pytest.mark.asyncio
+async def test_scan_iter_pattern(r):
+    """scan_iter(match=pattern) yields only matching keys."""
+    await r.set("app:1", "v1")
+    await r.set("app:2", "v2")
+    await r.set("other", "v3")
+    keys = []
+    async for key in r.scan_iter(match="app:*"):
+        keys.append(key)
+    assert set(keys) == {b"app:1", b"app:2"}
+
+# ---- setex() Tests (D-12) ----
+
+@pytest.mark.asyncio
+async def test_setex_basic(r):
+    """setex() stores a value retrievable via get()."""
+    await r.setex("mykey", 60, "myvalue")
+    result = await r.get("mykey")
+    assert result == b"myvalue"
+
+@pytest.mark.asyncio
+async def test_setex_with_ttl(r):
+    """setex() sets a TTL on the key."""
+    await r.setex("expiring", 30, "data")
+    ttl_val = await r.ttl("expiring")
+    assert 0 < ttl_val <= 30
+
+@pytest.mark.asyncio
+async def test_setex_coercion(r):
+    """setex() applies value coercion like set()."""
+    await r.setex("num", 60, 123)
+    result = await r.get("num")
+    assert result == b"123"
+
+# ---- mget() Tests (D-13) ----
+
+@pytest.mark.asyncio
+async def test_mget_basic(r):
+    """mget() returns values for multiple keys."""
+    await r.set("k1", "v1")
+    await r.set("k2", "v2")
+    result = await r.mget("k1", "k2")
+    assert result == [b"v1", b"v2"]
+
+@pytest.mark.asyncio
+async def test_mget_missing_keys(r):
+    """mget() returns None for missing keys."""
+    await r.set("k1", "v1")
+    result = await r.mget("k1", "missing", "k1")
+    assert result == [b"v1", None, b"v1"]
+
+@pytest.mark.asyncio
+async def test_mget_all_missing(r):
+    """mget() returns all None for nonexistent keys."""
+    result = await r.mget("a", "b", "c")
+    assert result == [None, None, None]
+```
+
+**3. Add TTL tests to tests/test_expiration.py (D-10):**
+
+```python
+# ---- TTL Command Tests (D-10) ----
+
+@pytest.mark.asyncio
+async def test_ttl_missing_key(r):
+    """ttl() returns -2 for nonexistent key."""
+    result = await r.ttl("nonexistent")
+    assert result == -2
+
+@pytest.mark.asyncio
+async def test_ttl_no_expiry(r):
+    """ttl() returns -1 for key with no TTL."""
+    await r.set("permanent", "value")
+    result = await r.ttl("permanent")
+    assert result == -1
+
+@pytest.mark.asyncio
+async def test_ttl_with_expiry(r):
+    """ttl() returns positive seconds for key with TTL."""
+    await r.set("temp", "value", ex=60)
+    result = await r.ttl("temp")
+    assert 0 < result <= 60
+```
+
+**4. Add xpending summary tests to tests/test_streams.py (D-11):**
+
+```python
+# ---- XPENDING Summary Tests (D-11) ----
+
+@pytest.mark.asyncio
+async def test_xpending_summary_with_pending(r):
+    """xpending() summary returns dict with pending messages."""
+    await r.xadd("mystream", {"data": "value1"})
+    await r.xadd("mystream", {"data": "value2"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, count=2)
+    
+    result = await r.xpending("mystream", "mygroup")
+    assert result["pending"] == 2
+    assert result["min"] is not None
+    assert result["max"] is not None
+    assert len(result["consumers"]) == 1
+    assert result["consumers"][0]["name"] == b"consumer1"
+    assert result["consumers"][0]["pending"] == 2
+
+@pytest.mark.asyncio
+async def test_xpending_summary_empty(r):
+    """xpending() summary returns zeros when no messages are pending."""
+    await r.xadd("mystream", {"data": "value"})
+    await r.xgroup_create("mystream", "mygroup", id="0")
+    # Read and ACK
+    msgs = await r.xreadgroup("mygroup", "consumer1", {"mystream": ">"}, count=1)
+    msg_id = msgs[0][1][0][0]
+    await r.xack("mystream", "mygroup", msg_id)
+    
+    result = await r.xpending("mystream", "mygroup")
+    assert result["pending"] == 0
+    assert result["min"] is None
+    assert result["max"] is None
+    assert result["consumers"] == []
+```
+
+**5. Add LockError hierarchy test to tests/test_locking.py (D-06):**
+
+```python
+# ---- LockError Hierarchy Tests (D-06) ----
+
+def test_lock_error_hierarchy():
+    """LockError is subclass of redis.exceptions.LockError when redis is installed."""
+    from burner_redis import LockError
+    import redis.exceptions
+    assert issubclass(LockError, redis.exceptions.LockError)
+```
+
+**6. Add pipeline tests for new commands to tests/test_pipeline.py (D-09):**
+
+```python
+# ---- Pipeline Stubs for Phase 12 Commands (D-09) ----
+
+@pytest.mark.asyncio
+async def test_pipeline_keys(r):
+    """Pipeline keys() command works."""
+    await r.set("pk1", "v1")
+    await r.set("pk2", "v2")
+    pipe = r.pipeline()
+    pipe.keys("pk*")
+    results = await pipe.execute()
+    assert set(results[0]) == {b"pk1", b"pk2"}
+
+@pytest.mark.asyncio
+async def test_pipeline_ttl(r):
+    """Pipeline ttl() command works."""
+    await r.set("pt", "v", ex=60)
+    pipe = r.pipeline()
+    pipe.ttl("pt")
+    pipe.ttl("nonexistent")
+    results = await pipe.execute()
+    assert 0 < results[0] <= 60
+    assert results[1] == -2
+
+@pytest.mark.asyncio
+async def test_pipeline_mget(r):
+    """Pipeline mget() command works."""
+    await r.set("pm1", "a")
+    await r.set("pm2", "b")
+    pipe = r.pipeline()
+    pipe.mget("pm1", "pm2", "pm3")
+    results = await pipe.execute()
+    assert results[0] == [b"a", b"b", None]
+
+@pytest.mark.asyncio
+async def test_pipeline_setex(r):
+    """Pipeline setex() command works."""
+    pipe = r.pipeline()
+    pipe.setex("pse", 60, "val")
+    await pipe.execute()
+    result = await r.get("pse")
+    assert result == b"val"
+
+@pytest.mark.asyncio
+async def test_pipeline_xpending(r):
+    """Pipeline xpending() summary command works."""
+    await r.xadd("pstream", {"f": "v"})
+    await r.xgroup_create("pstream", "pgroup", id="0")
+    await r.xreadgroup("pgroup", "pc1", {"pstream": ">"}, count=1)
+    pipe = r.pipeline()
+    pipe.xpending("pstream", "pgroup")
+    results = await pipe.execute()
+    assert results[0]["pending"] == 1
+```
+  </action>
+  <verify>
+    <automated>cd /Users/alexander/dev/prefectlabs/burner-redis && uv run pytest tests/test_strings.py tests/test_locking.py tests/test_expiration.py tests/test_streams.py tests/test_pipeline.py -x -q 2>&1 | tail -20</automated>
+  </verify>
+  <acceptance_criteria>
+    - python/burner_redis/pipeline.py contains `def keys(self, pattern="*"):`
+    - python/burner_redis/pipeline.py contains `def ttl(self, name):`
+    - python/burner_redis/pipeline.py contains `def mget(self, *keys):`
+    - python/burner_redis/pipeline.py contains `def setex(self, name, time, value):`
+    - python/burner_redis/pipeline.py contains `def xpending(self, name, groupname):`
+    - tests/test_strings.py contains `test_set_coercion_int`
+    - tests/test_strings.py contains `test_set_coercion_bool_rejected`
+    - tests/test_strings.py contains `test_keys_pattern`
+    - tests/test_strings.py contains `test_scan_iter_all`
+    - tests/test_strings.py contains `test_setex_basic`
+    - tests/test_strings.py contains `test_mget_basic`
+    - tests/test_expiration.py contains `test_ttl_missing_key`
+    - tests/test_expiration.py contains `test_ttl_no_expiry`
+    - tests/test_expiration.py contains `test_ttl_with_expiry`
+    - tests/test_streams.py contains `test_xpending_summary_with_pending`
+    - tests/test_locking.py contains `test_lock_error_hierarchy`
+    - tests/test_pipeline.py contains `test_pipeline_keys`
+    - `uv run pytest tests/test_strings.py tests/test_locking.py tests/test_expiration.py tests/test_streams.py tests/test_pipeline.py -x -q` exits 0 with all tests passing
+  </acceptance_criteria>
+  <done>Pipeline stubs exist for keys/ttl/mget/setex/xpending, comprehensive tests pass for all Phase 12 features (coercion, keys, scan_iter, ttl, setex, mget, xpending summary, LockError hierarchy, pipeline stubs)</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| User values -> _coerce_value | Arbitrary Python objects enter coercion helper |
+| Pipeline buffer -> execute | Buffered commands are replayed against BurnerRedis |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-12-05 | T (Tampering) | _coerce_value accepting arbitrary types | mitigate | Reject booleans explicitly (check before int). str() fallback for unknown types is permissive but matches redis-py behavior. |
+| T-12-06 | S (Spoofing) | LockError hierarchy | accept | Conditional subclassing is the established pattern. If redis package is not installed, fallback to plain Exception is safe. |
+| T-12-07 | D (Denial of Service) | scan_iter yielding all keys | accept | Same risk profile as keys() -- in-process, caller controls data volume. |
+</threat_model>
+
+<verification>
+- `uv run pytest tests/ -x --ignore=tests/test_pydocket_compat.py --ignore=tests/test_prefect_integration.py -q` all pass
+- `uv run python -c "from burner_redis import BurnerRedis, LockError; import redis.exceptions; assert issubclass(LockError, redis.exceptions.LockError)"` exits 0
+- Value coercion: `set(key, 42)` works, `set(key, True)` raises TypeError
+- All pipeline stubs buffer and execute correctly
+</verification>
+
+<success_criteria>
+- set() accepts int, float, str, bytes, memoryview and rejects bool -- matching redis-py exactly
+- LockError inherits from redis.exceptions.LockError when redis-py is installed
+- scan_iter(match=pattern) works as async generator (`async for key in r.scan_iter()`)
+- setex(name, time, value) stores value with TTL
+- Pipeline has stubs for all new commands (keys, ttl, mget, setex, xpending)
+- All tests pass with zero failures
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/12-close-remaining-redis-py-compatibility-gaps-for-drop-in-repl/12-02-SUMMARY.md`
+</output>

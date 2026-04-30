@@ -1,0 +1,1202 @@
+# T02: Expose all 16 list commands through the Python API: 13 non-blocking `#[pymethods]` (resolved-sync style) + 3 blocking `#[pymethods]` (BRPOP/BLPOP/BLMOVE via `pyo3_async_runtimes::tokio::future_into_py` with the XREAD blocking loop pattern).
+
+**Slice:** S14 — **Milestone:** M001
+
+## Description
+
+Expose all 16 list commands through the Python API: 13 non-blocking `#[pymethods]` (resolved-sync style) + 3 blocking `#[pymethods]` (BRPOP/BLPOP/BLMOVE via `pyo3_async_runtimes::tokio::future_into_py` with the XREAD blocking loop pattern). Add Python-layer value coercion for write commands (LPUSH/RPUSH/LSET/LINSERT) and create `tests/test_lists.py` covering LIST-01..LIST-15.
+
+Purpose: Python-surface parity is the drop-in contract with `redis.asyncio.Redis`. The blocking commands are the hardest part — they must respect asyncio cancellation, timeout=0 indefinite blocking, multi-key scan order, and shutdown wakes. The test suite locks down behavior against redis-py's exact method signatures.
+
+Output: Users can `await r.lpush(...)` / `await r.blpop(...)` and receive bytes-level drop-in behavior. Test file exercises 15 of 16 requirements (Lua + pipeline integration covered in Plan 03).
+
+## Legacy Source
+
+---
+phase: 14-add-support-for-the-redis-list-data-type-required-commands-l
+plan: 02
+type: execute
+wave: 2
+depends_on:
+  - "14-01"
+files_modified:
+  - src/lib.rs
+  - python/burner_redis/__init__.py
+  - tests/test_lists.py
+autonomous: true
+requirements:
+  - LIST-01
+  - LIST-02
+  - LIST-03
+  - LIST-04
+  - LIST-05
+  - LIST-06
+  - LIST-07
+  - LIST-08
+  - LIST-09
+  - LIST-10
+  - LIST-11
+  - LIST-12
+  - LIST-13
+  - LIST-14
+  - LIST-15
+tags:
+  - python
+  - pyo3
+  - blocking
+  - lists
+
+must_haves:
+  truths:
+    - "User can await r.lpush('k', 'a', 'b', 'c') and observe [c, b, a] via r.lrange"
+    - "User can await r.rpush with the same semantics as redis.asyncio.Redis"
+    - "LPOP with count=None returns bytes or None; with count=N returns list or None"
+    - "LRANGE, LLEN, LINDEX, LINSERT, LREM, LSET, LTRIM all have drop-in redis-py signatures and behavior"
+    - "LMOVE and RPOPLPUSH return bytes on success, None on missing source"
+    - "BRPOP/BLPOP on multi-key scans left-to-right, returns (key, value) tuple on success, None on timeout"
+    - "BRPOP/BLPOP respects asyncio.CancelledError (no hang, no partial state)"
+    - "BRPOP/BLPOP wakes when LPUSH fires on a watched key"
+    - "BLMOVE is cross-key atomic and respects timeout=0 blocking"
+    - "Value coercion (int/float/str/bool/memoryview) applied to LPUSH, RPUSH, LSET, LINSERT before hitting Rust"
+    - "WRONGTYPE errors against non-list keys raise ResponseError with 'WRONGTYPE' prefix"
+  artifacts:
+    - path: "src/lib.rs"
+      provides: "13 non-blocking #[pymethods] + 3 blocking #[pymethods] (brpop/blpop/blmove) using future_into_py + tokio::select!"
+      contains: "fn lpush"
+    - path: "python/burner_redis/__init__.py"
+      provides: "Value coercion monkey-patches for lpush, rpush, lset, linsert"
+      contains: "_coerced_lpush"
+    - path: "tests/test_lists.py"
+      provides: "pytest integration coverage of 15 LIST-01..LIST-15 requirements (excludes LIST-16 Lua/pipeline — those in Plan 03)"
+      contains: "async def test_lpush"
+  key_links:
+    - from: "src/lib.rs (blocking pymethods)"
+      to: "store.list_notify()"
+      via: "Arc<Notify> accessor for the blocking loop"
+      pattern: "store\\.list_notify\\(\\)"
+    - from: "src/lib.rs (brpop/blpop/blmove)"
+      to: "tokio::select! with notify + deadline sleep"
+      via: "future_into_py async block"
+      pattern: "tokio::select!"
+    - from: "src/lib.rs (brpop/blpop/blmove)"
+      to: "waiter.set(notify.notified()); waiter.as_mut().enable();"
+      via: "Phase-11 re-arm idiom inside select-drop branch"
+      pattern: "waiter\\.set\\(notify\\.notified"
+    - from: "python/burner_redis/__init__.py"
+      to: "_coerce_value applied to lpush/rpush values"
+      via: "monkey-patch wrapper"
+      pattern: "_coerce_value"
+---
+
+<objective>
+Expose all 16 list commands through the Python API: 13 non-blocking `#[pymethods]` (resolved-sync style) + 3 blocking `#[pymethods]` (BRPOP/BLPOP/BLMOVE via `pyo3_async_runtimes::tokio::future_into_py` with the XREAD blocking loop pattern). Add Python-layer value coercion for write commands (LPUSH/RPUSH/LSET/LINSERT) and create `tests/test_lists.py` covering LIST-01..LIST-15.
+
+Purpose: Python-surface parity is the drop-in contract with `redis.asyncio.Redis`. The blocking commands are the hardest part — they must respect asyncio cancellation, timeout=0 indefinite blocking, multi-key scan order, and shutdown wakes. The test suite locks down behavior against redis-py's exact method signatures.
+
+Output: Users can `await r.lpush(...)` / `await r.blpop(...)` and receive bytes-level drop-in behavior. Test file exercises 15 of 16 requirements (Lua + pipeline integration covered in Plan 03).
+</objective>
+
+<execution_context>
+@$HOME/.claude/get-shit-done/workflows/execute-plan.md
+@$HOME/.claude/get-shit-done/templates/summary.md
+</execution_context>
+
+<context>
+@.planning/PROJECT.md
+@.planning/ROADMAP.md
+@.planning/STATE.md
+@.planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-CONTEXT.md
+@.planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-RESEARCH.md
+@.planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-PATTERNS.md
+@.planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-VALIDATION.md
+@.planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-01-PLAN.md
+@src/lib.rs
+@src/store.rs
+@python/burner_redis/__init__.py
+@tests/test_streams.py
+@tests/conftest.py
+
+<interfaces>
+<!-- Store method signatures available to the PyO3 layer from Plan 01 -->
+
+```rust
+// src/store.rs (added in Plan 01)
+impl Store {
+    pub fn lpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError>;
+    pub fn rpush(&self, key: Bytes, values: Vec<Bytes>) -> Result<i64, StoreError>;
+    pub fn llen(&self, key: &Bytes) -> Result<i64, StoreError>;
+    pub fn lindex(&self, key: &Bytes, index: i64) -> Result<Option<Bytes>, StoreError>;
+    pub fn lrange(&self, key: &Bytes, start: i64, stop: i64) -> Result<Vec<Bytes>, StoreError>;
+    pub fn lpop(&self, key: &Bytes, count: Option<usize>) -> Result<LPopResult, StoreError>;
+    pub fn rpop(&self, key: &Bytes, count: Option<usize>) -> Result<LPopResult, StoreError>;
+    pub fn lrem(&self, key: &Bytes, count: i64, value: Bytes) -> Result<i64, StoreError>;
+    pub fn lset(&self, key: &Bytes, index: i64, value: Bytes) -> Result<(), StoreError>;
+    pub fn ltrim(&self, key: &Bytes, start: i64, stop: i64) -> Result<(), StoreError>;
+    pub fn linsert(&self, key: &Bytes, where_: InsertPosition, pivot: &Bytes, value: Bytes) -> Result<i64, StoreError>;
+    pub fn lmove_atomic(&self, src: &Bytes, dst: &Bytes, src_from: ListEnd, dst_to: ListEnd) -> Result<Option<Bytes>, StoreError>;
+    pub fn rpoplpush_atomic(&self, src: &Bytes, dst: &Bytes) -> Result<Option<Bytes>, StoreError>;
+    pub fn blpop_poll(&self, keys: &[Bytes]) -> Result<Option<(Bytes, Bytes)>, StoreError>;
+    pub fn brpop_poll(&self, keys: &[Bytes]) -> Result<Option<(Bytes, Bytes)>, StoreError>;
+    pub fn list_notify(&self) -> Arc<Notify>;
+    pub fn is_shutdown(&self) -> bool;
+}
+
+pub enum LPopResult { Nil, Single(Bytes), Array(Vec<Bytes>) }
+```
+
+```rust
+// src/commands/lists.rs (added in Plan 01)
+pub enum ListEnd { Left, Right }
+pub enum InsertPosition { Before, After }
+pub fn parse_list_end(s: &str) -> Result<ListEnd, StoreError>;
+pub fn parse_linsert_where(s: &str) -> Result<InsertPosition, StoreError>;
+```
+
+Existing helpers in src/lib.rs:
+```rust
+use commands::strings::{extract_bytes, extract_expiry};  // line 15
+fn resolved<'py>(py: Python<'py>, value: Py<PyAny>) -> PyResult<Bound<'py, PyAny>>;  // line 56
+fn store_err_to_py(e: StoreError) -> PyErr;  // line 99
+```
+
+Existing XREAD blocking template at src/lib.rs:979-1038 — direct pattern for BRPOP/BLPOP.
+
+Existing `_coerce_value` at python/burner_redis/__init__.py:41.
+Existing `_coerced_set` monkey-patch at python/burner_redis/__init__.py:64-72 — direct template.
+
+Existing tests/conftest.py provides `r` fixture (fresh BurnerRedis per test).
+
+Existing blocking-loop tests in tests/test_streams.py (lines 1064-1194) — direct template for BRPOP tests.
+</interfaces>
+</context>
+
+<tasks>
+
+<task type="auto" tdd="true">
+  <name>Task 1: Non-blocking PyO3 #[pymethods] for 13 list commands (LPUSH/RPUSH/LPOP/RPOP/LRANGE/LLEN/LINDEX/LINSERT/LREM/LSET/LTRIM/LMOVE/RPOPLPUSH)</name>
+  <read_first>
+    - src/lib.rs (full file — especially lines 391-542 for existing CRUD pymethods, lines 595-611 for sadd variadic template, lines 497-511 for hget single-or-None, lines 533-542 for hvals list-return)
+    - src/store.rs (list methods added in Plan 01)
+    - src/commands/lists.rs (ListEnd, InsertPosition, parse_list_end, parse_linsert_where)
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-PATTERNS.md (section "src/lib.rs — Non-blocking #[pymethods]")
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-RESEARCH.md (Code Examples: Non-blocking command LRANGE, LPUSH template)
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-CONTEXT.md (D-18, D-19, D-20)
+  </read_first>
+  <behavior>
+    - `await r.lpush("k", "a", "b", "c")` returns `3`; `await r.lrange("k", 0, -1)` returns `[b"c", b"b", b"a"]`
+    - `await r.rpush("k", "a", "b", "c")` followed by `lrange("k", 0, -1)` returns `[b"a", b"b", b"c"]`
+    - `await r.lpop("k")` returns `b"c"` (single bytes); `await r.lpop("k", count=5)` returns `[b"b", b"a"]` then `None`
+    - `await r.lpop("missing")` → `None`; `await r.lpop("missing", count=5)` → `None`; `await r.lpop("k", count=0)` on populated list → `[]`
+    - `await r.lrange("k", 0, -1)` returns `list[bytes]`
+    - `await r.llen("k")` returns `int`
+    - `await r.lindex("k", 0)` returns `bytes` or `None`
+    - `await r.linsert("k", "BEFORE", pivot, value)` returns new length or `-1` (pivot not found) or `0` (missing key)
+    - `await r.lrem("k", count, value)` returns removed count
+    - `await r.lset("k", index, value)` returns `True` on success; raises ResponseError on out-of-range or missing key
+    - `await r.ltrim("k", start, stop)` returns `True`
+    - `await r.lmove(src, dst, src="LEFT", dest="RIGHT")` returns `bytes` or `None`
+    - `await r.rpoplpush(src, dst)` returns `bytes` or `None`
+    - Calling any list method against a non-list key raises `ResponseError` with "WRONGTYPE" in the message
+  </behavior>
+  <action>
+Add 13 new `#[pymethods]` to `impl BurnerRedis` in `src/lib.rs`. Place them together under a `// ---- List Commands ----` section comment, following the existing layout convention (Hash/Set/ZSet/Stream sections are already grouped this way).
+
+**Use the `resolved()` helper** for all non-blocking methods (not `future_into_py`) — matches the established pattern for sadd/hget/etc. This preserves the async-overhead elimination from quick task `260415-an2`.
+
+**LPUSH (template for RPUSH):**
+```rust
+#[pyo3(signature = (name, *values))]
+fn lpush<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    values: &Bound<'py, pyo3::types::PyTuple>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    let vals: Vec<Bytes> = values
+        .iter()
+        .map(|obj| extract_bytes(&obj))
+        .collect::<PyResult<Vec<_>>>()?;
+    let len = self.store.lpush(key, vals).map_err(store_err_to_py)?;
+    resolved(py, len.into_pyobject(py)?.into_any().unbind())
+}
+```
+
+**RPUSH** — identical structure, call `self.store.rpush(...)`.
+
+**LPOP (count optional):**
+```rust
+#[pyo3(signature = (name, count=None))]
+fn lpop<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    count: Option<i64>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    // Convert i64 count to Option<usize>; negative count is a type error
+    let count_opt: Option<usize> = match count {
+        None => None,
+        Some(n) if n < 0 => return Err(pyo3::exceptions::PyValueError::new_err(
+            "count must be non-negative",
+        )),
+        Some(n) => Some(n as usize),
+    };
+    let result = self.store.lpop(&key, count_opt).map_err(store_err_to_py)?;
+    let py_result = match result {
+        crate::store::LPopResult::Nil => py.None(),
+        crate::store::LPopResult::Single(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+        crate::store::LPopResult::Array(vs) => {
+            let py_list = pyo3::types::PyList::empty(py);
+            for v in vs {
+                py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+            }
+            py_list.into_any().unbind()
+        }
+    };
+    resolved(py, py_result)
+}
+```
+**RPOP** — identical structure, call `self.store.rpop(...)`.
+
+**LRANGE:**
+```rust
+#[pyo3(signature = (name, start, end))]
+fn lrange<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    start: i64,
+    end: i64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    let elems = self.store.lrange(&key, start, end).map_err(store_err_to_py)?;
+    let py_list = pyo3::types::PyList::empty(py);
+    for v in elems {
+        py_list.append(pyo3::types::PyBytes::new(py, &v))?;
+    }
+    resolved(py, py_list.into_any().unbind())
+}
+```
+
+**LLEN:**
+```rust
+fn llen<'py>(&self, py: Python<'py>, name: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    let n = self.store.llen(&key).map_err(store_err_to_py)?;
+    resolved(py, n.into_pyobject(py)?.into_any().unbind())
+}
+```
+
+**LINDEX:**
+```rust
+#[pyo3(signature = (name, index))]
+fn lindex<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    index: i64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    let result = self.store.lindex(&key, index).map_err(store_err_to_py)?;
+    let py_result = match result {
+        Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+        None => py.None(),
+    };
+    resolved(py, py_result)
+}
+```
+
+**LINSERT** — signature matches redis-py `linsert(name, where, refvalue, value)`:
+```rust
+#[pyo3(signature = (name, r#where, refvalue, value))]
+fn linsert<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    r#where: &str,
+    refvalue: &Bound<'py, PyAny>,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    use crate::commands::lists::parse_linsert_where;
+    let key = extract_bytes(name)?;
+    let pivot = extract_bytes(refvalue)?;
+    let val = extract_bytes(value)?;
+    let position = parse_linsert_where(r#where).map_err(store_err_to_py)?;
+    let n = self.store.linsert(&key, position, &pivot, val).map_err(store_err_to_py)?;
+    resolved(py, n.into_pyobject(py)?.into_any().unbind())
+}
+```
+**Note:** `where` is a Rust keyword; use the raw identifier `r#where`. If PyO3 rejects this for signature binding, rename to `where_` and keep the positional order.
+
+**LREM:**
+```rust
+#[pyo3(signature = (name, count, value))]
+fn lrem<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    count: i64,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    let val = extract_bytes(value)?;
+    let n = self.store.lrem(&key, count, val).map_err(store_err_to_py)?;
+    resolved(py, n.into_pyobject(py)?.into_any().unbind())
+}
+```
+
+**LSET** — returns `True` on success (redis-py converts "OK" → True):
+```rust
+#[pyo3(signature = (name, index, value))]
+fn lset<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    index: i64,
+    value: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    let val = extract_bytes(value)?;
+    self.store.lset(&key, index, val).map_err(store_err_to_py)?;
+    resolved(py, pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
+}
+```
+
+**LTRIM:**
+```rust
+#[pyo3(signature = (name, start, end))]
+fn ltrim<'py>(
+    &self,
+    py: Python<'py>,
+    name: &Bound<'py, PyAny>,
+    start: i64,
+    end: i64,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = extract_bytes(name)?;
+    self.store.ltrim(&key, start, end).map_err(store_err_to_py)?;
+    resolved(py, pyo3::types::PyBool::new(py, true).to_owned().into_any().unbind())
+}
+```
+
+**LMOVE** — signature matches redis-py `lmove(first_list, second_list, src="LEFT", dest="RIGHT")`:
+```rust
+#[pyo3(signature = (first_list, second_list, src="LEFT", dest="RIGHT"))]
+fn lmove<'py>(
+    &self,
+    py: Python<'py>,
+    first_list: &Bound<'py, PyAny>,
+    second_list: &Bound<'py, PyAny>,
+    src: &str,
+    dest: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    use crate::commands::lists::parse_list_end;
+    let src_key = extract_bytes(first_list)?;
+    let dst_key = extract_bytes(second_list)?;
+    let src_end = parse_list_end(src).map_err(store_err_to_py)?;
+    let dst_end = parse_list_end(dest).map_err(store_err_to_py)?;
+    let result = self.store.lmove_atomic(&src_key, &dst_key, src_end, dst_end).map_err(store_err_to_py)?;
+    let py_result = match result {
+        Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+        None => py.None(),
+    };
+    resolved(py, py_result)
+}
+```
+
+**RPOPLPUSH:**
+```rust
+#[pyo3(signature = (src, dst))]
+fn rpoplpush<'py>(
+    &self,
+    py: Python<'py>,
+    src: &Bound<'py, PyAny>,
+    dst: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let src_key = extract_bytes(src)?;
+    let dst_key = extract_bytes(dst)?;
+    let result = self.store.rpoplpush_atomic(&src_key, &dst_key).map_err(store_err_to_py)?;
+    let py_result = match result {
+        Some(b) => pyo3::types::PyBytes::new(py, &b).into_any().unbind(),
+        None => py.None(),
+    };
+    resolved(py, py_result)
+}
+```
+  </action>
+  <verify>
+    <automated>uv run maturin develop 2>&1 | tail -5; uv run python -c "import asyncio; from burner_redis import BurnerRedis; r = BurnerRedis(); async def t(): await r.lpush('k','a','b','c'); assert await r.lrange('k',0,-1) == [b'c',b'b',b'a']; assert await r.llen('k') == 3; print('PASS-TASK1'); asyncio.run(t())"</automated>
+  </verify>
+  <acceptance_criteria>
+    - `uv run maturin develop` exits 0 (Rust compiles, module loads)
+    - `grep -cE "fn lpush<|fn rpush<|fn lpop<|fn rpop<|fn lrange<|fn llen<|fn lindex<|fn linsert<|fn lrem<|fn lset<|fn ltrim<|fn lmove<|fn rpoplpush<" src/lib.rs` returns `13`
+    - Smoke script (the `uv run python -c` above) prints `PASS-TASK1` — validates lpush/lrange/llen round-trip
+    - `grep -q "resolved(py," src/lib.rs` still passes (13+ matches — at least one for each new method)
+    - No `future_into_py` used for non-blocking methods (grep `future_into_py` count stays identical to pre-task count)
+  </acceptance_criteria>
+  <done>13 non-blocking pymethods present in src/lib.rs, module loads via maturin develop, smoke test exercising LPUSH+LRANGE+LLEN passes end-to-end.</done>
+</task>
+
+<task type="auto" tdd="true">
+  <name>Task 2: Blocking PyO3 #[pymethods] for BRPOP/BLPOP/BLMOVE (future_into_py + tokio::select! + notify re-arm)</name>
+  <read_first>
+    - src/lib.rs (XREAD blocking loop at lines 979-1038 — load-bearing template; XREADGROUP at lines 1284-1341)
+    - src/store.rs (list_notify, is_shutdown, blpop_poll, brpop_poll, lmove_atomic methods from Plan 01)
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-PATTERNS.md (section "src/lib.rs — Blocking #[pymethods]")
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-RESEARCH.md (Blocking-loop pattern XREADGROUP template + Code Example: Blocking command BRPOP; Pitfall 2: timeout regression; Pitfall 7: missing is_shutdown check)
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-CONTEXT.md (D-07, D-08, D-09, D-11)
+  </read_first>
+  <behavior>
+    - `await r.blpop(["k"], timeout=0.1)` with empty list returns `None` after ~100ms (never hangs beyond timeout)
+    - `await r.blpop(["k1","k2"], timeout=0)` with `await r.lpush("k2", "v")` from another task returns `(b"k2", b"v")` promptly (<100ms)
+    - `await r.brpop(["k1","k2","k3","k4"], timeout=0.5)` where k2 and k4 are both non-empty returns from k2 (left-to-right scan order)
+    - `asyncio.CancelledError` during `await r.blpop(["k"], timeout=0)` propagates cleanly — no hang, no zombie task
+    - `await r.blpop(["k"], timeout=0)` wakes when `BurnerRedis.shutdown()` (or the test fixture's `aclose`) is called
+    - `await r.blmove(src, dst, timeout=0.1, src="LEFT", dest="RIGHT")` is cross-key atomic: if cancelled mid-await, no element is lost
+    - Timeout can be passed as `int` or `float` (PyO3 auto-converts int→f64 on Option<f64>)
+    - Negative timeout raises `PyValueError` with `"timeout must be a non-negative number"`
+  </behavior>
+  <action>
+Add 3 new blocking `#[pymethods]` to `impl BurnerRedis` in `src/lib.rs`. All three follow the XREAD blocking loop template from lines 979-1038 — copy the exact shape, substituting `store.brpop_poll`/`blpop_poll`/`lmove_atomic` for `store.xread` and `store.list_notify()` for `store.stream_notify()`.
+
+**Helper function at top of the list-commands section:**
+```rust
+/// Normalize a Python `keys` argument (str, bytes, list, or tuple) into Vec<Bytes>.
+fn normalize_key_list(py: Python<'_>, keys: &Bound<'_, PyAny>) -> PyResult<Vec<Bytes>> {
+    // Try list/tuple first
+    if let Ok(seq) = keys.downcast::<pyo3::types::PySequence>() {
+        // but strings are sequences too — reject str/bytes via a prior check
+        if !keys.is_instance_of::<pyo3::types::PyString>()
+            && !keys.is_instance_of::<pyo3::types::PyBytes>()
+        {
+            let len = seq.len()?;
+            let mut out = Vec::with_capacity(len);
+            for i in 0..len {
+                let item = seq.get_item(i)?;
+                out.push(extract_bytes(&item)?);
+            }
+            return Ok(out);
+        }
+    }
+    // Single key (str or bytes)
+    Ok(vec![extract_bytes(keys)?])
+}
+
+/// Convert redis-py timeout (None | 0 | positive float) to milliseconds.
+/// None or 0 → 0 (block forever). Negative → error.
+fn timeout_to_ms(timeout: Option<f64>) -> PyResult<u64> {
+    match timeout {
+        None => Ok(0),
+        Some(t) if t < 0.0 => Err(pyo3::exceptions::PyValueError::new_err(
+            "timeout must be a non-negative number",
+        )),
+        Some(t) if t == 0.0 => Ok(0),
+        Some(t) => Ok((t * 1000.0) as u64),
+    }
+}
+```
+
+**BLPOP:**
+```rust
+#[pyo3(signature = (keys, timeout=None))]
+fn blpop<'py>(
+    &self,
+    py: Python<'py>,
+    keys: &Bound<'py, PyAny>,
+    timeout: Option<f64>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key_list = normalize_key_list(py, keys)?;
+    let block_ms = timeout_to_ms(timeout)?;
+    let store = self.store.clone();
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let notify = store.list_notify();
+        let mut waiter = Box::pin(notify.notified());
+        waiter.as_mut().enable();  // arm permit BEFORE first poll
+
+        // First non-blocking attempt
+        if let Some((k, v)) = store.blpop_poll(&key_list).map_err(store_err_to_py)? {
+            return Python::attach(|py| {
+                let tup = pyo3::types::PyTuple::new(py, &[
+                    pyo3::types::PyBytes::new(py, &k).into_any(),
+                    pyo3::types::PyBytes::new(py, &v).into_any(),
+                ])?;
+                Ok::<_, pyo3::PyErr>(tup.into_any().unbind())
+            });
+        }
+
+        let deadline_opt = if block_ms == 0 {
+            None
+        } else {
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(block_ms))
+        };
+
+        loop {
+            if store.is_shutdown() {
+                return Python::attach(|py| Ok(py.None()));
+            }
+
+            let remaining = match deadline_opt {
+                Some(d) => {
+                    let r = d.saturating_duration_since(tokio::time::Instant::now());
+                    if r.is_zero() {
+                        return Python::attach(|py| Ok(py.None()));
+                    }
+                    r
+                }
+                None => std::time::Duration::from_secs(3600),
+            };
+
+            tokio::select! {
+                _ = waiter.as_mut() => {
+                    // Re-arm (Phase 11 critical fix)
+                    waiter.set(notify.notified());
+                    waiter.as_mut().enable();
+                    if let Some((k, v)) = store.blpop_poll(&key_list).map_err(store_err_to_py)? {
+                        return Python::attach(|py| {
+                            let tup = pyo3::types::PyTuple::new(py, &[
+                                pyo3::types::PyBytes::new(py, &k).into_any(),
+                                pyo3::types::PyBytes::new(py, &v).into_any(),
+                            ])?;
+                            Ok::<_, pyo3::PyErr>(tup.into_any().unbind())
+                        });
+                    }
+                    // else: spurious wake or wrong key — loop
+                }
+                _ = tokio::time::sleep(remaining) => {
+                    if deadline_opt.is_some() {
+                        return Python::attach(|py| Ok(py.None()));
+                    }
+                    // block=0: keep looping
+                }
+            }
+        }
+    })
+}
+```
+
+**BRPOP** — identical to BLPOP but calls `store.brpop_poll(&key_list)` instead of `store.blpop_poll(&key_list)`.
+
+**BLMOVE** — signature matches redis-py `blmove(first_list, second_list, timeout, src="LEFT", dest="RIGHT")`:
+```rust
+#[pyo3(signature = (first_list, second_list, timeout, src="LEFT", dest="RIGHT"))]
+fn blmove<'py>(
+    &self,
+    py: Python<'py>,
+    first_list: &Bound<'py, PyAny>,
+    second_list: &Bound<'py, PyAny>,
+    timeout: f64,
+    src: &str,
+    dest: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    use crate::commands::lists::parse_list_end;
+    let src_key = extract_bytes(first_list)?;
+    let dst_key = extract_bytes(second_list)?;
+    let src_end = parse_list_end(src).map_err(store_err_to_py)?;
+    let dst_end = parse_list_end(dest).map_err(store_err_to_py)?;
+    let block_ms = timeout_to_ms(Some(timeout))?;
+    let store = self.store.clone();
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let notify = store.list_notify();
+        let mut waiter = Box::pin(notify.notified());
+        waiter.as_mut().enable();
+
+        // First non-blocking attempt
+        if let Some(v) = store.lmove_atomic(&src_key, &dst_key, src_end, dst_end).map_err(store_err_to_py)? {
+            return Python::attach(|py| {
+                Ok::<_, pyo3::PyErr>(pyo3::types::PyBytes::new(py, &v).into_any().unbind())
+            });
+        }
+
+        let deadline_opt = if block_ms == 0 {
+            None
+        } else {
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(block_ms))
+        };
+
+        loop {
+            if store.is_shutdown() {
+                return Python::attach(|py| Ok(py.None()));
+            }
+            let remaining = match deadline_opt {
+                Some(d) => {
+                    let r = d.saturating_duration_since(tokio::time::Instant::now());
+                    if r.is_zero() { return Python::attach(|py| Ok(py.None())); }
+                    r
+                }
+                None => std::time::Duration::from_secs(3600),
+            };
+            tokio::select! {
+                _ = waiter.as_mut() => {
+                    waiter.set(notify.notified());
+                    waiter.as_mut().enable();
+                    if let Some(v) = store.lmove_atomic(&src_key, &dst_key, src_end, dst_end).map_err(store_err_to_py)? {
+                        return Python::attach(|py| {
+                            Ok::<_, pyo3::PyErr>(pyo3::types::PyBytes::new(py, &v).into_any().unbind())
+                        });
+                    }
+                }
+                _ = tokio::time::sleep(remaining) => {
+                    if deadline_opt.is_some() {
+                        return Python::attach(|py| Ok(py.None()));
+                    }
+                }
+            }
+        }
+    })
+}
+```
+
+**Use `Python::attach`** (PyO3 0.28.3 convention used elsewhere in the file) for GIL re-acquisition in the async block. If the existing XREAD code uses `Python::try_attach`, match that. Verify by grep inside `src/lib.rs` for the exact function name currently in use and mirror it.
+  </action>
+  <verify>
+    <automated>uv run maturin develop 2>&1 | tail -5; uv run python -c "
+import asyncio, time
+from burner_redis import BurnerRedis
+
+async def main():
+    r = BurnerRedis()
+    # Timeout returns None
+    start = time.monotonic()
+    result = await r.blpop(['empty_key'], timeout=0.1)
+    elapsed = time.monotonic() - start
+    assert result is None, f'expected None, got {result}'
+    assert 0.05 < elapsed < 0.5, f'elapsed {elapsed} outside range'
+
+    # Wake-on-push
+    async def push_later():
+        await asyncio.sleep(0.05)
+        await r.lpush('k', 'v')
+    task = asyncio.create_task(push_later())
+    result = await r.blpop(['k'], timeout=2.0)
+    await task
+    assert result == (b'k', b'v'), f'expected (b\"k\", b\"v\"), got {result}'
+    print('PASS-TASK2')
+
+asyncio.run(main())
+" 2>&1 | tail -5</automated>
+  </verify>
+  <acceptance_criteria>
+    - `uv run maturin develop` exits 0
+    - `grep -cE "fn blpop<|fn brpop<|fn blmove<" src/lib.rs` returns `3`
+    - `grep -c "waiter.set(notify.notified())" src/lib.rs` returns >= 3 (Phase-11 re-arm idiom inside each blocking loop)
+    - `grep -c "is_shutdown()" src/lib.rs` returns >= 3 more than the pre-task count (one in each blocking loop)
+    - `grep -c "list_notify()" src/lib.rs` returns >= 3 (notify handle acquired in each blocking loop)
+    - Smoke script prints `PASS-TASK2` — validates both timeout-returns-None AND wake-on-push paths
+  </acceptance_criteria>
+  <done>3 blocking pymethods present. Timeout behavior + wake-on-LPUSH path verified end-to-end via smoke script. Phase-11 re-arm idiom enforced in each loop.</done>
+</task>
+
+<task type="auto" tdd="true">
+  <name>Task 3: Python value-coercion monkey-patches + tests/test_lists.py covering LIST-01..LIST-15</name>
+  <read_first>
+    - python/burner_redis/__init__.py (full file — especially _coerce_value at line 41, _coerced_set monkey-patch at lines 64-72, _setex at 75-80)
+    - tests/test_streams.py (lines 1-11 for header; 16-25 for non-blocking pattern; 74-78 for WRONGTYPE pattern; 1067-1194 for blocking patterns)
+    - tests/conftest.py (existing `r` fixture)
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-PATTERNS.md (section "python/burner_redis/__init__.py" + "tests/test_lists.py")
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-RESEARCH.md (Critical Behavioral Test Matrix; Pitfall 6: value coercion double-applied)
+    - .planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-VALIDATION.md (Per-Task Verification Map)
+  </read_first>
+  <behavior>
+    - `r.lpush("k", 42)` stores `b"42"` (not `b"b'42'"`); integer/float/str/memoryview all coerced; `bool` raises TypeError
+    - `r.lpush("k", b"bytes")` passes through unchanged (already bytes)
+    - `r.rpush` / `r.lset` / `r.linsert` apply the same coercion
+    - pytest `tests/test_lists.py -x` passes all LIST-01..LIST-15 test cases
+  </behavior>
+  <action>
+**Part A — Add coercion monkey-patches to `python/burner_redis/__init__.py`:**
+
+Insert the following block AFTER the existing `BurnerRedis.setex = _setex` assignment (around line 80), BEFORE the `_scan_iter` helper (line 83):
+
+```python
+# ---- List Commands: value coercion wrappers (redis-py parity) ----
+
+_original_lpush = BurnerRedis.lpush
+
+
+async def _coerced_lpush(self, name, *values):
+    """LPUSH with per-value coercion matching redis-py behavior."""
+    coerced = [_coerce_value(v) for v in values]
+    return await _original_lpush(self, name, *coerced)
+
+
+BurnerRedis.lpush = _coerced_lpush
+
+
+_original_rpush = BurnerRedis.rpush
+
+
+async def _coerced_rpush(self, name, *values):
+    """RPUSH with per-value coercion."""
+    coerced = [_coerce_value(v) for v in values]
+    return await _original_rpush(self, name, *coerced)
+
+
+BurnerRedis.rpush = _coerced_rpush
+
+
+_original_lset = BurnerRedis.lset
+
+
+async def _coerced_lset(self, name, index, value):
+    """LSET with value coercion."""
+    return await _original_lset(self, name, index, _coerce_value(value))
+
+
+BurnerRedis.lset = _coerced_lset
+
+
+_original_linsert = BurnerRedis.linsert
+
+
+async def _coerced_linsert(self, name, where, refvalue, value):
+    """LINSERT with value coercion (refvalue is a lookup pivot, not coerced — matches redis-py)."""
+    return await _original_linsert(self, name, where, refvalue, _coerce_value(value))
+
+
+BurnerRedis.linsert = _coerced_linsert
+```
+
+**Part B — Create `tests/test_lists.py` with the following test functions.** Reference redis-py exact method signatures and existing test_streams.py patterns.
+
+```python
+"""Tests for list commands: LPUSH, RPUSH, LPOP, RPOP, LRANGE, LLEN, LINDEX,
+LINSERT, LREM, LSET, LTRIM, LMOVE, RPOPLPUSH, BRPOP, BLPOP, BLMOVE.
+
+Covers requirements: LIST-01 through LIST-15. LIST-16 (Lua + pipeline) lives in Plan 03.
+"""
+import asyncio
+import time
+
+import pytest
+
+
+# LIST-01: LPUSH basic + multi-value order
+async def test_lpush_single(r):
+    n = await r.lpush("k", "a")
+    assert n == 1
+    assert await r.lrange("k", 0, -1) == [b"a"]
+
+
+async def test_lpush_multiple_order(r):
+    # redis-py: LPUSH k a b c → list is [c, b, a]
+    n = await r.lpush("k", "a", "b", "c")
+    assert n == 3
+    assert await r.lrange("k", 0, -1) == [b"c", b"b", b"a"]
+
+
+async def test_lpush_wrongtype(r):
+    await r.set("s", "v")
+    with pytest.raises(Exception, match="WRONGTYPE"):
+        await r.lpush("s", "x")
+
+
+# LIST-02: RPUSH basic + multi-value order
+async def test_rpush_single(r):
+    n = await r.rpush("k", "a")
+    assert n == 1
+    assert await r.lrange("k", 0, -1) == [b"a"]
+
+
+async def test_rpush_multiple_order(r):
+    n = await r.rpush("k", "a", "b", "c")
+    assert n == 3
+    assert await r.lrange("k", 0, -1) == [b"a", b"b", b"c"]
+
+
+# LIST-03: LPOP count semantics (redis-py drop-in)
+async def test_lpop_no_count(r):
+    await r.rpush("k", "a", "b", "c")
+    v = await r.lpop("k")
+    assert v == b"a"
+    assert isinstance(v, bytes)
+
+
+async def test_lpop_with_count(r):
+    await r.rpush("k", "a", "b", "c")
+    result = await r.lpop("k", count=2)
+    assert result == [b"a", b"b"]
+
+
+async def test_lpop_count_zero(r):
+    await r.rpush("k", "a")
+    result = await r.lpop("k", count=0)
+    assert result == []
+
+
+async def test_lpop_missing_key(r):
+    assert await r.lpop("missing") is None
+    assert await r.lpop("missing", count=5) is None
+
+
+async def test_lpop_deletes_empty_key(r):
+    await r.rpush("k", "a")
+    await r.lpop("k")
+    assert await r.llen("k") == 0
+    assert await r.lpop("k") is None  # truly deleted, not just empty
+
+
+# LIST-04: RPOP mirror
+async def test_rpop_no_count(r):
+    await r.rpush("k", "a", "b", "c")
+    v = await r.rpop("k")
+    assert v == b"c"
+
+
+async def test_rpop_with_count(r):
+    await r.rpush("k", "a", "b", "c")
+    result = await r.rpop("k", count=2)
+    assert result == [b"c", b"b"]
+
+
+async def test_rpop_missing_with_count_returns_none(r):
+    assert await r.rpop("missing", count=3) is None
+
+
+# LIST-05: LRANGE
+@pytest.mark.parametrize(
+    "start,end,expected",
+    [
+        (0, -1, [b"a", b"b", b"c", b"d", b"e"]),
+        (0, 100, [b"a", b"b", b"c", b"d", b"e"]),
+        (-100, 100, [b"a", b"b", b"c", b"d", b"e"]),
+        (-3, -1, [b"c", b"d", b"e"]),
+        (-3, 2, [b"c"]),
+        (5, 10, []),
+        (3, 2, []),
+        (-10, -6, []),
+    ],
+)
+async def test_lrange_normalization(r, start, end, expected):
+    await r.rpush("k", "a", "b", "c", "d", "e")
+    assert await r.lrange("k", start, end) == expected
+
+
+async def test_lrange_missing_key(r):
+    assert await r.lrange("missing", 0, -1) == []
+
+
+# LIST-06: LLEN
+async def test_llen(r):
+    assert await r.llen("missing") == 0
+    await r.rpush("k", "a", "b", "c")
+    assert await r.llen("k") == 3
+
+
+# LIST-07: LINDEX
+async def test_lindex(r):
+    await r.rpush("k", "a", "b", "c")
+    assert await r.lindex("k", 0) == b"a"
+    assert await r.lindex("k", -1) == b"c"
+    assert await r.lindex("k", 100) is None
+    assert await r.lindex("k", -100) is None
+    assert await r.lindex("missing", 0) is None
+
+
+# LIST-08: LINSERT
+async def test_linsert(r):
+    await r.rpush("k", "a", "c")
+    # Insert BEFORE "c" → [a, b, c]
+    n = await r.linsert("k", "BEFORE", "c", "b")
+    assert n == 3
+    assert await r.lrange("k", 0, -1) == [b"a", b"b", b"c"]
+    # Pivot not found → -1
+    assert await r.linsert("k", "BEFORE", "missing_pivot", "x") == -1
+    # Missing key → 0
+    assert await r.linsert("absent", "AFTER", "a", "b") == 0
+
+
+# LIST-09: LREM
+async def test_lrem_head(r):
+    await r.rpush("k", "a", "b", "a", "c", "a")
+    assert await r.lrem("k", 2, "a") == 2
+    assert await r.lrange("k", 0, -1) == [b"b", b"c", b"a"]
+
+
+async def test_lrem_tail(r):
+    await r.rpush("k", "a", "b", "a", "c", "a")
+    assert await r.lrem("k", -2, "a") == 2
+    assert await r.lrange("k", 0, -1) == [b"a", b"b", b"c"]
+
+
+async def test_lrem_all(r):
+    await r.rpush("k", "a", "b", "a", "c", "a")
+    assert await r.lrem("k", 0, "a") == 3
+    assert await r.lrange("k", 0, -1) == [b"b", b"c"]
+
+
+async def test_lrem_missing_key(r):
+    assert await r.lrem("missing", 0, "v") == 0
+
+
+# LIST-10: LSET
+async def test_lset(r):
+    await r.rpush("k", "a", "b", "c")
+    assert await r.lset("k", 1, "B") is True
+    assert await r.lrange("k", 0, -1) == [b"a", b"B", b"c"]
+
+
+async def test_lset_out_of_range(r):
+    await r.rpush("k", "a")
+    with pytest.raises(Exception, match="index out of range"):
+        await r.lset("k", 100, "v")
+
+
+async def test_lset_missing_key(r):
+    with pytest.raises(Exception):
+        await r.lset("missing", 0, "v")
+
+
+# LIST-11: LTRIM
+async def test_ltrim_keeps_range(r):
+    await r.rpush("k", "a", "b", "c", "d", "e")
+    assert await r.ltrim("k", 1, 3) is True
+    assert await r.lrange("k", 0, -1) == [b"b", b"c", b"d"]
+
+
+async def test_ltrim_empty_result_deletes_key(r):
+    await r.rpush("k", "a", "b", "c")
+    assert await r.ltrim("k", 5, 10) is True
+    assert await r.llen("k") == 0
+    assert await r.lpop("k") is None  # truly deleted
+
+
+# LIST-12: LMOVE (cross-key + same-key rotation)
+async def test_lmove_cross_key(r):
+    await r.rpush("src", "a", "b", "c")
+    moved = await r.lmove("src", "dst", src="LEFT", dest="RIGHT")
+    assert moved == b"a"
+    assert await r.lrange("src", 0, -1) == [b"b", b"c"]
+    assert await r.lrange("dst", 0, -1) == [b"a"]
+
+
+async def test_lmove_same_key_rotation(r):
+    await r.rpush("k", "a", "b", "c")
+    moved = await r.lmove("k", "k", src="RIGHT", dest="LEFT")
+    assert moved == b"c"
+    assert await r.lrange("k", 0, -1) == [b"c", b"a", b"b"]
+
+
+async def test_lmove_empty_source(r):
+    assert await r.lmove("missing", "dst", src="LEFT", dest="RIGHT") is None
+
+
+# LIST-13: RPOPLPUSH
+async def test_rpoplpush(r):
+    await r.rpush("src", "a", "b", "c")
+    v = await r.rpoplpush("src", "dst")
+    assert v == b"c"
+    assert await r.lrange("src", 0, -1) == [b"a", b"b"]
+    assert await r.lrange("dst", 0, -1) == [b"c"]
+
+
+async def test_rpoplpush_empty_source(r):
+    assert await r.rpoplpush("missing", "dst") is None
+
+
+# LIST-14: BRPOP / BLPOP blocking
+async def test_blpop_timeout_returns_none(r):
+    start = time.monotonic()
+    result = await r.blpop(["empty"], timeout=0.1)
+    elapsed = time.monotonic() - start
+    assert result is None
+    assert 0.05 < elapsed < 0.5
+
+
+async def test_blpop_returns_tuple_on_success(r):
+    await r.rpush("k", "v")
+    result = await r.blpop(["k"], timeout=1.0)
+    assert result == (b"k", b"v")
+    assert isinstance(result, tuple)
+
+
+async def test_blpop_multi_key_scan_order(r):
+    # k2 and k4 are non-empty; k1 and k3 are not.
+    # BLPOP must return from k2 (first non-empty, left-to-right).
+    await r.rpush("k2", "v2")
+    await r.rpush("k4", "v4")
+    result = await r.blpop(["k1", "k2", "k3", "k4"], timeout=0.1)
+    assert result == (b"k2", b"v2")
+    # k4 must still have its value
+    assert await r.llen("k4") == 1
+
+
+async def test_blpop_wakes_on_push(r):
+    async def push_later():
+        await asyncio.sleep(0.05)
+        await r.lpush("k", "v")
+    task = asyncio.create_task(push_later())
+    result = await r.blpop(["k"], timeout=2.0)
+    await task
+    assert result == (b"k", b"v")
+
+
+async def test_blpop_block_zero_blocks_until_data(r):
+    async def push_later():
+        await asyncio.sleep(0.05)
+        await r.lpush("k", "v")
+    task = asyncio.create_task(push_later())
+    result = await asyncio.wait_for(r.blpop(["k"], timeout=0), timeout=2.0)
+    await task
+    assert result == (b"k", b"v")
+
+
+async def test_brpop_pops_from_tail(r):
+    await r.rpush("k", "a", "b", "c")
+    result = await r.brpop(["k"], timeout=1.0)
+    assert result == (b"k", b"c")
+
+
+async def test_blpop_cancellation_is_clean(r):
+    task = asyncio.create_task(r.blpop(["never"], timeout=0))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # Verify no hanging state: an immediate subsequent call works
+    await r.lpush("k", "v")
+    assert await r.blpop(["k"], timeout=0.1) == (b"k", b"v")
+
+
+async def test_blpop_negative_timeout_raises(r):
+    with pytest.raises(ValueError, match="non-negative"):
+        await r.blpop(["k"], timeout=-1.0)
+
+
+# LIST-15: BLMOVE
+async def test_blmove_cross_key(r):
+    await r.rpush("src", "a", "b", "c")
+    moved = await r.blmove("src", "dst", timeout=1.0, src="LEFT", dest="RIGHT")
+    assert moved == b"a"
+    assert await r.lrange("dst", 0, -1) == [b"a"]
+
+
+async def test_blmove_timeout_returns_none(r):
+    start = time.monotonic()
+    result = await r.blmove("empty", "dst", timeout=0.1, src="LEFT", dest="RIGHT")
+    elapsed = time.monotonic() - start
+    assert result is None
+    assert 0.05 < elapsed < 0.5
+
+
+async def test_blmove_wakes_on_push(r):
+    async def push_later():
+        await asyncio.sleep(0.05)
+        await r.lpush("src", "v")
+    task = asyncio.create_task(push_later())
+    result = await r.blmove("src", "dst", timeout=2.0, src="LEFT", dest="RIGHT")
+    await task
+    assert result == b"v"
+    assert await r.lrange("dst", 0, -1) == [b"v"]
+
+
+# Value coercion verification
+async def test_lpush_int_coerced(r):
+    # Integer should be coerced to b"42" — NOT b"b'42'" (double-coercion bug guard)
+    await r.lpush("k", 42)
+    assert await r.lrange("k", 0, -1) == [b"42"]
+
+
+async def test_lpush_float_coerced(r):
+    await r.lpush("k", 3.14)
+    assert await r.lrange("k", 0, -1) == [b"3.14"]
+
+
+async def test_lpush_bool_raises(r):
+    # Bool must raise TypeError — redis-py compat
+    with pytest.raises(Exception):
+        await r.lpush("k", True)
+
+
+async def test_lset_int_coerced(r):
+    await r.rpush("k", "a")
+    await r.lset("k", 0, 42)
+    assert await r.lindex("k", 0) == b"42"
+
+
+async def test_linsert_int_coerced(r):
+    await r.rpush("k", "a")
+    await r.linsert("k", "AFTER", "a", 42)
+    assert await r.lrange("k", 0, -1) == [b"a", b"42"]
+```
+  </action>
+  <verify>
+    <automated>uv run maturin develop 2>&1 | tail -5; uv run pytest tests/test_lists.py -x 2>&1 | tee /tmp/phase14-task3.log | tail -30; grep -E "passed|failed" /tmp/phase14-task3.log | tail -3</automated>
+  </verify>
+  <acceptance_criteria>
+    - `uv run maturin develop` exits 0
+    - `uv run pytest tests/test_lists.py -x` exits 0 with a "X passed" line (expect ~35 tests)
+    - `grep -q "_coerced_lpush" python/burner_redis/__init__.py` returns 0
+    - `grep -q "BurnerRedis.lpush = _coerced_lpush" python/burner_redis/__init__.py` returns 0
+    - `grep -q "BurnerRedis.rpush = _coerced_rpush" python/burner_redis/__init__.py` returns 0
+    - `grep -q "BurnerRedis.lset = _coerced_lset" python/burner_redis/__init__.py` returns 0
+    - `grep -q "BurnerRedis.linsert = _coerced_linsert" python/burner_redis/__init__.py` returns 0
+    - `tests/test_lists.py` exists and imports `asyncio`, `time`, `pytest`
+    - No regression: `uv run pytest tests/test_streams.py tests/test_scripting.py tests/test_pipeline.py -x` still passes
+  </acceptance_criteria>
+  <done>All LIST-01..LIST-15 tests pass. Value coercion applied consistently. No regression in prior test suites. BLPOP wake-on-push, timeout-returns-None, multi-key scan order, and cancellation-safety all verified.</done>
+</task>
+
+</tasks>
+
+<threat_model>
+## Trust Boundaries
+
+| Boundary | Description |
+|----------|-------------|
+| Python caller → PyO3 pymethod | Python types (str/int/bytes/list/tuple) cross into Rust `Bytes`; coercion happens at Python layer (per D-19), validation at Rust binding boundary |
+| asyncio task → Rust tokio runtime (blocking commands) | `future_into_py` spawns a tokio future that must respect Python asyncio cancellation |
+| Tokio blocking-loop task → Store (concurrent LPUSH writers) | Multiple waiters + one or more writers coordinate via `Arc<Notify>` |
+| Python shutdown → Rust tokio runtime | `is_shutdown()` check at each loop iteration prevents hangs during teardown |
+
+## STRIDE Threat Register
+
+| Threat ID | Category | Component | Disposition | Mitigation Plan |
+|-----------|----------|-----------|-------------|-----------------|
+| T-14-01 | Denial of Service | `blpop`/`brpop`/`blmove` with timeout=0 | mitigate | asyncio cancellation propagates via `future_into_py`; `test_blpop_cancellation_is_clean` verifies no hang; `is_shutdown()` check at loop top ensures graceful teardown (D-08). |
+| T-14-02 | Tampering | Every list pymethod | mitigate | `extract_bytes()` validates argument types at PyO3 boundary; WRONGTYPE propagates from Store via `store_err_to_py`; covered by `test_lpush_wrongtype`. |
+| T-14-05 | Tampering | `blmove` cross-key atomicity | mitigate | `lmove_atomic` (Plan 01) takes single write lock; `future_into_py` only awaits at `tokio::select!` — never between pop and push. Cancellation cannot split the atomic operation. |
+| T-14-06 | Tampering | `blpop`/`brpop`/`blmove` notify re-arm idiom | mitigate | Each loop includes `waiter.set(notify.notified()); waiter.as_mut().enable();` after select-drop — Phase 11 critical fix replicated. Acceptance criteria greps for the idiom presence. |
+| T-14-07 | Denial of Service | Negative timeout passed to blpop/brpop/blmove | mitigate | `timeout_to_ms` rejects negative with `PyValueError`; covered by `test_blpop_negative_timeout_raises`. |
+| T-14-10 (input-validation) | Tampering | `_coerce_value` double-application in pipeline-free path | mitigate | Coercion applied ONCE at Python layer (monkey-patch wraps `_original_lpush`); Rust side uses `extract_bytes` which accepts already-coerced bytes/str; covered by `test_lpush_int_coerced` (no `b'42'` double-wrap). Pipeline coercion deferred to Plan 03 (stub-level). |
+
+No threats with severity=high remain unmitigated. ASVS L1 compliance maintained.
+</threat_model>
+
+<verification>
+End-to-end test of the Python surface:
+
+```bash
+uv run maturin develop
+uv run pytest tests/test_lists.py -x -v 2>&1 | tail -60
+uv run pytest tests/ -x 2>&1 | tail -10  # regression check
+```
+
+Expected: ~35 tests in test_lists.py pass; no regression in prior test files.
+</verification>
+
+<success_criteria>
+- `uv run maturin develop` compiles and loads the module
+- `uv run pytest tests/test_lists.py -x` exits 0 with at least 35 passing tests
+- `uv run pytest tests/ -x` exits 0 (no regression)
+- `src/lib.rs` contains 13 non-blocking + 3 blocking list pymethods
+- `python/burner_redis/__init__.py` has 4 monkey-patch coercion wrappers (lpush, rpush, lset, linsert)
+- `tests/test_lists.py` covers LIST-01 through LIST-15
+- BLPOP/BRPOP/BLMOVE re-arm idiom present in each blocking loop (grep check)
+- Cancellation safety verified via `test_blpop_cancellation_is_clean`
+- Wake-on-push verified for both BLPOP and BLMOVE
+- Multi-key left-to-right scan order verified for BLPOP
+- LPOP count semantics match redis-py (None/bytes/list[bytes]/[] for count=0)
+- Value coercion single-applied (integer → `b"42"`, not `b"b'42'"`)
+</success_criteria>
+
+<output>
+After completion, create `.planning/phases/14-add-support-for-the-redis-list-data-type-required-commands-l/14-02-SUMMARY.md` with:
+- Pymethods added (13 non-blocking + 3 blocking, with signatures)
+- Coercion wrapper count and method list
+- pytest pass count from `tests/test_lists.py`
+- Regression check result (prior test suites status)
+- Known open items for Plan 03 (Lua dispatch, pipeline blocking-aware branch, pipeline stubs)
+- Any deviations from the plan (Python::attach vs Python::try_attach, signature differences)
+</output>

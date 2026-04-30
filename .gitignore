@@ -19,3 +19,14 @@ dist/
 .vscode/
 *.swp
 *.swo
+
+# Agent/runtime state
+.bg-shell/
+.claude/settings.local.json
+.claude/worktrees/
+.gsd/runtime/
+.gsd/exec/
+.gsd/*.jsonl
+.gsd/doctor-history.jsonl
+.gsd/gsd.db-shm
+.gsd/gsd.db-wal
