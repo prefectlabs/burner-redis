@@ -247,6 +247,66 @@ async def test_redis_call_xadd_xread(r):
     assert b"-" in result
 
 
+async def test_redis_call_xlen(r):
+    """LUA-03: redis.call('XLEN') returns the stream length."""
+    await r.xadd("s", {"f": "v1"})
+    await r.xadd("s", {"f": "v2"})
+    await r.xadd("s", {"f": "v3"})
+    result = await r.eval("return redis.call('XLEN', KEYS[1])", 1, "s")
+    assert result == 3
+
+
+async def test_redis_call_xlen_missing_key(r):
+    """LUA-03: redis.call('XLEN') on a missing key returns 0."""
+    result = await r.eval("return redis.call('XLEN', KEYS[1])", 1, "missing")
+    assert result == 0
+
+
+async def test_redis_call_xrange_full(r):
+    """LUA-03: redis.call('XRANGE', key, '-', '+') returns all entries."""
+    id1 = await r.xadd("s", {"f": "1"})
+    id2 = await r.xadd("s", {"f": "2"})
+    result = await r.eval(
+        "return redis.call('XRANGE', KEYS[1], '-', '+')", 1, "s"
+    )
+    assert len(result) == 2
+    # Each entry is [id, [k, v, ...]]
+    assert result[0][0] == (id1.encode() if isinstance(id1, str) else id1)
+    assert result[1][0] == (id2.encode() if isinstance(id2, str) else id2)
+    assert result[0][1] == [b"f", b"1"]
+    assert result[1][1] == [b"f", b"2"]
+
+
+async def test_redis_call_xrange_count(r):
+    """LUA-03: redis.call('XRANGE', ..., 'COUNT', n) caps the result."""
+    for i in range(5):
+        await r.xadd("s", {"i": str(i)})
+    result = await r.eval(
+        "return redis.call('XRANGE', KEYS[1], '-', '+', 'COUNT', 2)", 1, "s"
+    )
+    assert len(result) == 2
+
+
+async def test_redis_call_xrange_empty(r):
+    """LUA-03: redis.call('XRANGE') on a missing key returns an empty array."""
+    result = await r.eval(
+        "return redis.call('XRANGE', KEYS[1], '-', '+')", 1, "nostream"
+    )
+    assert result == []
+
+
+async def test_redis_call_xrevrange(r):
+    """LUA-03: redis.call('XREVRANGE', key, '+', '-') returns entries reversed."""
+    id1 = await r.xadd("s", {"f": "1"})
+    id2 = await r.xadd("s", {"f": "2"})
+    result = await r.eval(
+        "return redis.call('XREVRANGE', KEYS[1], '+', '-')", 1, "s"
+    )
+    assert len(result) == 2
+    assert result[0][0] == (id2.encode() if isinstance(id2, str) else id2)
+    assert result[1][0] == (id1.encode() if isinstance(id1, str) else id1)
+
+
 # redis.pcall()
 
 

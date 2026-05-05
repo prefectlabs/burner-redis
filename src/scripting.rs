@@ -1616,6 +1616,179 @@ fn dispatch_command_inner(
             }
         }
 
+        "XLEN" => {
+            // XLEN key
+            if args.len() != 1 {
+                return Ok(RedisValue::Error(
+                    "ERR wrong number of arguments for 'xlen' command".to_string(),
+                ));
+            }
+            let key = &args[0];
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Integer(0));
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Integer(0)),
+                Some(entry) => match &entry.data {
+                    ValueData::Stream(stream) => {
+                        Ok(RedisValue::Integer(stream.entries.len() as i64))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
+        "XRANGE" | "XREVRANGE" => {
+            // XRANGE key start end [COUNT n]
+            // XREVRANGE key end start [COUNT n]   (note: reversed start/end)
+            if args.len() < 3 {
+                return Ok(RedisValue::Error(format!(
+                    "ERR wrong number of arguments for '{}' command",
+                    cmd.to_lowercase()
+                )));
+            }
+            let key = &args[0];
+            let reverse = cmd == "XREVRANGE";
+
+            // For XRANGE: args[1] = min, args[2] = max
+            // For XREVRANGE: args[1] = max (high), args[2] = min (low)
+            let (lo_bytes, hi_bytes) = if reverse {
+                (&args[2], &args[1])
+            } else {
+                (&args[1], &args[2])
+            };
+
+            // Parse a range bound.  Sentinels:
+            //   "-"  -> (0, 0)
+            //   "+"  -> (u64::MAX, u64::MAX)
+            //   "ms" alone (no '-') -> for low: (ms, 0); for high: (ms, u64::MAX)
+            //   "ms-seq" -> explicit
+            fn parse_bound(s: &str, is_low: bool) -> Option<crate::commands::streams::StreamId> {
+                if s == "-" {
+                    return Some((0, 0));
+                }
+                if s == "+" {
+                    return Some((u64::MAX, u64::MAX));
+                }
+                let parts: Vec<&str> = s.splitn(2, '-').collect();
+                let ms: u64 = parts[0].parse().ok()?;
+                if parts.len() == 2 {
+                    let seq: u64 = parts[1].parse().ok()?;
+                    Some((ms, seq))
+                } else if is_low {
+                    Some((ms, 0))
+                } else {
+                    Some((ms, u64::MAX))
+                }
+            }
+
+            let lo_str = String::from_utf8_lossy(lo_bytes);
+            let hi_str = String::from_utf8_lossy(hi_bytes);
+            let lo = match parse_bound(&lo_str, true) {
+                Some(v) => v,
+                None => {
+                    return Ok(RedisValue::Error(
+                        "ERR Invalid stream ID specified as stream command argument"
+                            .to_string(),
+                    ));
+                }
+            };
+            let hi = match parse_bound(&hi_str, false) {
+                Some(v) => v,
+                None => {
+                    return Ok(RedisValue::Error(
+                        "ERR Invalid stream ID specified as stream command argument"
+                            .to_string(),
+                    ));
+                }
+            };
+
+            // Optional COUNT n
+            let mut count: Option<usize> = None;
+            let mut i = 3;
+            while i < args.len() {
+                let token = String::from_utf8_lossy(&args[i]).to_uppercase();
+                if token == "COUNT" {
+                    if i + 1 >= args.len() {
+                        return Ok(RedisValue::Error("ERR syntax error".to_string()));
+                    }
+                    count = Some(
+                        String::from_utf8_lossy(&args[i + 1])
+                            .parse::<usize>()
+                            .map_err(|_| {
+                                "ERR value is not an integer or out of range".to_string()
+                            })?,
+                    );
+                    i += 2;
+                } else {
+                    return Ok(RedisValue::Error("ERR syntax error".to_string()));
+                }
+            }
+
+            // Passive expiration
+            if let Some(entry) = data.get(key) {
+                if entry.is_expired() {
+                    data.remove(key);
+                    return Ok(RedisValue::Array(Vec::new()));
+                }
+            }
+
+            match data.get(key) {
+                None => Ok(RedisValue::Array(Vec::new())),
+                Some(entry) => match &entry.data {
+                    ValueData::Stream(stream) => {
+                        // Collect entries in [lo, hi] inclusive.
+                        let mut collected: Vec<(
+                            crate::commands::streams::StreamId,
+                            &HashMap<Bytes, Bytes>,
+                        )> = stream
+                            .entries
+                            .range(lo..=hi)
+                            .map(|(id, fields)| (*id, fields))
+                            .collect();
+                        if reverse {
+                            collected.reverse();
+                        }
+                        if let Some(n) = count {
+                            collected.truncate(n);
+                        }
+
+                        // Format as [[id, [k1, v1, k2, v2, ...]], ...]
+                        let result: Vec<RedisValue> = collected
+                            .into_iter()
+                            .map(|(id, fields)| {
+                                let id_str = format!("{}-{}", id.0, id.1);
+                                let mut pairs: Vec<RedisValue> =
+                                    Vec::with_capacity(fields.len() * 2);
+                                for (k, v) in fields.iter() {
+                                    pairs.push(RedisValue::BulkString(k.clone()));
+                                    pairs.push(RedisValue::BulkString(v.clone()));
+                                }
+                                RedisValue::Array(vec![
+                                    RedisValue::BulkString(Bytes::from(id_str)),
+                                    RedisValue::Array(pairs),
+                                ])
+                            })
+                            .collect();
+                        Ok(RedisValue::Array(result))
+                    }
+                    _ => Ok(RedisValue::Error(
+                        "WRONGTYPE Operation against a key holding the wrong kind of value"
+                            .to_string(),
+                    )),
+                },
+            }
+        }
+
         "XCLAIM" => {
             // XCLAIM key group consumer min-idle-time id [id ...] [IDLE ms] [FORCE] [JUSTID] [RETRYCOUNT n]
             if args.len() < 5 {
