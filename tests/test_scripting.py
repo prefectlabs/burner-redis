@@ -307,6 +307,74 @@ async def test_redis_call_xrevrange(r):
     assert result[1][0] == (id1.encode() if isinstance(id1, str) else id1)
 
 
+async def test_redis_call_xrange_inverted_bounds_returns_empty(r):
+    """LUA-03: a range where start > end returns an empty array, matching
+    real Redis.  Important: the underlying BTreeMap would panic on such
+    input, so the dispatch must short-circuit explicitly."""
+    await r.xadd("s", {"f": "v1"})
+    await r.xadd("s", {"f": "v2"})
+    # Backwards bounds for XRANGE
+    result = await r.eval(
+        "return redis.call('XRANGE', KEYS[1], '+', '-')", 1, "s"
+    )
+    assert result == []
+
+
+async def test_redis_call_xrange_exclusive_low_bound(r):
+    """LUA-03: a `(<id>` prefix on the low bound excludes that exact ID,
+    per https://redis.io/docs/latest/commands/xrange/#exclusive-ranges."""
+    id1 = await r.xadd("s", {"f": "1"})
+    id2 = await r.xadd("s", {"f": "2"})
+    id3 = await r.xadd("s", {"f": "3"})
+    # Exclusive low bound: skip id1
+    result = await r.eval(
+        "return redis.call('XRANGE', KEYS[1], '(' .. ARGV[1], '+')",
+        1,
+        "s",
+        id1,
+    )
+    ids = [entry[0] for entry in result]
+    encoded = [
+        v.encode() if isinstance(v, str) else v for v in (id2, id3)
+    ]
+    assert ids == encoded
+
+
+async def test_redis_call_xrange_exclusive_high_bound(r):
+    """LUA-03: a `(<id>` prefix on the high bound excludes that exact ID."""
+    id1 = await r.xadd("s", {"f": "1"})
+    id2 = await r.xadd("s", {"f": "2"})
+    await r.xadd("s", {"f": "3"})
+    # Exclusive high bound: skip id3 (and beyond)
+    result = await r.eval(
+        "return redis.call('XRANGE', KEYS[1], '-', '(' .. ARGV[1])",
+        1,
+        "s",
+        id2,
+    )
+    ids = [entry[0] for entry in result]
+    encoded = [
+        v.encode() if isinstance(v, str) else v for v in (id1,)
+    ]
+    assert ids == encoded
+
+
+async def test_redis_call_xrange_malformed_count_returns_redis_error(r):
+    """LUA-03: a non-integer COUNT in XRANGE returns a Redis error reply,
+    not a Lua runtime crash -- matches real Redis behaviour and the rest of
+    the dispatch in this file."""
+    await r.xadd("s", {"f": "v"})
+    # pcall catches the Redis error reply and exposes its `err` field so we
+    # can assert on it without taking down the whole script.
+    result = await r.eval(
+        "local r = redis.pcall('XRANGE', KEYS[1], '-', '+', 'COUNT', 'abc'); "
+        "return r.err",
+        1,
+        "s",
+    )
+    assert b"not an integer" in result
+
+
 # redis.pcall()
 
 

@@ -1668,32 +1668,41 @@ fn dispatch_command_inner(
             };
 
             // Parse a range bound.  Sentinels:
-            //   "-"  -> (0, 0)
-            //   "+"  -> (u64::MAX, u64::MAX)
-            //   "ms" alone (no '-') -> for low: (ms, 0); for high: (ms, u64::MAX)
+            //   "-"  -> (0, 0)                          (inclusive)
+            //   "+"  -> (u64::MAX, u64::MAX)            (inclusive)
+            //   "ms" alone (no '-') -> low: (ms, 0); high: (ms, u64::MAX)
             //   "ms-seq" -> explicit
-            fn parse_bound(s: &str, is_low: bool) -> Option<crate::commands::streams::StreamId> {
+            //   leading "(" -> exclusive bound (e.g. "(1500-0" or "(+")
+            //   See https://redis.io/docs/latest/commands/xrange/#exclusive-ranges
+            fn parse_bound(
+                s: &str,
+                is_low: bool,
+            ) -> Option<(crate::commands::streams::StreamId, bool /* exclusive */)> {
+                let (s, exclusive) = match s.strip_prefix('(') {
+                    Some(rest) => (rest, true),
+                    None => (s, false),
+                };
                 if s == "-" {
-                    return Some((0, 0));
+                    return Some(((0, 0), exclusive));
                 }
                 if s == "+" {
-                    return Some((u64::MAX, u64::MAX));
+                    return Some(((u64::MAX, u64::MAX), exclusive));
                 }
                 let parts: Vec<&str> = s.splitn(2, '-').collect();
                 let ms: u64 = parts[0].parse().ok()?;
                 if parts.len() == 2 {
                     let seq: u64 = parts[1].parse().ok()?;
-                    Some((ms, seq))
+                    Some(((ms, seq), exclusive))
                 } else if is_low {
-                    Some((ms, 0))
+                    Some(((ms, 0), exclusive))
                 } else {
-                    Some((ms, u64::MAX))
+                    Some(((ms, u64::MAX), exclusive))
                 }
             }
 
             let lo_str = String::from_utf8_lossy(lo_bytes);
             let hi_str = String::from_utf8_lossy(hi_bytes);
-            let lo = match parse_bound(&lo_str, true) {
+            let (lo, lo_excl) = match parse_bound(&lo_str, true) {
                 Some(v) => v,
                 None => {
                     return Ok(RedisValue::Error(
@@ -1702,7 +1711,7 @@ fn dispatch_command_inner(
                     ));
                 }
             };
-            let hi = match parse_bound(&hi_str, false) {
+            let (hi, hi_excl) = match parse_bound(&hi_str, false) {
                 Some(v) => v,
                 None => {
                     return Ok(RedisValue::Error(
@@ -1721,13 +1730,15 @@ fn dispatch_command_inner(
                     if i + 1 >= args.len() {
                         return Ok(RedisValue::Error("ERR syntax error".to_string()));
                     }
-                    count = Some(
-                        String::from_utf8_lossy(&args[i + 1])
-                            .parse::<usize>()
-                            .map_err(|_| {
-                                "ERR value is not an integer or out of range".to_string()
-                            })?,
-                    );
+                    match String::from_utf8_lossy(&args[i + 1]).parse::<usize>() {
+                        Ok(n) => count = Some(n),
+                        Err(_) => {
+                            return Ok(RedisValue::Error(
+                                "ERR value is not an integer or out of range"
+                                    .to_string(),
+                            ));
+                        }
+                    }
                     i += 2;
                 } else {
                     return Ok(RedisValue::Error("ERR syntax error".to_string()));
@@ -1742,17 +1753,33 @@ fn dispatch_command_inner(
                 }
             }
 
+            // Inverted bounds (lo > hi, or equal-and-either-exclusive) are
+            // valid in real Redis -- they just produce an empty result.
+            // BTreeMap::range would panic on such input, so short-circuit.
+            if lo > hi || (lo == hi && (lo_excl || hi_excl)) {
+                return Ok(RedisValue::Array(Vec::new()));
+            }
+
             match data.get(key) {
                 None => Ok(RedisValue::Array(Vec::new())),
                 Some(entry) => match &entry.data {
                     ValueData::Stream(stream) => {
-                        // Collect entries in [lo, hi] inclusive.
+                        let lo_bound = if lo_excl {
+                            std::ops::Bound::Excluded(lo)
+                        } else {
+                            std::ops::Bound::Included(lo)
+                        };
+                        let hi_bound = if hi_excl {
+                            std::ops::Bound::Excluded(hi)
+                        } else {
+                            std::ops::Bound::Included(hi)
+                        };
                         let mut collected: Vec<(
                             crate::commands::streams::StreamId,
                             &HashMap<Bytes, Bytes>,
                         )> = stream
                             .entries
-                            .range(lo..=hi)
+                            .range((lo_bound, hi_bound))
                             .map(|(id, fields)| (*id, fields))
                             .collect();
                         if reverse {
