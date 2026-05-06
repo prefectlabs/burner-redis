@@ -1753,17 +1753,18 @@ fn dispatch_command_inner(
                 }
             }
 
-            // Inverted bounds (lo > hi, or equal-and-either-exclusive) are
-            // valid in real Redis -- they just produce an empty result.
-            // BTreeMap::range would panic on such input, so short-circuit.
-            if lo > hi || (lo == hi && (lo_excl || hi_excl)) {
-                return Ok(RedisValue::Array(Vec::new()));
-            }
-
             match data.get(key) {
                 None => Ok(RedisValue::Array(Vec::new())),
                 Some(entry) => match &entry.data {
                     ValueData::Stream(stream) => {
+                        // Inverted bounds (lo > hi, or equal-and-either-exclusive) are
+                        // valid in real Redis -- they just produce an empty result.
+                        // BTreeMap::range would panic on such input, so short-circuit
+                        // after type-checking the key.
+                        if lo > hi || (lo == hi && (lo_excl || hi_excl)) {
+                            return Ok(RedisValue::Array(Vec::new()));
+                        }
+
                         let lo_bound = if lo_excl {
                             std::ops::Bound::Excluded(lo)
                         } else {
@@ -1774,38 +1775,25 @@ fn dispatch_command_inner(
                         } else {
                             std::ops::Bound::Included(hi)
                         };
-                        let mut collected: Vec<(
-                            crate::commands::streams::StreamId,
-                            &HashMap<Bytes, Bytes>,
-                        )> = stream
-                            .entries
-                            .range((lo_bound, hi_bound))
-                            .map(|(id, fields)| (*id, fields))
-                            .collect();
-                        if reverse {
-                            collected.reverse();
-                        }
-                        if let Some(n) = count {
-                            collected.truncate(n);
-                        }
+                        let limit = count.unwrap_or(usize::MAX);
 
                         // Format as [[id, [k1, v1, k2, v2, ...]], ...]
-                        let result: Vec<RedisValue> = collected
-                            .into_iter()
-                            .map(|(id, fields)| {
-                                let id_str = format!("{}-{}", id.0, id.1);
-                                let mut pairs: Vec<RedisValue> =
-                                    Vec::with_capacity(fields.len() * 2);
-                                for (k, v) in fields.iter() {
-                                    pairs.push(RedisValue::BulkString(k.clone()));
-                                    pairs.push(RedisValue::BulkString(v.clone()));
-                                }
-                                RedisValue::Array(vec![
-                                    RedisValue::BulkString(Bytes::from(id_str)),
-                                    RedisValue::Array(pairs),
-                                ])
-                            })
-                            .collect();
+                        let result: Vec<RedisValue> = if reverse {
+                            stream
+                                .entries
+                                .range((lo_bound, hi_bound))
+                                .rev()
+                                .take(limit)
+                                .map(|(id, fields)| stream_entry_to_lua_array(*id, fields))
+                                .collect()
+                        } else {
+                            stream
+                                .entries
+                                .range((lo_bound, hi_bound))
+                                .take(limit)
+                                .map(|(id, fields)| stream_entry_to_lua_array(*id, fields))
+                                .collect()
+                        };
                         Ok(RedisValue::Array(result))
                     }
                     _ => Ok(RedisValue::Error(
@@ -2880,6 +2868,22 @@ fn dispatch_command_inner(
 
         _ => Ok(RedisValue::Error(format!("ERR unknown command '{}'", cmd))),
     }
+}
+
+fn stream_entry_to_lua_array(
+    id: crate::commands::streams::StreamId,
+    fields: &HashMap<Bytes, Bytes>,
+) -> RedisValue {
+    let id_str = format!("{}-{}", id.0, id.1);
+    let mut pairs: Vec<RedisValue> = Vec::with_capacity(fields.len() * 2);
+    for (k, v) in fields.iter() {
+        pairs.push(RedisValue::BulkString(k.clone()));
+        pairs.push(RedisValue::BulkString(v.clone()));
+    }
+    RedisValue::Array(vec![
+        RedisValue::BulkString(Bytes::from(id_str)),
+        RedisValue::Array(pairs),
+    ])
 }
 
 /// Format a f64 score to a string matching Redis's format.
