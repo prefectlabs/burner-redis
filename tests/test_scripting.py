@@ -307,6 +307,22 @@ async def test_redis_call_xrevrange(r):
     assert result[1][0] == (id1.encode() if isinstance(id1, str) else id1)
 
 
+async def test_redis_call_xrevrange_count_returns_newest_entries(r):
+    """LUA-03: XREVRANGE COUNT is applied from the high end of the range."""
+    id1 = await r.xadd("s", {"f": "1"})
+    id2 = await r.xadd("s", {"f": "2"})
+    id3 = await r.xadd("s", {"f": "3"})
+    result = await r.eval(
+        "return redis.call('XREVRANGE', KEYS[1], '+', '-', 'COUNT', 2)",
+        1,
+        "s",
+    )
+    encoded = [v.encode() if isinstance(v, str) else v for v in (id3, id2)]
+    ids = [entry[0] for entry in result]
+    assert ids == encoded
+    assert (id1.encode() if isinstance(id1, str) else id1) not in ids
+
+
 async def test_redis_call_xrange_inverted_bounds_returns_empty(r):
     """LUA-03: a range where start > end returns an empty array, matching
     real Redis.  Important: the underlying BTreeMap would panic on such
@@ -318,6 +334,13 @@ async def test_redis_call_xrange_inverted_bounds_returns_empty(r):
         "return redis.call('XRANGE', KEYS[1], '+', '-')", 1, "s"
     )
     assert result == []
+
+
+async def test_redis_call_xrange_inverted_bounds_wrongtype_raises(r):
+    """LUA-03: inverted bounds still type-check an existing non-stream key."""
+    await r.set("s", "not-a-stream")
+    with pytest.raises(Exception, match="WRONGTYPE"):
+        await r.eval("return redis.call('XRANGE', KEYS[1], '+', '-')", 1, "s")
 
 
 async def test_redis_call_xrange_exclusive_low_bound(r):
