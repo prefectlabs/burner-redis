@@ -37,3 +37,8 @@ python-source = "python"
 asyncio_mode = "auto"
 markers = ["integration: integration tests that simulate Prefect usage"]
 addopts = "-m 'not integration'"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.409",
+]

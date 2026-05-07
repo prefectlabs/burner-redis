@@ -3,11 +3,24 @@
 Provides redis-py compatible async PubSub API with subscribe/unsubscribe,
 pattern matching, message handlers, and background thread processing.
 """
+from __future__ import annotations
+
 import asyncio
 import inspect
 import queue
 import threading
 import time
+from collections.abc import AsyncIterator, Callable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from burner_redis._burner_redis import BurnerRedis, KeyT
+
+# A pub/sub message dispatched to user handlers. Keys: type, pattern,
+# channel, data — values match redis-py's shape (bytes for channel/pattern,
+# bytes for data in publish messages, int for subscribe-confirmation data).
+Message = dict[str, Any]
+MessageHandler = Callable[[Message], Any]
 
 
 class PubSub:
@@ -22,28 +35,41 @@ class PubSub:
     UNSUBSCRIBE_MESSAGE_TYPES = ("unsubscribe", "punsubscribe")
     HEALTH_CHECK_MESSAGE = "burner-redis-pubsub-health-check"
 
-    def __init__(self, client, ignore_subscribe_messages=False):
+    def __init__(
+        self,
+        client: BurnerRedis,
+        ignore_subscribe_messages: bool = False,
+    ) -> None:
         self._client = client
         self.ignore_subscribe_messages = ignore_subscribe_messages
-        self.channels = {}      # channel_bytes -> handler or None
-        self.patterns = {}      # pattern_bytes -> handler or None
-        self._queue = queue.Queue()
-        self._subscriber_id = None
+        self.channels: dict[bytes, MessageHandler | None] = {}
+        self.patterns: dict[bytes, MessageHandler | None] = {}
+        self._queue: queue.Queue[Message] = queue.Queue()
+        self._subscriber_id: int | None = None
         self._listener_started = False
 
     @property
-    def subscribed(self):
+    def subscribed(self) -> bool:
         """True if this PubSub has any active subscriptions."""
         return bool(self.channels or self.patterns)
 
-    async def _ensure_listener(self):
-        """Start the Rust background listener if not already running."""
+    async def _ensure_listener(self) -> int:
+        """Start the Rust background listener if not already running.
+
+        Returns the subscriber id so callers can pass it to subscribe /
+        psubscribe / unsubscribe without having to narrow `_subscriber_id`
+        themselves.
+        """
         if not self._listener_started:
             self._subscriber_id = self._client._new_subscriber()
             await self._client._subscribe_listener(self._subscriber_id, self._queue)
             self._listener_started = True
+        assert self._subscriber_id is not None
+        return self._subscriber_id
 
-    async def subscribe(self, *args, **kwargs):
+    async def subscribe(
+        self, *args: KeyT, **kwargs: MessageHandler
+    ) -> None:
         """Subscribe to one or more channels.
 
         Positional args are channel names (no handler).
@@ -53,9 +79,9 @@ class PubSub:
             await pubsub.subscribe('channel1', 'channel2')
             await pubsub.subscribe(channel1=handler_func)
         """
-        await self._ensure_listener()
+        subscriber_id = await self._ensure_listener()
 
-        new_channels = {}
+        new_channels: dict[bytes, MessageHandler | None] = {}
         for arg in args:
             new_channels[self._encode(arg)] = None
         for channel, handler in kwargs.items():
@@ -66,7 +92,7 @@ class PubSub:
 
         channel_list = list(new_channels.keys())
         results = await self._client.subscribe_channels(
-            self._subscriber_id, channel_list
+            subscriber_id, channel_list
         )
 
         self.channels.update(new_channels)
@@ -81,7 +107,7 @@ class PubSub:
             }
             self._queue.put_nowait(msg)
 
-    async def unsubscribe(self, *args):
+    async def unsubscribe(self, *args: KeyT) -> None:
         """Unsubscribe from one or more channels. If no args, unsubscribe from all."""
         if self._subscriber_id is None:
             self.channels.clear()  # defensive: clear local state even if no backend call needed
@@ -109,15 +135,17 @@ class PubSub:
             }
             self._queue.put_nowait(msg)
 
-    async def psubscribe(self, *args, **kwargs):
+    async def psubscribe(
+        self, *args: KeyT, **kwargs: MessageHandler
+    ) -> None:
         """Subscribe to one or more glob patterns.
 
         Positional args are patterns (no handler).
         Keyword args map patterns to handler callables.
         """
-        await self._ensure_listener()
+        subscriber_id = await self._ensure_listener()
 
-        new_patterns = {}
+        new_patterns: dict[bytes, MessageHandler | None] = {}
         for arg in args:
             new_patterns[self._encode(arg)] = None
         for pattern, handler in kwargs.items():
@@ -128,7 +156,7 @@ class PubSub:
 
         pattern_list = list(new_patterns.keys())
         results = await self._client.psubscribe_patterns(
-            self._subscriber_id, pattern_list
+            subscriber_id, pattern_list
         )
 
         self.patterns.update(new_patterns)
@@ -142,7 +170,7 @@ class PubSub:
             }
             self._queue.put_nowait(msg)
 
-    async def punsubscribe(self, *args):
+    async def punsubscribe(self, *args: KeyT) -> None:
         """Unsubscribe from one or more patterns. If no args, unsubscribe from all."""
         if self._subscriber_id is None:
             self.patterns.clear()  # defensive: clear local state even if no backend call needed
@@ -170,7 +198,7 @@ class PubSub:
             }
             self._queue.put_nowait(msg)
 
-    async def _queue_get(self, timeout):
+    async def _queue_get(self, timeout: float | None) -> Message | None:
         """Read one item from the internal thread-safe queue.
 
         For blocking reads, poll in short slices so external task cancellation
@@ -196,7 +224,11 @@ class PubSub:
                     return None
                 poll_timeout = min(remaining, 0.1)
 
-    async def get_message(self, ignore_subscribe_messages=False, timeout=0.0):
+    async def get_message(
+        self,
+        ignore_subscribe_messages: bool = False,
+        timeout: float | None = 0.0,
+    ) -> Message | None:
         """Get the next message or None.
 
         Args:
@@ -228,7 +260,7 @@ class PubSub:
             if timeout == 0.0:
                 return None
 
-    def _filter_message(self, raw):
+    def _filter_message(self, raw: Message) -> Message | None:
         """Filter broadcast messages to only those matching this subscriber's channels/patterns."""
         msg_type = raw.get("type")
 
@@ -252,7 +284,11 @@ class PubSub:
 
         return raw
 
-    async def handle_message(self, message, ignore_subscribe_messages=False):
+    async def handle_message(
+        self,
+        message: Message,
+        ignore_subscribe_messages: bool = False,
+    ) -> Message | None:
         """Process a message dict. Dispatch to handler if registered.
 
         Returns the message if no handler consumed it, None if handled.
@@ -260,11 +296,20 @@ class PubSub:
         message_type = message["type"]
 
         if message_type in self.PUBLISH_MESSAGE_TYPES:
-            # Check for registered handler
+            # Check for registered handler. Both `pattern` (for pmessage) and
+            # `channel` (for message) are bytes when set by the subscribe
+            # path, but `Message` is loosely typed `dict[str, Any]` so we
+            # narrow defensively before dict lookup.
             if message_type == "pmessage":
-                handler = self.patterns.get(message.get("pattern"))
+                pattern = message.get("pattern")
+                handler = (
+                    self.patterns.get(pattern) if isinstance(pattern, bytes) else None
+                )
             else:
-                handler = self.channels.get(message.get("channel"))
+                channel = message.get("channel")
+                handler = (
+                    self.channels.get(channel) if isinstance(channel, bytes) else None
+                )
 
             if handler is not None:
                 if inspect.iscoroutinefunction(handler):
@@ -283,14 +328,16 @@ class PubSub:
 
         return message
 
-    async def listen(self):
+    async def listen(self) -> AsyncIterator[Message]:
         """Async generator that yields messages until unsubscribed."""
         while self.subscribed:
             response = await self.get_message(timeout=None)
             if response is not None:
                 yield response
 
-    def run_in_thread(self, sleep_time=0.0, daemon=True):
+    def run_in_thread(
+        self, sleep_time: float = 0.0, daemon: bool = True
+    ) -> PubSubWorkerThread:
         """Start a background thread that processes messages.
 
         Returns a PubSubWorkerThread with a stop() method.
@@ -299,11 +346,11 @@ class PubSub:
         thread.start()
         return thread
 
-    async def close(self):
+    async def close(self) -> None:
         """Close the PubSub, unsubscribing from all channels and patterns."""
         await self.aclose()
 
-    async def aclose(self):
+    async def aclose(self) -> None:
         """Async close -- unsubscribe from all channels and patterns, and
         signal the Rust-side listener task to exit so its captured references
         to this PubSub's event loop and queue are released.
@@ -323,11 +370,11 @@ class PubSub:
             finally:
                 self._listener_started = False
 
-    async def reset(self):
+    async def reset(self) -> None:
         """Reset the PubSub state (deprecated alias for aclose)."""
         await self.aclose()
 
-    def _encode(self, value):
+    def _encode(self, value: KeyT) -> bytes:
         """Encode a value to bytes if it's a string."""
         if isinstance(value, bytes):
             return value
@@ -345,13 +392,18 @@ class PubSubWorkerThread(threading.Thread):
     Call stop() to signal the thread to exit.
     """
 
-    def __init__(self, pubsub, sleep_time=0.0, daemon=True):
+    def __init__(
+        self,
+        pubsub: PubSub,
+        sleep_time: float = 0.0,
+        daemon: bool = True,
+    ) -> None:
         super().__init__(daemon=daemon)
         self._pubsub = pubsub
         self._sleep_time = sleep_time
         self._stop_event = threading.Event()
 
-    def run(self):
+    def run(self) -> None:
         """Run the message processing loop in a new asyncio event loop."""
         loop = asyncio.new_event_loop()
         try:
@@ -359,7 +411,7 @@ class PubSubWorkerThread(threading.Thread):
         finally:
             loop.close()
 
-    async def _process_messages(self):
+    async def _process_messages(self) -> None:
         """Process messages until stopped."""
         while not self._stop_event.is_set():
             try:
@@ -372,6 +424,6 @@ class PubSubWorkerThread(threading.Thread):
             except Exception:
                 break
 
-    def stop(self):
+    def stop(self) -> None:
         """Signal the thread to stop processing."""
         self._stop_event.set()
