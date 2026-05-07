@@ -3,9 +3,23 @@
 Provides redis-py compatible Pipeline API that buffers commands
 and executes them sequentially against a BurnerRedis instance.
 """
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, NoReturn
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    from burner_redis._burner_redis import (
+        BurnerRedis,
+        EncodableT,
+        KeyT,
+        ScoreT,
+    )
 
 
-def _coerce_value(value):
+def _coerce_value(value: EncodableT) -> str | bytes | memoryview:
     """Coerce a value to str or bytes, matching redis-py's Encoder.encode() behavior.
 
     Mirror of burner_redis._coerce_value — duplicated here to avoid a circular
@@ -41,11 +55,11 @@ class Pipeline:
     on execute(), returning results in command order.
     """
 
-    def __init__(self, client):
+    def __init__(self, client: BurnerRedis) -> None:
         self._client = client
-        self._commands = []
+        self._commands: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
 
-    async def execute(self, raise_on_error: bool = True) -> list:
+    async def execute(self, raise_on_error: bool = True) -> list[Any]:
         """Execute all queued commands and return results in order.
 
         Fast path (no blocking commands in the queue): uses native Rust
@@ -93,7 +107,7 @@ class Pipeline:
         # have been attempted (when raise_on_error=True). Previously the slow
         # path raised on the first failure and skipped subsequent commands,
         # which diverged from redis-py / fast-path behavior.
-        results: list = []
+        results: list[Any] = []
         commands = self._commands
         self._commands = []
         for (method_name, args, kwargs) in commands:
@@ -109,132 +123,178 @@ class Pipeline:
                     raise r
         return results
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Pipeline:
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool:
         if exc_type is None:
             await self.execute()
         return False
 
     # ---- String Commands ----
 
-    def set(self, name, value, ex=None, px=None, nx=False, xx=False):
+    def set(
+        self,
+        name: KeyT,
+        value: EncodableT,
+        ex: int | None = None,
+        px: int | None = None,
+        nx: bool = False,
+        xx: bool = False,
+    ) -> Pipeline:
         # H-01: apply value coercion at buffer time so the pipeline matches
         # the monkey-patched client (`r.set` runs `_coerced_set` first).
         coerced = _coerce_value(value)
         self._commands.append(("set", (name, coerced), {"ex": ex, "px": px, "nx": nx, "xx": xx}))
         return self
 
-    def get(self, name):
+    def get(self, name: KeyT) -> Pipeline:
         self._commands.append(("get", (name,), {}))
         return self
 
-    def delete(self, *names):
+    def delete(self, *names: KeyT) -> Pipeline:
         self._commands.append(("delete", names, {}))
         return self
 
-    def exists(self, *names):
+    def exists(self, *names: KeyT) -> Pipeline:
         self._commands.append(("exists", names, {}))
         return self
 
     # ---- Hash Commands ----
 
-    def hset(self, name, key=None, value=None, mapping=None):
+    def hset(
+        self,
+        name: KeyT,
+        key: KeyT | None = None,
+        value: EncodableT | None = None,
+        mapping: Mapping[KeyT, EncodableT] | None = None,
+    ) -> Pipeline:
         self._commands.append(("hset", (name,), {"key": key, "value": value, "mapping": mapping}))
         return self
 
-    def hget(self, name, key):
+    def hget(self, name: KeyT, key: KeyT) -> Pipeline:
         self._commands.append(("hget", (name, key), {}))
         return self
 
-    def hdel(self, name, *keys):
+    def hdel(self, name: KeyT, *keys: KeyT) -> Pipeline:
         self._commands.append(("hdel", (name, *keys), {}))
         return self
 
-    def hvals(self, name):
+    def hvals(self, name: KeyT) -> Pipeline:
         self._commands.append(("hvals", (name,), {}))
         return self
 
     # ---- Set Commands ----
 
-    def sadd(self, name, *values):
+    def sadd(self, name: KeyT, *values: EncodableT) -> Pipeline:
         self._commands.append(("sadd", (name, *values), {}))
         return self
 
-    def smembers(self, name):
+    def smembers(self, name: KeyT) -> Pipeline:
         self._commands.append(("smembers", (name,), {}))
         return self
 
-    def sismember(self, name, value):
+    def sismember(self, name: KeyT, value: EncodableT) -> Pipeline:
         self._commands.append(("sismember", (name, value), {}))
         return self
 
-    def srem(self, name, *values):
+    def srem(self, name: KeyT, *values: EncodableT) -> Pipeline:
         self._commands.append(("srem", (name, *values), {}))
         return self
 
     # ---- Sorted Set Commands ----
 
-    def zadd(self, name, mapping, nx=False, xx=False, gt=False, lt=False, ch=False):
+    def zadd(
+        self,
+        name: KeyT,
+        mapping: Mapping[KeyT, float],
+        nx: bool = False,
+        xx: bool = False,
+        gt: bool = False,
+        lt: bool = False,
+        ch: bool = False,
+    ) -> Pipeline:
         self._commands.append(("zadd", (name, mapping), {"nx": nx, "xx": xx, "gt": gt, "lt": lt, "ch": ch}))
         return self
 
-    def zrem(self, name, *values):
+    def zrem(self, name: KeyT, *values: EncodableT) -> Pipeline:
         self._commands.append(("zrem", (name, *values), {}))
         return self
 
-    def zrange(self, name, start, end, withscores=False):
+    def zrange(
+        self, name: KeyT, start: int, end: int, withscores: bool = False
+    ) -> Pipeline:
         self._commands.append(("zrange", (name, start, end), {"withscores": withscores}))
         return self
 
-    def zrangebyscore(self, name, min, max, withscores=False):
+    def zrangebyscore(
+        self,
+        name: KeyT,
+        min: ScoreT,
+        max: ScoreT,
+        withscores: bool = False,
+    ) -> Pipeline:
         self._commands.append(("zrangebyscore", (name, min, max), {"withscores": withscores}))
         return self
 
-    def zrangestore(self, dest, name, start, end):
+    def zrangestore(
+        self, dest: KeyT, name: KeyT, start: int, end: int
+    ) -> Pipeline:
         self._commands.append(("zrangestore", (dest, name, start, end), {}))
         return self
 
-    def zremrangebyscore(self, name, min, max):
+    def zremrangebyscore(
+        self, name: KeyT, min: ScoreT, max: ScoreT
+    ) -> Pipeline:
         self._commands.append(("zremrangebyscore", (name, min, max), {}))
         return self
 
     # ---- List Commands ----
 
-    def lpush(self, name, *values):
+    def lpush(self, name: KeyT, *values: EncodableT) -> Pipeline:
         # H-01: per-value coercion mirrors the monkey-patched `_coerced_lpush`.
         coerced = tuple(_coerce_value(v) for v in values)
         self._commands.append(("lpush", (name, *coerced), {}))
         return self
 
-    def rpush(self, name, *values):
+    def rpush(self, name: KeyT, *values: EncodableT) -> Pipeline:
         # H-01: per-value coercion mirrors the monkey-patched `_coerced_rpush`.
         coerced = tuple(_coerce_value(v) for v in values)
         self._commands.append(("rpush", (name, *coerced), {}))
         return self
 
-    def lpop(self, name, count=None):
+    def lpop(self, name: KeyT, count: int | None = None) -> Pipeline:
         self._commands.append(("lpop", (name,), {"count": count}))
         return self
 
-    def rpop(self, name, count=None):
+    def rpop(self, name: KeyT, count: int | None = None) -> Pipeline:
         self._commands.append(("rpop", (name,), {"count": count}))
         return self
 
-    def lrange(self, name, start, end):
+    def lrange(self, name: KeyT, start: int, end: int) -> Pipeline:
         self._commands.append(("lrange", (name, start, end), {}))
         return self
 
-    def llen(self, name):
+    def llen(self, name: KeyT) -> Pipeline:
         self._commands.append(("llen", (name,), {}))
         return self
 
-    def lindex(self, name, index):
+    def lindex(self, name: KeyT, index: int) -> Pipeline:
         self._commands.append(("lindex", (name, index), {}))
         return self
 
-    def linsert(self, name, where, refvalue, value):
+    def linsert(
+        self,
+        name: KeyT,
+        where: str,
+        refvalue: EncodableT,
+        value: EncodableT,
+    ) -> Pipeline:
         # H-01: coerce inserted `value`.
         # P2-06: also coerce `refvalue` — redis-py encodes every command
         # argument including the pivot, so numeric pivots are legal.
@@ -243,191 +303,279 @@ class Pipeline:
         )
         return self
 
-    def lrem(self, name, count, value):
+    def lrem(self, name: KeyT, count: int, value: EncodableT) -> Pipeline:
         # P2-07: coerce `value` — redis-py encodes ints/floats for LREM
         # values just like LPUSH/LSET. Mirror of `_coerced_lrem`.
         self._commands.append(("lrem", (name, count, _coerce_value(value)), {}))
         return self
 
-    def lset(self, name, index, value):
+    def lset(self, name: KeyT, index: int, value: EncodableT) -> Pipeline:
         # H-01: coerce inserted value (mirror of `_coerced_lset`).
         self._commands.append(("lset", (name, index, _coerce_value(value)), {}))
         return self
 
-    def ltrim(self, name, start, end):
+    def ltrim(self, name: KeyT, start: int, end: int) -> Pipeline:
         self._commands.append(("ltrim", (name, start, end), {}))
         return self
 
-    def lmove(self, first_list, second_list, src="LEFT", dest="RIGHT"):
+    def lmove(
+        self,
+        first_list: KeyT,
+        second_list: KeyT,
+        src: str = "LEFT",
+        dest: str = "RIGHT",
+    ) -> Pipeline:
         self._commands.append(("lmove", (first_list, second_list), {"src": src, "dest": dest}))
         return self
 
-    def rpoplpush(self, src, dst):
+    def rpoplpush(self, src: KeyT, dst: KeyT) -> Pipeline:
         self._commands.append(("rpoplpush", (src, dst), {}))
         return self
 
-    def blpop(self, keys, timeout=0):
+    def blpop(
+        self, keys: KeyT | list[KeyT], timeout: float = 0
+    ) -> Pipeline:
         self._commands.append(("blpop", (keys,), {"timeout": timeout}))
         return self
 
-    def brpop(self, keys, timeout=0):
+    def brpop(
+        self, keys: KeyT | list[KeyT], timeout: float = 0
+    ) -> Pipeline:
         self._commands.append(("brpop", (keys,), {"timeout": timeout}))
         return self
 
-    def blmove(self, first_list, second_list, timeout, src="LEFT", dest="RIGHT"):
+    def blmove(
+        self,
+        first_list: KeyT,
+        second_list: KeyT,
+        timeout: float,
+        src: str = "LEFT",
+        dest: str = "RIGHT",
+    ) -> Pipeline:
         self._commands.append(("blmove", (first_list, second_list, timeout), {"src": src, "dest": dest}))
         return self
 
     # ---- Stream Commands ----
 
-    def xadd(self, name, fields, id="*", maxlen=None, minid=None):
+    def xadd(
+        self,
+        name: KeyT,
+        fields: Mapping[KeyT, EncodableT],
+        id: KeyT = "*",
+        maxlen: int | None = None,
+        minid: KeyT | None = None,
+    ) -> Pipeline:
         self._commands.append(("xadd", (name, fields), {"id": id, "maxlen": maxlen, "minid": minid}))
         return self
 
-    def xread(self, streams, count=None, block=None):
+    def xread(
+        self,
+        streams: Mapping[KeyT, KeyT],
+        count: int | None = None,
+        block: int | None = None,
+    ) -> Pipeline:
         self._commands.append(("xread", (streams,), {"count": count, "block": block}))
         return self
 
-    def xlen(self, name):
+    def xlen(self, name: KeyT) -> Pipeline:
         self._commands.append(("xlen", (name,), {}))
         return self
 
-    def xtrim(self, name, maxlen=None, minid=None, approximate=True):
+    def xtrim(
+        self,
+        name: KeyT,
+        maxlen: int | None = None,
+        minid: KeyT | None = None,
+        approximate: bool = True,
+    ) -> Pipeline:
         self._commands.append(("xtrim", (name,), {"maxlen": maxlen, "minid": minid, "approximate": approximate}))
         return self
 
     # ---- Consumer Group Commands ----
 
-    def xgroup_create(self, name, groupname, id="$", mkstream=False):
+    def xgroup_create(
+        self,
+        name: KeyT,
+        groupname: KeyT,
+        id: KeyT = "$",
+        mkstream: bool = False,
+    ) -> Pipeline:
         self._commands.append(("xgroup_create", (name, groupname), {"id": id, "mkstream": mkstream}))
         return self
 
-    def xgroup_destroy(self, name, groupname):
+    def xgroup_destroy(self, name: KeyT, groupname: KeyT) -> Pipeline:
         self._commands.append(("xgroup_destroy", (name, groupname), {}))
         return self
 
-    def xreadgroup(self, groupname, consumername, streams, count=None, block=None, noack=False):
+    def xreadgroup(
+        self,
+        groupname: KeyT,
+        consumername: KeyT,
+        streams: Mapping[KeyT, KeyT],
+        count: int | None = None,
+        block: int | None = None,
+        noack: bool = False,
+    ) -> Pipeline:
         self._commands.append(("xreadgroup", (groupname, consumername, streams), {"count": count, "block": block, "noack": noack}))
         return self
 
-    def xack(self, name, groupname, *ids):
+    def xack(self, name: KeyT, groupname: KeyT, *ids: KeyT) -> Pipeline:
         self._commands.append(("xack", (name, groupname, *ids), {}))
         return self
 
-    def xautoclaim(self, name, groupname, consumername, min_idle_time, start_id="0-0", count=None):
+    def xautoclaim(
+        self,
+        name: KeyT,
+        groupname: KeyT,
+        consumername: KeyT,
+        min_idle_time: int,
+        start_id: KeyT = "0-0",
+        count: int | None = None,
+    ) -> Pipeline:
         self._commands.append(("xautoclaim", (name, groupname, consumername, min_idle_time), {"start_id": start_id, "count": count}))
         return self
 
-    def xclaim(self, name, groupname, consumername, min_idle_time, message_ids,
-               idle=None, time=None, retrycount=None, force=False, justid=False):
+    def xclaim(
+        self,
+        name: KeyT,
+        groupname: KeyT,
+        consumername: KeyT,
+        min_idle_time: int,
+        message_ids: list[KeyT],
+        idle: int | None = None,
+        time: int | None = None,
+        retrycount: int | None = None,
+        force: bool = False,
+        justid: bool = False,
+    ) -> Pipeline:
         self._commands.append(("xclaim", (name, groupname, consumername, min_idle_time, message_ids),
                               {"idle": idle, "time": time, "retrycount": retrycount,
                                "force": force, "justid": justid}))
         return self
 
-    def xinfo_groups(self, name):
+    def xinfo_groups(self, name: KeyT) -> Pipeline:
         self._commands.append(("xinfo_groups", (name,), {}))
         return self
 
-    def xinfo_consumers(self, name, groupname):
+    def xinfo_consumers(self, name: KeyT, groupname: KeyT) -> Pipeline:
         self._commands.append(("xinfo_consumers", (name, groupname), {}))
         return self
 
-    def xpending_range(self, name, groupname, min="-", max="+", count=100, consumername=None, idle=None):
+    def xpending_range(
+        self,
+        name: KeyT,
+        groupname: KeyT,
+        min: KeyT = "-",
+        max: KeyT = "+",
+        count: int = 100,
+        consumername: KeyT | None = None,
+        idle: int | None = None,
+    ) -> Pipeline:
         self._commands.append(("xpending_range", (name, groupname, min, max, count), {"consumername": consumername, "idle": idle}))
         return self
 
     # ---- Scripting Commands ----
 
-    def eval(self, script, numkeys, *keys_and_args):
+    def eval(self, script: str, numkeys: int, *keys_and_args: KeyT) -> Pipeline:
         self._commands.append(("eval", (script, numkeys, *keys_and_args), {}))
         return self
 
-    def evalsha(self, sha, numkeys, *keys_and_args):
+    def evalsha(self, sha: str, numkeys: int, *keys_and_args: KeyT) -> Pipeline:
         self._commands.append(("evalsha", (sha, numkeys, *keys_and_args), {}))
         return self
 
-    def script_load(self, script):
+    def script_load(self, script: str) -> Pipeline:
         self._commands.append(("script_load", (script,), {}))
         return self
 
-    def script_exists(self, *args):
+    def script_exists(self, *args: str) -> Pipeline:
         self._commands.append(("script_exists", args, {}))
         return self
 
     # ---- Additional Hash Commands ----
 
-    def hgetall(self, name):
+    def hgetall(self, name: KeyT) -> Pipeline:
         self._commands.append(("hgetall", (name,), {}))
         return self
 
-    def hexists(self, name, key):
+    def hexists(self, name: KeyT, key: KeyT) -> Pipeline:
         self._commands.append(("hexists", (name, key), {}))
         return self
 
-    def hincrby(self, name, key, amount=1):
+    def hincrby(self, name: KeyT, key: KeyT, amount: int = 1) -> Pipeline:
         self._commands.append(("hincrby", (name, key), {"amount": amount}))
         return self
 
     # ---- Additional Sorted Set Commands ----
 
-    def zcard(self, name):
+    def zcard(self, name: KeyT) -> Pipeline:
         self._commands.append(("zcard", (name,), {}))
         return self
 
-    def zscore(self, name, value):
+    def zscore(self, name: KeyT, value: EncodableT) -> Pipeline:
         self._commands.append(("zscore", (name, value), {}))
         return self
 
-    def zcount(self, name, min, max):
+    def zcount(self, name: KeyT, min: ScoreT, max: ScoreT) -> Pipeline:
         self._commands.append(("zcount", (name, min, max), {}))
         return self
 
     # ---- Key Commands ----
 
-    def expire(self, name, time):
+    def expire(self, name: KeyT, time: int) -> Pipeline:
         self._commands.append(("expire", (name, time), {}))
         return self
 
     # ---- Additional Stream Commands ----
 
-    def xdel(self, name, *ids):
+    def xdel(self, name: KeyT, *ids: KeyT) -> Pipeline:
         self._commands.append(("xdel", (name, *ids), {}))
         return self
 
-    def xrange(self, name, min="-", max="+", count=None):
+    def xrange(
+        self,
+        name: KeyT,
+        min: KeyT = "-",
+        max: KeyT = "+",
+        count: int | None = None,
+    ) -> Pipeline:
         self._commands.append(("xrange", (name,), {"min": min, "max": max, "count": count}))
         return self
 
     # ---- Pub/Sub Commands ----
 
-    def publish(self, channel, message):
+    def publish(self, channel: KeyT, message: EncodableT) -> Pipeline:
         self._commands.append(("publish", (channel, message), {}))
         return self
 
     # ---- Key Enumeration Commands ----
 
-    def keys(self, pattern="*"):
+    def keys(self, pattern: KeyT = "*") -> Pipeline:
         self._commands.append(("keys", (pattern,), {}))
         return self
 
-    def ttl(self, name):
+    def ttl(self, name: KeyT) -> Pipeline:
         self._commands.append(("ttl", (name,), {}))
         return self
 
-    def setex(self, name, time, value):
+    def setex(self, name: KeyT, time: int, value: EncodableT) -> Pipeline:
         self._commands.append(("setex", (name, time, value), {}))
         return self
 
-    def mget(self, *keys):
+    def mget(self, *keys: KeyT) -> Pipeline:
         self._commands.append(("mget", keys, {}))
         return self
 
-    def xpending(self, name, groupname):
+    def xpending(self, name: KeyT, groupname: KeyT) -> Pipeline:
         self._commands.append(("xpending", (name, groupname), {}))
         return self
 
-    def scan_iter(self, match=None, count=None, _type=None):
+    def scan_iter(
+        self,
+        match: KeyT | None = None,
+        count: int | None = None,
+        _type: str | None = None,
+    ) -> NoReturn:
         raise NotImplementedError(
             "scan_iter is an async generator and cannot be used in a pipeline. "
             "Use scan_iter() directly on the client instead."

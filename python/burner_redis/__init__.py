@@ -4,37 +4,43 @@ from burner_redis.lock import Lock, LockError
 from burner_redis.pubsub import PubSub
 
 
-class ResponseError(Exception):
+from typing import TYPE_CHECKING
+
+# `redis` is an optional runtime dependency. When present, our error
+# classes inherit from the matching redis-py exceptions so existing
+# `except redis.exceptions.X:` handlers catch us; when absent, we fall
+# back to `Exception`. Type checkers always see the `Exception` baseline
+# (a Union of two type[...]s isn't a valid base class to pyright).
+if TYPE_CHECKING:
+    _BaseResponseError = Exception
+    _BaseNoScriptError = Exception
+else:
+    try:
+        from redis.exceptions import (
+            NoScriptError as _BaseNoScriptError,
+            ResponseError as _BaseResponseError,
+        )
+    except (ImportError, AttributeError):
+        _BaseResponseError = Exception
+        _BaseNoScriptError = Exception
+
+
+class ResponseError(_BaseResponseError):
     """Redis-compatible WRONGTYPE error.
 
-    Subclasses redis.exceptions.ResponseError if redis package is available.
+    Subclasses `redis.exceptions.ResponseError` when the `redis` package is
+    installed so existing redis-py error handlers catch us; otherwise falls
+    back to `Exception`.
     """
     pass
 
 
-# Try to make it a subclass of redis.exceptions.ResponseError if available
-try:
-    import redis.exceptions
+class NoScriptError(_BaseNoScriptError):
+    """Raised when EVALSHA references an unknown script SHA.
 
-    class ResponseError(redis.exceptions.ResponseError):  # type: ignore[no-redef]
-        """Redis-compatible WRONGTYPE error (subclass of redis.exceptions.ResponseError)."""
-        pass
-except (ImportError, AttributeError):
-    pass
-
-
-class NoScriptError(Exception):
-    """Raised when EVALSHA references an unknown script SHA."""
-    pass
-
-
-try:
-    import redis.exceptions
-
-    class NoScriptError(redis.exceptions.NoScriptError):  # type: ignore[no-redef]
-        """Raised when EVALSHA references an unknown script SHA (subclass of redis.exceptions.NoScriptError)."""
-        pass
-except (ImportError, AttributeError):
+    Subclasses `redis.exceptions.NoScriptError` when the `redis` package is
+    installed; otherwise falls back to `Exception`.
+    """
     pass
 
 
