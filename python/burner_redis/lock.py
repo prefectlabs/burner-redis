@@ -3,23 +3,37 @@
 Provides redis-py compatible Lock API using SET NX PX for atomic
 lock acquisition with UUID token-based ownership verification.
 """
+from __future__ import annotations
+
 import asyncio
 import time
 import uuid
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from types import TracebackType
+
+    from burner_redis._burner_redis import BurnerRedis, KeyT
 
 
-class LockError(Exception):
-    """Raised when a lock operation fails (e.g., release without ownership)."""
-    pass
+# `redis` is an optional runtime dependency. See the matching comment in
+# `burner_redis/__init__.py` for the TYPE_CHECKING rationale.
+if TYPE_CHECKING:
+    _BaseLockError = Exception
+else:
+    try:
+        from redis.exceptions import LockError as _BaseLockError
+    except (ImportError, AttributeError):
+        _BaseLockError = Exception
 
 
-try:
-    import redis.exceptions
+class LockError(_BaseLockError):
+    """Raised when a lock operation fails (e.g., release without ownership).
 
-    class LockError(redis.exceptions.LockError):  # type: ignore[no-redef]
-        """Raised when a lock operation fails (subclass of redis.exceptions.LockError)."""
-        pass
-except (ImportError, AttributeError):
+    Subclasses `redis.exceptions.LockError` when the `redis` package is
+    installed so existing redis-py error handlers catch us; otherwise falls
+    back to `Exception`.
+    """
     pass
 
 
@@ -48,16 +62,28 @@ class Lock:
         blocking_timeout: Maximum seconds to wait for blocking acquire (None = wait forever)
     """
 
-    def __init__(self, client, name, timeout=None, sleep=0.1, blocking=True, blocking_timeout=None):
+    def __init__(
+        self,
+        client: BurnerRedis,
+        name: KeyT,
+        timeout: float | None = None,
+        sleep: float = 0.1,
+        blocking: bool = True,
+        blocking_timeout: float | None = None,
+    ) -> None:
         self._client = client
         self.name = name
         self.timeout = timeout
         self.sleep = sleep
         self.blocking = blocking
         self.blocking_timeout = blocking_timeout
-        self.token = None
+        self.token: str | None = None
 
-    async def acquire(self, blocking=None, blocking_timeout=None):
+    async def acquire(
+        self,
+        blocking: bool | None = None,
+        blocking_timeout: float | None = None,
+    ) -> bool:
         """Acquire the lock.
 
         Args:
@@ -98,7 +124,7 @@ class Lock:
 
             await asyncio.sleep(self.sleep)
 
-    async def release(self):
+    async def release(self) -> None:
         """Release the lock atomically using a Lua script.
 
         Uses EVAL with a Lua script to atomically check token ownership
@@ -115,12 +141,17 @@ class Lock:
             raise LockError("Cannot release a lock that's no longer owned")
         self.token = None
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> Lock:
         acquired = await self.acquire()
         if not acquired:
             raise LockError("Unable to acquire lock")
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool:
         await self.release()
         return False
