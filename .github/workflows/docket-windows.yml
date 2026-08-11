@@ -50,6 +50,19 @@ jobs:
         working-directory: docket
         run: uv sync --upgrade-package 'redis>=5'
 
+      # A crashed pytest-xdist worker discards its own stdout, so a native
+      # fault would otherwise leave no evidence. WER writes a minidump we
+      # can upload instead.
+      - name: Enable WER crash dumps
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\crashdumps" | Out-Null
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpFolder /t REG_EXPAND_SZ /d "$env:GITHUB_WORKSPACE\crashdumps" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpCount /t REG_DWORD /d 16 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpType /t REG_DWORD /d 2 /f
+
+      # -n logical matches how docket and fastmcp run this suite for real;
+      # a single-process run cannot see multi-worker teardown problems.
       - name: Run tests
         env:
           REDIS_VERSION: memory
@@ -59,4 +72,13 @@ jobs:
           --import-mode=importlib
           -o 'addopts='
           -v
+          -n logical
           --timeout=120
+
+      - name: Upload crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashdumps-py${{ matrix.python-version }}
+          path: crashdumps/*.dmp
+          if-no-files-found: ignore

@@ -1,0 +1,6 @@
+# Pin the compiler so wheel builds are reproducible across releases. The
+# 0.1.6 and 0.1.7 wheels were built with different compilers only because
+# the runner image drifted, which sent the fastmcp Windows investigation
+# (PrefectHQ/fastmcp#4618) after a red herring for three weeks.
+[toolchain]
+channel = "1.97.1"
