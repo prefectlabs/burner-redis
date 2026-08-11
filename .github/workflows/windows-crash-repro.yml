@@ -157,6 +157,10 @@ jobs:
       - name: Force the crashing pair
         if: matrix.pair.force != ''
         working-directory: fastmcp
+        env:
+          # fastmcp main's one-week dependency cooldown would filter out the
+          # fresh pydocket and uncalled-for releases this cell installs.
+          UV_EXCLUDE_NEWER: "2026-12-31T00:00:00Z"
         run: uv pip install ${{ matrix.pair.force }}
 
       - name: Show resolved versions
