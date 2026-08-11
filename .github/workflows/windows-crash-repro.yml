@@ -185,3 +185,80 @@ jobs:
           name: crashdumps-fastmcp-py${{ matrix.python-version }}-${{ strategy.job-index }}
           path: crashdumps/*.dmp
           if-no-files-found: ignore
+
+  fastmcp-july:
+    name: fastmcp July 23 time travel, ${{ matrix.pair.label }}
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        pair:
+          # A fresh resolve the day of the pin picks pydocket 0.23.1 and
+          # burner 0.1.7: the configuration the pin PR called the crasher.
+          - { label: "as resolved on 2026-07-23", force: "" }
+          # Same resolve with only pydocket rolled back. If this is green
+          # while the cell above crashes, burner 0.1.7 is exonerated and
+          # docket 0.23.1's lost-cancellation bug was the crasher.
+          - { label: "july resolve + pydocket 0.20.1", force: "pydocket==0.20.1" }
+    steps:
+      - name: Checkout fastmcp at the commit before the pin
+        uses: actions/checkout@v6
+        with:
+          repository: PrefectHQ/fastmcp
+          ref: cf021d1a705aa3f59505ea6acacd2a205412c141
+          path: fastmcp
+
+      - name: Install uv + Python
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.10"
+          enable-cache: true
+
+      - name: Enable WER crash dumps
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\crashdumps" | Out-Null
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpFolder /t REG_EXPAND_SZ /d "$env:GITHUB_WORKSPACE\crashdumps" /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpCount /t REG_DWORD /d 16 /f
+          reg add "HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps" /v DumpType /t REG_DWORD /d 2 /f
+
+      - name: Relock as of 2026-07-23
+        working-directory: fastmcp
+        env:
+          UV_EXCLUDE_NEWER: "2026-07-23T00:00:00Z"
+        shell: bash
+        run: |
+          rm uv.lock
+          uv lock
+          uv sync
+
+      - name: Roll pydocket back
+        if: matrix.pair.force != ''
+        working-directory: fastmcp
+        env:
+          UV_EXCLUDE_NEWER: "2026-07-23T00:00:00Z"
+        run: uv pip install ${{ matrix.pair.force }}
+
+      - name: Show resolved versions
+        shell: bash
+        working-directory: fastmcp
+        run: |
+          uv run --no-sync python -c "import importlib.metadata as m; print('pydocket', m.version('pydocket')); print('burner-redis', m.version('burner-redis')); print('uncalled-for', m.version('uncalled-for'))"
+
+      - name: Run the fastmcp tasks suite under pytest-xdist, 3 rounds
+        shell: bash
+        working-directory: fastmcp
+        run: |
+          for round in 1 2 3; do
+            echo "=== round $round ==="
+            uv run --no-sync pytest tests/tasks -q -n logical
+          done
+
+      - name: Upload crash dumps
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crashdumps-july-${{ strategy.job-index }}
+          path: crashdumps/*.dmp
+          if-no-files-found: ignore
