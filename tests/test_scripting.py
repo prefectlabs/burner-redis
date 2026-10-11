@@ -437,6 +437,26 @@ async def test_redis_call_unknown_command(r):
         await r.eval("return redis.call('FLUSHALL')", 0)
 
 
+async def test_script_removing_the_last_member_removes_the_key(r):
+    """HDEL, SREM, ZREM and ZREMRANGEBYSCORE from Lua delete a key they empty."""
+    script = """
+    redis.call('HSET', KEYS[1], 'f', 'v')
+    redis.call('HDEL', KEYS[1], 'f')
+    local after_hdel = redis.call('EXISTS', KEYS[1])
+    redis.call('SADD', KEYS[1], 'm')
+    redis.call('SREM', KEYS[1], 'm')
+    local after_srem = redis.call('EXISTS', KEYS[1])
+    redis.call('ZADD', KEYS[1], 1, 'm')
+    redis.call('ZREM', KEYS[1], 'm')
+    local after_zrem = redis.call('EXISTS', KEYS[1])
+    redis.call('ZADD', KEYS[1], 1, 'm')
+    redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, 2)
+    return {after_hdel, after_srem, after_zrem, redis.call('EXISTS', KEYS[1])}
+    """
+    assert await r.eval(script, 1, "k") == [0, 0, 0, 0]
+    assert await r.get("k") is None
+
+
 # --- LUA-04: SCRIPT LOAD ---
 
 
