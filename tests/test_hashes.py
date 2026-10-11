@@ -128,6 +128,15 @@ async def test_hdel_wrongtype(r):
         await r.hdel("strkey", "field")
 
 
+async def test_hdel_last_field_removes_the_key(r):
+    """Redis never keeps an empty hash: the key goes with its last field."""
+    await r.hset("k", "f", "v")
+    assert await r.hdel("k", "f") == 1
+    assert await r.exists("k") == 0
+    # the name is free for another type
+    assert await r.get("k") is None
+
+
 # --- HASH-04: HVALS ---
 
 

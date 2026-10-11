@@ -356,3 +356,25 @@ async def test_zremrangebyscore_wrongtype(r):
     await r.set("strkey", "value")
     with pytest.raises(Exception, match="WRONGTYPE"):
         await r.zremrangebyscore("strkey", 0.0, 10.0)
+
+
+async def test_zrem_last_member_removes_the_key(r):
+    """Redis never keeps an empty sorted set: the key goes with its last member."""
+    await r.zadd("k", {"m": 1.0})
+    assert await r.zrem("k", "m") == 1
+    assert await r.exists("k") == 0
+    # the name is free for another type
+    assert await r.get("k") is None
+
+
+async def test_zremrangebyscore_last_member_removes_the_key(r):
+    await r.zadd("k", {"a": 1.0, "b": 2.0})
+    assert await r.zremrangebyscore("k", 0.0, 10.0) == 2
+    assert await r.exists("k") == 0
+    assert await r.get("k") is None
+
+
+async def test_zadd_xx_on_a_missing_key_creates_nothing(r):
+    assert await r.zadd("k", {"m": 1.0}, xx=True) == 0
+    assert await r.exists("k") == 0
+    assert await r.get("k") is None
