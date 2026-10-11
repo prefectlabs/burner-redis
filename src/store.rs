@@ -286,6 +286,23 @@ impl PubSubRegistry {
     }
 }
 
+/// The value HINCRBY stores: an absent field counts from 0, a field that is
+/// not an integer is an error, and so is leaving the range of an i64.
+pub(crate) fn hincrby_value(current: Option<&Bytes>, increment: i64) -> Result<i64, StoreError> {
+    let current = match current {
+        None => 0,
+        // like Redis, take only the form an integer is printed in: no
+        // leading '+', zeros or spaces
+        Some(value) => std::str::from_utf8(value)
+            .ok()
+            .and_then(|text| text.parse::<i64>().ok().filter(|n| n.to_string() == text))
+            .ok_or_else(|| StoreError::Syntax("ERR hash value is not an integer".to_string()))?,
+    };
+    current
+        .checked_add(increment)
+        .ok_or_else(|| StoreError::Syntax("ERR increment or decrement would overflow".to_string()))
+}
+
 pub struct Store {
     data: RwLock<HashMap<Bytes, ValueEntry>>,
     scripts: RwLock<HashMap<String, String>>,
@@ -710,11 +727,7 @@ impl Store {
 
         match entry.data {
             ValueData::Hash(ref mut map) => {
-                let current = map
-                    .get(&field)
-                    .and_then(|v| String::from_utf8_lossy(v).parse::<i64>().ok())
-                    .unwrap_or(0);
-                let new_val = current + increment;
+                let new_val = hincrby_value(map.get(&field), increment)?;
                 map.insert(field, Bytes::from(new_val.to_string()));
                 Ok(new_val)
             }
@@ -4000,6 +4013,68 @@ mod tests {
         let store = Store::new();
         let vals = store.hvals(&Bytes::from("no_key")).unwrap();
         assert!(vals.is_empty());
+    }
+
+    // ── HINCRBY errors ───────────────────────────────────────────────
+
+    #[test]
+    fn test_hincrby_refuses_a_field_that_is_not_an_integer() {
+        let store = Store::new();
+        let (key, field) = (Bytes::from("key"), Bytes::from("field"));
+        // Redis only counts from the canonical form of an integer
+        for value in ["v0", "+5", "05", "-0", " 5", ""] {
+            store
+                .hset(key.clone(), vec![(field.clone(), Bytes::from(value))])
+                .unwrap();
+            let err = store.hincrby(key.clone(), field.clone(), 1).unwrap_err();
+            assert_eq!(err.to_string(), "ERR hash value is not an integer", "{value:?}");
+            assert_eq!(store.hget(&key, &field), Ok(Some(Bytes::from(value))));
+        }
+    }
+
+    #[test]
+    fn test_hincrby_refuses_to_overflow() {
+        let store = Store::new();
+        let (key, field) = (Bytes::from("key"), Bytes::from("field"));
+        assert_eq!(store.hincrby(key.clone(), field.clone(), i64::MAX), Ok(i64::MAX));
+
+        let err = store.hincrby(key.clone(), field.clone(), 1).unwrap_err();
+        assert_eq!(err.to_string(), "ERR increment or decrement would overflow");
+        assert_eq!(
+            store.hget(&key, &field),
+            Ok(Some(Bytes::from(i64::MAX.to_string())))
+        );
+    }
+
+    #[test]
+    fn test_lua_hincrby_reports_the_same_errors() {
+        let store = Store::new();
+        let script = "
+            redis.call('HSET', KEYS[1], 'word', 'v0', 'big', '9223372036854775807')
+            local word = redis.pcall('HINCRBY', KEYS[1], 'word', 1)
+            local big = redis.pcall('HINCRBY', KEYS[1], 'big', 1)
+            return {word.err, big.err, redis.call('HGET', KEYS[1], 'word'), redis.call('HGET', KEYS[1], 'big')}
+        ";
+        let reply = store.eval(script, vec![Bytes::from("key")], vec![]).unwrap();
+        let RedisValue::Array(parts) = reply else {
+            panic!("unexpected reply: {reply:?}")
+        };
+        let text: Vec<String> = parts
+            .iter()
+            .map(|part| match part {
+                RedisValue::BulkString(bytes) => String::from_utf8_lossy(bytes).to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            text,
+            [
+                "ERR hash value is not an integer",
+                "ERR increment or decrement would overflow",
+                "v0",
+                "9223372036854775807"
+            ]
+        );
     }
 
     // ── Set Tests ────────────────────────────────────────────────────
