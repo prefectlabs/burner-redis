@@ -40,6 +40,7 @@ jobs:
           source .venv/bin/activate
           maturin develop --release
 
+      # docket is a monorepo; the Python package and its tests are in python/
       - name: Checkout pydocket
         uses: actions/checkout@v4
         with:
@@ -50,12 +51,12 @@ jobs:
       - name: Install pydocket dependencies
         run: |
           source .venv/bin/activate
-          uv pip install -e "./pydocket[metrics]"
-          cd pydocket
+          uv pip install -e "./pydocket/python[metrics]"
+          cd pydocket/python
           uv pip install --group dev
 
       - name: Run pydocket tests
         run: |
           source .venv/bin/activate
-          cd pydocket
+          cd pydocket/python
           pytest tests/ -x --timeout=30 --numprocesses=logical --maxprocesses=4 --import-mode=importlib -o "addopts="

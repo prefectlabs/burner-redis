@@ -3,6 +3,7 @@
 Covers requirements: EXP-01, EXP-02, EXP-03.
 """
 import asyncio
+from datetime import timedelta
 
 import pytest
 from burner_redis import BurnerRedis
@@ -151,6 +152,53 @@ async def test_multiple_instances_have_independent_sweep(r):
     # Both instances should have swept their own expired keys
     assert await r.exists("r1-key") == 0
     assert await r2.exists("r2-key") == 0
+
+
+async def test_expire_with_a_negative_time_deletes_the_key(r):
+    """expire() with a time that has already passed deletes the key, as Redis does."""
+    await r.set("gone", "value")
+    assert await r.expire("gone", -1) is True
+    assert await r.exists("gone") == 0
+    assert await r.expire("gone", -1) is False
+
+
+async def test_expire_with_a_time_of_zero_deletes_the_key(r):
+    await r.set("gone", "value")
+    assert await r.expire("gone", 0) is True
+    assert await r.exists("gone") == 0
+    assert await r.expire("gone", 0) is False
+
+
+async def test_expire_with_a_negative_timedelta_deletes_the_key(r):
+    await r.set("gone", "value")
+    assert await r.expire("gone", timedelta(seconds=-5)) is True
+    assert await r.exists("gone") == 0
+
+
+async def test_expire_with_a_negative_time_in_a_pipeline(r):
+    await r.set("gone", "value")
+    async with r.pipeline() as pipe:
+        pipe.expire("gone", -1)
+        pipe.exists("gone")
+        assert await pipe.execute() == [True, 0]
+
+
+async def test_expire_refuses_a_time_that_is_not_a_number(r):
+    await r.set("kept", "value")
+    with pytest.raises(TypeError, match="expire time must be int"):
+        await r.expire("kept", "soon")
+
+
+async def test_script_expire_with_a_negative_time_deletes_the_key(r):
+    script = """
+    redis.call('SET', KEYS[1], 'value')
+    local expired = redis.call('EXPIRE', KEYS[1], -1)
+    local missing = redis.call('EXPIRE', KEYS[1], -1)
+    redis.call('SET', KEYS[1], 'value')
+    local pexpired = redis.call('PEXPIRE', KEYS[1], -1)
+    return {expired, missing, pexpired, redis.call('EXISTS', KEYS[1])}
+    """
+    assert await r.eval(script, 1, "gone") == [1, 0, 1, 0]
 
 
 # ---- TTL Command Tests (D-10) ----
