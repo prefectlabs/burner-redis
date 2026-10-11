@@ -493,3 +493,23 @@ async def test_script_exists_after_eval(r):
     sha = hashlib.sha1(script.encode()).hexdigest()
     result = await r.script_exists(sha)
     assert result == [True]
+
+
+@pytest.mark.parametrize("value", ["nil", "false", "true", "{}"])
+async def test_redis_call_refuses_an_argument_that_is_not_a_string_or_number(r, value):
+    """A nil, boolean or table passed to redis.call fails the script, as in Redis."""
+    script = f"return redis.call('HSET', KEYS[1], 'field', {value})"
+    with pytest.raises(
+        Exception, match="Lua redis lib command arguments must be strings or integers"
+    ):
+        await r.eval(script, 1, "k")
+    assert await r.exists("k") == 0
+
+
+async def test_redis_pcall_returns_the_argument_error(r):
+    script = "return redis.pcall('HSET', KEYS[1], 'field', nil).err"
+    assert (
+        await r.eval(script, 1, "k")
+        == b"ERR Lua redis lib command arguments must be strings or integers"
+    )
+    assert await r.exists("k") == 0
