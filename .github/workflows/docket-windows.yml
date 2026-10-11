@@ -36,18 +36,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # docket is a uv workspace whose root pyproject.toml already has a
+      # [tool.uv.sources] table, so add to it; a second table of the same
+      # name does not parse. The Python package is the python/ member.
       - name: Override docket's burner-redis dependency
         shell: bash
         working-directory: docket
         run: |
-          cat >> pyproject.toml <<'EOF'
-
-          [tool.uv.sources]
-          burner-redis = { path = "../burner-redis" }
-          EOF
+          grep -q '^\[tool\.uv\.sources\]' pyproject.toml
+          sed -i '/^\[tool\.uv\.sources\]/a burner-redis = { path = "../burner-redis" }' pyproject.toml
 
       - name: Install docket dependencies
-        working-directory: docket
+        working-directory: docket/python
         run: uv sync --upgrade-package 'redis>=5'
 
       # A crashed pytest-xdist worker discards its own stdout, so a native
@@ -66,7 +66,7 @@ jobs:
       - name: Run tests
         env:
           REDIS_VERSION: memory
-        working-directory: docket
+        working-directory: docket/python
         run: >
           uv run pytest --ignore=tests/cli
           --import-mode=importlib
