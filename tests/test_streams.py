@@ -1455,3 +1455,15 @@ async def test_xpending_summary_empty(r):
     assert result["min"] is None
     assert result["max"] is None
     assert result["consumers"] == []
+
+
+# ---- XRANGE ----
+
+
+async def test_xrange_with_min_above_max_is_empty(r):
+    """xrange() with min above max returns nothing, as Redis does."""
+    await r.xadd("mystream", {"f": "v"}, id="1-1")
+    assert await r.xrange("mystream", "2-0", "1-2") == []
+    async with r.pipeline() as pipe:
+        pipe.xrange("mystream", "2-0", "1-2")
+        assert await pipe.execute() == [[]]
