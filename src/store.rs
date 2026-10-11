@@ -1506,6 +1506,10 @@ impl Store {
             None => Ok(Vec::new()),
             Some(entry) => match &entry.data {
                 ValueData::Stream(stream) => {
+                    // BTreeMap::range panics on an inverted range
+                    if min > max {
+                        return Ok(Vec::new());
+                    }
                     let entries: Vec<(StreamId, HashMap<Bytes, Bytes>)> = stream
                         .entries
                         .range(min..=max)
@@ -4925,6 +4929,22 @@ mod tests {
         assert_eq!(consumers.len(), 1);
         assert_eq!(consumers[0].0, Bytes::from("consumer1"));
         assert_eq!(consumers[0].1, 2);
+    }
+
+    // ── XRANGE with an inverted range ────────────────────────────────
+
+    #[test]
+    fn test_xrange_with_min_above_max_is_empty() {
+        let store = Store::new();
+        let key = Bytes::from("stream");
+        store
+            .xadd(
+                key.clone(),
+                HashMap::from([(Bytes::from("f"), Bytes::from("v"))]),
+                Some((1, 1)),
+            )
+            .unwrap();
+        assert_eq!(store.xrange(&key, (2, 0), (1, 2), None), Ok(Vec::new()));
     }
 
     // ── Shutdown Tests ──────────────────────────────────────────────
