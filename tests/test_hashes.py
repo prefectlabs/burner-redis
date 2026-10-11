@@ -156,3 +156,33 @@ async def test_hvals_wrongtype(r):
     await r.set("strkey", "value")
     with pytest.raises(Exception, match="WRONGTYPE"):
         await r.hvals("strkey")
+
+
+# ---- HINCRBY ----
+
+
+async def test_hincrby_counts_from_zero_and_from_an_integer(r):
+    assert await r.hincrby("h", "n", 5) == 5
+    assert await r.hincrby("h", "n", -7) == -2
+    assert await r.hget("h", "n") == b"-2"
+
+
+async def test_hincrby_refuses_a_field_that_is_not_an_integer(r):
+    """HINCRBY on a field that is not an integer is an error and leaves the field alone."""
+    await r.hset("h", "word", "v0")
+    with pytest.raises(Exception, match="ERR hash value is not an integer"):
+        await r.hincrby("h", "word", 1)
+    assert await r.hget("h", "word") == b"v0"
+
+
+async def test_hincrby_refuses_to_overflow(r):
+    """HINCRBY past the range of a 64-bit integer is an error and leaves the field alone."""
+    await r.hset("h", "big", str(2**63 - 1))
+    with pytest.raises(Exception, match="ERR increment or decrement would overflow"):
+        await r.hincrby("h", "big", 1)
+    assert await r.hget("h", "big") == str(2**63 - 1).encode()
+
+    await r.hset("h", "small", str(-(2**63)))
+    with pytest.raises(Exception, match="ERR increment or decrement would overflow"):
+        await r.hincrby("h", "small", -1)
+    assert await r.hget("h", "small") == str(-(2**63)).encode()

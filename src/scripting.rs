@@ -731,13 +731,13 @@ fn dispatch_command_inner(
             let entry = data.entry(key).or_insert_with(ValueEntry::new_hash);
             match entry.data {
                 ValueData::Hash(ref mut map) => {
-                    let current = map
-                        .get(field)
-                        .and_then(|v| String::from_utf8_lossy(v).parse::<i64>().ok())
-                        .unwrap_or(0);
-                    let new_val = current + increment;
-                    map.insert(field.clone(), Bytes::from(new_val.to_string()));
-                    Ok(RedisValue::Integer(new_val))
+                    match crate::store::hincrby_value(map.get(field), increment) {
+                        Ok(new_val) => {
+                            map.insert(field.clone(), Bytes::from(new_val.to_string()));
+                            Ok(RedisValue::Integer(new_val))
+                        }
+                        Err(err) => Ok(RedisValue::Error(err.to_string())),
+                    }
                 }
                 _ => Ok(RedisValue::Error(
                     "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
