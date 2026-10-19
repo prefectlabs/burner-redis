@@ -1279,7 +1279,7 @@ fn dispatch_command_inner(
                 ));
             }
             let key = &args[0];
-            let seconds: u64 = String::from_utf8_lossy(&args[1])
+            let seconds: i64 = String::from_utf8_lossy(&args[1])
                 .parse()
                 .map_err(|_| "ERR value is not an integer or out of range".to_string())?;
 
@@ -1291,11 +1291,15 @@ fn dispatch_command_inner(
                 }
             }
 
+            // a time of zero or less deletes the key
+            if seconds <= 0 {
+                return Ok(RedisValue::Integer(data.remove(key).is_some() as i64));
+            }
             match data.get_mut(key) {
                 None => Ok(RedisValue::Integer(0)),
                 Some(entry) => {
                     entry.expires_at =
-                        Some(std::time::Instant::now() + Duration::from_secs(seconds));
+                        Some(std::time::Instant::now() + Duration::from_secs(seconds as u64));
                     Ok(RedisValue::Integer(1))
                 }
             }
@@ -1308,7 +1312,7 @@ fn dispatch_command_inner(
                 ));
             }
             let key = &args[0];
-            let ms: u64 = String::from_utf8_lossy(&args[1])
+            let ms: i64 = String::from_utf8_lossy(&args[1])
                 .parse()
                 .map_err(|_| "ERR value is not an integer or out of range".to_string())?;
 
@@ -1320,11 +1324,15 @@ fn dispatch_command_inner(
                 }
             }
 
+            // a time of zero or less deletes the key
+            if ms <= 0 {
+                return Ok(RedisValue::Integer(data.remove(key).is_some() as i64));
+            }
             match data.get_mut(key) {
                 None => Ok(RedisValue::Integer(0)),
                 Some(entry) => {
                     entry.expires_at =
-                        Some(std::time::Instant::now() + Duration::from_millis(ms));
+                        Some(std::time::Instant::now() + Duration::from_millis(ms as u64));
                     Ok(RedisValue::Integer(1))
                 }
             }

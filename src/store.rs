@@ -1261,7 +1261,8 @@ impl Store {
 
     /// EXPIRE: Set a timeout on a key in seconds. Returns true if the key exists and timeout was set.
     /// Returns false if the key does not exist.
-    pub fn expire(&self, key: &Bytes, seconds: u64) -> bool {
+    /// A time of zero or less deletes the key, as in Redis.
+    pub fn expire(&self, key: &Bytes, seconds: i64) -> bool {
         let mut data = self.data.write();
 
         // Passive expiration
@@ -1272,10 +1273,14 @@ impl Store {
             }
         }
 
+        if seconds <= 0 {
+            return data.remove(key).is_some();
+        }
         match data.get_mut(key) {
             None => false,
             Some(entry) => {
-                entry.expires_at = Some(std::time::Instant::now() + Duration::from_secs(seconds));
+                entry.expires_at =
+                    Some(std::time::Instant::now() + Duration::from_secs(seconds as u64));
                 true
             }
         }
@@ -4970,6 +4975,51 @@ mod tests {
         let removed = store.sweep_expired();
         assert!(removed <= 20, "sweep should remove at most 20 keys, removed {}", removed);
         assert!(removed > 0, "sweep should remove some expired keys");
+    }
+
+    // ── EXPIRE with a time that has passed ───────────────────────────
+
+    #[test]
+    fn test_expire_with_a_time_of_zero_or_less_deletes_the_key() {
+        let store = Store::new();
+        let key = Bytes::from("key");
+        for seconds in [-1, 0] {
+            store.set(key.clone(), Bytes::from("value"), None, false, false);
+            assert!(store.expire(&key, seconds));
+            // gone from the keyspace, not just hidden until the next sweep
+            assert!(!store.data.read().contains_key(&key));
+            assert!(!store.expire(&key, seconds));
+        }
+    }
+
+    #[test]
+    fn test_lua_expire_with_a_time_of_zero_or_less_deletes_the_key() {
+        let store = Store::new();
+        let script = "
+            local replies = {}
+            for _, command in ipairs({'EXPIRE', 'PEXPIRE'}) do
+                for _, time in ipairs({-1, 0}) do
+                    redis.call('SET', KEYS[1], 'value')
+                    table.insert(replies, redis.call(command, KEYS[1], time))
+                    table.insert(replies, redis.call('EXISTS', KEYS[1]))
+                    table.insert(replies, redis.call(command, KEYS[1], time))
+                end
+            end
+            return replies
+        ";
+        let reply = store.eval(script, vec![Bytes::from("key")], vec![]).unwrap();
+        let RedisValue::Array(parts) = reply else {
+            panic!("unexpected reply: {reply:?}")
+        };
+        let integers: Vec<i64> = parts
+            .iter()
+            .map(|part| match part {
+                RedisValue::Integer(n) => *n,
+                other => panic!("unexpected reply: {other:?}"),
+            })
+            .collect();
+        assert_eq!(integers, [1, 0, 0].repeat(4));
+        assert!(!store.data.read().contains_key(&Bytes::from("key")));
     }
 
     // ── keys() tests ────────────────────────────────────────────────

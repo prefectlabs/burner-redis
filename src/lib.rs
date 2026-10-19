@@ -350,6 +350,21 @@ fn normalize_key_list(keys: &Bound<'_, PyAny>) -> PyResult<Vec<Bytes>> {
     Ok(vec![extract_bytes(keys)?])
 }
 
+/// The time given to `expire()`, in whole seconds: an int, or a timedelta
+/// truncated as redis-py truncates it. It may be zero or negative, which
+/// deletes the key.
+fn expire_seconds(time: &Bound<'_, PyAny>) -> PyResult<i64> {
+    if let Ok(seconds) = time.extract::<i64>() {
+        return Ok(seconds);
+    }
+    match time.getattr("total_seconds").and_then(|method| method.call0()) {
+        Ok(total) => Ok(total.extract::<f64>()? as i64),
+        Err(_) => Err(pyo3::exceptions::PyTypeError::new_err(
+            "expire time must be int (seconds) or timedelta",
+        )),
+    }
+}
+
 /// Convert a redis-py timeout value (None | 0 | positive float seconds) to milliseconds.
 /// None or 0 → 0 (block forever). Negative → PyValueError.
 ///
@@ -947,18 +962,7 @@ impl BurnerRedis {
     ) -> PyResult<Bound<'py, PyAny>> {
         let name_bytes = extract_bytes(name)?;
 
-        // Accept int or timedelta
-        let seconds: u64 = if let Ok(secs) = time.extract::<u64>() {
-            secs
-        } else if let Ok(secs_f64) = time.call_method0("total_seconds")?.extract::<f64>() {
-            secs_f64.max(0.0) as u64
-        } else {
-            return Err(pyo3::exceptions::PyTypeError::new_err(
-                "expire time must be int (seconds) or timedelta",
-            ));
-        };
-
-        let result = self.store.expire(&name_bytes, seconds);
+        let result = self.store.expire(&name_bytes, expire_seconds(time)?);
         resolved(py, pyo3::types::PyBool::new(py, result).to_owned().into_any().unbind())
     }
 
@@ -3192,14 +3196,7 @@ impl BurnerRedis {
                 let name = &args.get_item(0)?;
                 let time = &args.get_item(1)?;
                 let name_bytes = extract_bytes(name)?;
-                let seconds: u64 = if let Ok(secs) = time.extract::<u64>() {
-                    secs
-                } else if let Ok(secs_f64) = time.call_method0("total_seconds")?.extract::<f64>() {
-                    secs_f64.max(0.0) as u64
-                } else {
-                    return Err(pyo3::exceptions::PyTypeError::new_err("expire time must be int (seconds) or timedelta"));
-                };
-                let result = self.store.expire(&name_bytes, seconds);
+                let result = self.store.expire(&name_bytes, expire_seconds(time)?);
                 Ok(pyo3::types::PyBool::new(py, result).to_owned().into_any().unbind())
             }
             "xadd" => {
