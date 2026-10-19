@@ -5739,4 +5739,52 @@ mod tests {
         let err = store.blpop_poll(&keys).unwrap_err();
         assert!(matches!(err, StoreError::WrongType));
     }
+    // ── Lua arguments that are not strings or numbers ────────────────
+
+    #[test]
+    fn test_lua_call_refuses_an_argument_that_is_not_a_string_or_number() {
+        let store = Store::new();
+        let key = Bytes::from("key");
+        for value in ["nil", "false", "true", "{}"] {
+            let script = format!("return redis.call('HSET', KEYS[1], 'field', {value})");
+            let err = store.eval(&script, vec![key.clone()], vec![]).unwrap_err();
+            assert!(
+                err.contains("ERR Lua redis lib command arguments must be strings or integers"),
+                "{value}: {err}"
+            );
+            assert_eq!(store.exists(std::slice::from_ref(&key)), 0, "{value}");
+        }
+    }
+
+    #[test]
+    fn test_lua_pcall_returns_the_argument_error() {
+        let store = Store::new();
+        let key = Bytes::from("key");
+        let reply = store
+            .eval(
+                "return redis.pcall('HSET', KEYS[1], 'field', nil).err",
+                vec![key.clone()],
+                vec![],
+            )
+            .unwrap();
+        assert!(
+            matches!(reply, RedisValue::BulkString(ref text) if text.as_ref() == b"ERR Lua redis lib command arguments must be strings or integers"),
+            "{reply:?}"
+        );
+        assert_eq!(store.exists(&[key]), 0);
+    }
+
+    #[test]
+    fn test_lua_call_still_takes_strings_and_numbers() {
+        let store = Store::new();
+        let key = Bytes::from("key");
+        store
+            .eval("return redis.call('SET', KEYS[1], 1.5)", vec![key.clone()], vec![])
+            .unwrap();
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("1.5"))));
+        store
+            .eval("return redis.call('SET', KEYS[1], 3)", vec![key.clone()], vec![])
+            .unwrap();
+        assert_eq!(store.get(&key), Ok(Some(Bytes::from("3"))));
+    }
 }
