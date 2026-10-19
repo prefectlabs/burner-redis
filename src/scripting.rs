@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::broadcast;
 
-use crate::store::{PubSubMessage, ValueData, ValueEntry};
+use crate::store::{PubSubMessage, ValueData, ValueEntry, remove_if_empty};
 use std::collections::VecDeque;
 
 /// Represents a Redis command return value for Lua-Redis type conversion.
@@ -584,7 +584,7 @@ fn dispatch_command_inner(
                 }
             }
 
-            match data.get_mut(key) {
+            let reply = match data.get_mut(key) {
                 None => Ok(RedisValue::Integer(0)),
                 Some(entry) => match entry.data {
                     ValueData::Hash(ref mut map) => {
@@ -601,7 +601,9 @@ fn dispatch_command_inner(
                             .to_string(),
                     )),
                 },
-            }
+            };
+            remove_if_empty(data, key);
+            reply
         }
 
         "HVALS" => {
@@ -863,7 +865,7 @@ fn dispatch_command_inner(
                 }
             }
 
-            match data.get_mut(key) {
+            let reply = match data.get_mut(key) {
                 None => Ok(RedisValue::Integer(0)),
                 Some(entry) => match entry.data {
                     ValueData::Set(ref mut set) => {
@@ -880,7 +882,9 @@ fn dispatch_command_inner(
                             .to_string(),
                     )),
                 },
-            }
+            };
+            remove_if_empty(data, key);
+            reply
         }
 
         // ── Sorted set commands ──────────────────────────────────────
@@ -942,7 +946,7 @@ fn dispatch_command_inner(
                 }
             }
 
-            match data.get_mut(key) {
+            let reply = match data.get_mut(key) {
                 None => Ok(RedisValue::Integer(0)),
                 Some(entry) => match entry.data {
                     ValueData::SortedSet(ref mut zset) => {
@@ -959,7 +963,9 @@ fn dispatch_command_inner(
                             .to_string(),
                     )),
                 },
-            }
+            };
+            remove_if_empty(data, key);
+            reply
         }
 
         "ZRANGE" => {
@@ -1165,7 +1171,7 @@ fn dispatch_command_inner(
                 }
             }
 
-            match data.get_mut(key) {
+            let reply = match data.get_mut(key) {
                 None => Ok(RedisValue::Integer(0)),
                 Some(entry) => match entry.data {
                     ValueData::SortedSet(ref mut zset) => {
@@ -1200,7 +1206,9 @@ fn dispatch_command_inner(
                             .to_string(),
                     )),
                 },
-            }
+            };
+            remove_if_empty(data, key);
+            reply
         }
 
         "ZCARD" => {

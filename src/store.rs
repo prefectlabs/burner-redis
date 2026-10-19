@@ -194,6 +194,21 @@ impl ValueEntry {
     }
 }
 
+/// Redis never keeps an empty hash, set, sorted set or list: the key goes
+/// with its last element. A stream stays when it is emptied.
+pub(crate) fn remove_if_empty(data: &mut HashMap<Bytes, ValueEntry>, key: &Bytes) {
+    let empty = match data.get(key).map(|entry| &entry.data) {
+        Some(ValueData::Hash(map)) => map.is_empty(),
+        Some(ValueData::Set(set)) => set.is_empty(),
+        Some(ValueData::SortedSet(zset)) => zset.len() == 0,
+        Some(ValueData::List(list)) => list.is_empty(),
+        _ => false,
+    };
+    if empty {
+        data.remove(key);
+    }
+}
+
 /// Errors that can occur during store operations.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum StoreError {
@@ -623,7 +638,7 @@ impl Store {
             }
         }
 
-        match data.get_mut(key) {
+        let result = match data.get_mut(key) {
             None => Ok(0),
             Some(entry) => match entry.data {
                 ValueData::Hash(ref mut map) => {
@@ -637,7 +652,9 @@ impl Store {
                 }
                 _ => Err(StoreError::WrongType),
             },
-        }
+        };
+        remove_if_empty(&mut data, key);
+        result
     }
 
     /// HVALS: Returns all values in a hash.
@@ -828,7 +845,7 @@ impl Store {
             }
         }
 
-        match data.get_mut(key) {
+        let result = match data.get_mut(key) {
             None => Ok(0),
             Some(entry) => match entry.data {
                 ValueData::Set(ref mut set) => {
@@ -842,7 +859,9 @@ impl Store {
                 }
                 _ => Err(StoreError::WrongType),
             },
-        }
+        };
+        remove_if_empty(&mut data, key);
+        result
     }
 
     // ── Sorted Set Operations ─────────────────────────────────────────
@@ -871,10 +890,10 @@ impl Store {
         }
 
         let entry = data
-            .entry(key)
+            .entry(key.clone())
             .or_insert_with(ValueEntry::new_sorted_set);
 
-        match entry.data {
+        let result = match entry.data {
             ValueData::SortedSet(ref mut zset) => {
                 let mut added = 0i64;
                 let mut changed = 0i64;
@@ -911,7 +930,10 @@ impl Store {
                 if ch { Ok(changed) } else { Ok(added) }
             }
             _ => Err(StoreError::WrongType),
-        }
+        };
+        // XX on a key that did not exist adds nothing
+        remove_if_empty(&mut data, &key);
+        result
     }
 
     /// ZREM: Removes members from a sorted set. Returns count of members removed.
@@ -928,7 +950,7 @@ impl Store {
             }
         }
 
-        match data.get_mut(key) {
+        let result = match data.get_mut(key) {
             None => Ok(0),
             Some(entry) => match entry.data {
                 ValueData::SortedSet(ref mut zset) => {
@@ -942,7 +964,9 @@ impl Store {
                 }
                 _ => Err(StoreError::WrongType),
             },
-        }
+        };
+        remove_if_empty(&mut data, key);
+        result
     }
 
     /// ZRANGE: Returns members by index range (0-based, supports negative indices).
@@ -1130,7 +1154,7 @@ impl Store {
             }
         }
 
-        match data.get_mut(key) {
+        let result = match data.get_mut(key) {
             None => Ok(0),
             Some(entry) => match entry.data {
                 ValueData::SortedSet(ref mut zset) => {
@@ -1151,7 +1175,9 @@ impl Store {
                 }
                 _ => Err(StoreError::WrongType),
             },
-        }
+        };
+        remove_if_empty(&mut data, key);
+        result
     }
 
     /// ZCARD: Returns the cardinality (member count) of a sorted set.
@@ -4770,6 +4796,89 @@ mod tests {
         store.set(key.clone(), Bytes::from("val"), None, false, false);
         let result = store.zremrangebyscore(&key, 0.0, 10.0);
         assert!(matches!(result, Err(StoreError::WrongType)));
+    }
+
+    // ── Keys left empty ──────────────────────────────────────────────
+
+    #[test]
+    fn test_removing_the_last_member_removes_the_key() {
+        let store = Store::new();
+        let (key, member) = (Bytes::from("key"), Bytes::from("member"));
+
+        store
+            .hset(key.clone(), vec![(member.clone(), Bytes::from("v"))])
+            .unwrap();
+        assert_eq!(store.hdel(&key, std::slice::from_ref(&member)), Ok(1));
+        assert_eq!(store.exists(std::slice::from_ref(&key)), 0);
+
+        store.sadd(key.clone(), vec![member.clone()]).unwrap();
+        assert_eq!(store.srem(&key, std::slice::from_ref(&member)), Ok(1));
+        assert_eq!(store.exists(std::slice::from_ref(&key)), 0);
+
+        store
+            .zadd(key.clone(), vec![(1.0, member.clone())], false, false, false, false, false)
+            .unwrap();
+        assert_eq!(store.zrem(&key, std::slice::from_ref(&member)), Ok(1));
+        assert_eq!(store.exists(std::slice::from_ref(&key)), 0);
+
+        store
+            .zadd(key.clone(), vec![(1.0, member.clone())], false, false, false, false, false)
+            .unwrap();
+        assert_eq!(store.zremrangebyscore(&key, 0.0, 2.0), Ok(1));
+        assert_eq!(store.exists(std::slice::from_ref(&key)), 0);
+        // the key is free for another type again
+        assert_eq!(store.get(&key), Ok(None));
+    }
+
+    #[test]
+    fn test_removing_some_members_keeps_the_key() {
+        let store = Store::new();
+        let key = Bytes::from("key");
+        store
+            .sadd(key.clone(), vec![Bytes::from("a"), Bytes::from("b")])
+            .unwrap();
+        assert_eq!(store.srem(&key, &[Bytes::from("a")]), Ok(1));
+        assert_eq!(store.exists(&[key]), 1);
+    }
+
+    #[test]
+    fn test_zadd_xx_on_a_missing_key_creates_nothing() {
+        let store = Store::new();
+        let key = Bytes::from("key");
+        assert_eq!(
+            store.zadd(key.clone(), vec![(1.0, Bytes::from("member"))], false, true, false, false, false),
+            Ok(0)
+        );
+        assert_eq!(store.exists(std::slice::from_ref(&key)), 0);
+        assert_eq!(store.get(&key), Ok(None));
+    }
+
+    #[test]
+    fn test_lua_removing_the_last_member_removes_the_key() {
+        let store = Store::new();
+        let key = Bytes::from("key");
+        let script = "
+            redis.call('HSET', KEYS[1], 'f', 'v')
+            redis.call('HDEL', KEYS[1], 'f')
+            local after_hdel = redis.call('EXISTS', KEYS[1])
+            redis.call('SADD', KEYS[1], 'm')
+            redis.call('SREM', KEYS[1], 'm')
+            local after_srem = redis.call('EXISTS', KEYS[1])
+            redis.call('ZADD', KEYS[1], 1, 'm')
+            redis.call('ZREM', KEYS[1], 'm')
+            local after_zrem = redis.call('EXISTS', KEYS[1])
+            redis.call('ZADD', KEYS[1], 1, 'm')
+            redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, 2)
+            return {after_hdel, after_srem, after_zrem, redis.call('EXISTS', KEYS[1])}
+        ";
+        let reply = store.eval(script, vec![key], vec![]).unwrap();
+        let RedisValue::Array(counts) = reply else {
+            panic!("unexpected reply: {reply:?}")
+        };
+        assert!(
+            counts.iter().all(|count| matches!(count, RedisValue::Integer(0))),
+            "{counts:?}"
+        );
     }
 
     // ── GET on SortedSet returns WRONGTYPE ──────────────────────────

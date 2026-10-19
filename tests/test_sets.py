@@ -137,3 +137,13 @@ async def test_srem_wrongtype(r):
     await r.set("strkey", "value")
     with pytest.raises(Exception, match="WRONGTYPE"):
         await r.srem("strkey", "member")
+
+
+async def test_srem_last_member_removes_the_key(r):
+    """Redis never keeps an empty set: the key goes with its last member."""
+    await r.sadd("k", "m")
+    assert await r.srem("k", "m") == 1
+    assert await r.exists("k") == 0
+    assert await r.keys("*") == []
+    # the name is free for another type
+    assert await r.get("k") is None
